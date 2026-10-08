@@ -580,6 +580,31 @@ fn settle_collecting(
             metas.solve_term(meta, solution);
             continue;
         }
+        // Факт ограничения `{d /= 0} =>` (§3.7): сперва вычисление, потом
+        // гипотеза контекста. Утверждение с нерешённой дыркой ждёт её решения -
+        // словарь `/=` и тип литерала решает этот же цикл.
+        if let Some(claim) = adamas_core::check::claim_of(signature, &goal) {
+            if unsolved_term_meta(metas, &ty).is_some() {
+                passed.push(meta);
+                waiting.push(meta);
+                continue;
+            }
+            let solution = if computes(signature, metas, &ty, claim) {
+                let binders = binders_of(&ty);
+                let proof = abstracted(&binders, adamas_core::check::evident(signature));
+                Some(adamas_core::eval::eval(
+                    &adamas_core::value::Env::default(),
+                    &proof,
+                ))
+            } else {
+                from_context(signature, metas, instances, &ty)
+            };
+            let Some(solution) = solution else {
+                return Err(unproven(&ty, claim, span));
+            };
+            metas.solve_term(meta, solution);
+            continue;
+        }
         // Дырка не про класс - её сюда и не звали: решить её могла только
         // унификация, и о том, что не решила, скажет объявление. Ранний проход
         // берёт только замкнутые цели ([`resolve_ground`]).
@@ -969,11 +994,59 @@ fn requeued(
     true
 }
 
+/// Сводится ли утверждение факта вычислением к `True` (§3.7, шаг первый).
+///
+/// Вычисление - с разворотом определений: `2 /= 0` есть метод инстанса, и
+/// нормальная форма цели его не раскрывает.
+fn computes(signature: &Signature, metas: &Metas, ty: &Term, claim: &Term) -> bool {
+    let mut ctx = adamas_core::ctx::Ctx::new(signature);
+    for (mult, name, domain) in binders_of(ty) {
+        let value = ctx.eval(&domain);
+        ctx = ctx.bind(name, mult, value);
+    }
+    let value = adamas_core::conv::whnf_solved(signature, metas, &ctx.eval(claim));
+    // Свёртка сравнения литералов ставит голое `True` (`compared` в ядре), а
+    // определения прелюдии - имя по соглашению: годится любое.
+    matches!(&quote(ctx.size(), &value), Term::Const(name, _, _)
+        if &**name == adamas_core::prim::TRUE
+            || **name == *signature.convention(adamas_core::prim::TRUE))
+}
+
+/// Отказ недоказанного факта. Телескоп его - гипотезы, среди которых искали:
+/// печать покажет их тем же «в контексте», что у отказа ядра.
+fn unproven(ty: &Term, claim: &Term, span: Span) -> ElabError {
+    let context = binders_of(ty)
+        .into_iter()
+        .map(|(_, name, domain)| adamas_core::error::Binding {
+            name,
+            // Телескоп дырки стёрт целиком (`fresh_meta`), и кратности связываний
+            // в нём нет: печатается умолчание.
+            mult: adamas_core::mult::Mult::Many,
+            ty: (*domain).clone(),
+        })
+        .collect();
+    ElabError::Core {
+        error: Box::new(adamas_core::error::TypeError::within(
+            adamas_core::error::ErrorKind::Unproven {
+                claim: claim.clone(),
+            },
+            context,
+        )),
+        span,
+        names: crate::error::Names::default(),
+    }
+}
+
 /// Определилась ли голова цели дырки - то, ради чего отложенная цель
 /// возвращается в очередь (§10 вопрос 240).
 fn known_head(signature: &Signature, metas: &Metas, meta: adamas_core::term::TermMeta) -> bool {
     let ty = zonk_term(metas, &quote(0, metas.term_type(meta)));
     let goal = normalized(signature, &ty);
+    // Факт ждёт не головы, а всех своих дырок: вычислять утверждение с дыркой
+    // внутри нечем.
+    if adamas_core::check::claim_of(signature, &goal).is_some() {
+        return unsolved_term_meta(metas, &ty).is_none();
+    }
     applied(signature, &goal).is_some_and(|(_, head)| !matches!(head, Head::Unknown))
 }
 

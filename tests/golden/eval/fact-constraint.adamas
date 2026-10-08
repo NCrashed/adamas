@@ -1,0 +1,19 @@
+-- Ограничение-факт `{d /= 0} =>` и доказательство, которое находит
+-- компилятор (§3.7).
+--
+-- Булево выражение на месте ограничения - сахар факта `Equal Bool (d /= 0)
+-- True`, параметр его стёрт. Доказательство ищется в два шага: вычислением
+-- (`share 84 2` - `2 /= 0` сводится к `True`) и гипотезой контекста (`wrap`
+-- берёт факт из своего ограничения). Ни один вызов `Refl` не пишет.
+
+share : (total : Int64) -> (count : Int64) -> {count /= 0} => Int64
+share total count = total - count
+
+wrap : (x : Int64) -> (d : Int64) -> {d /= 0} => Int64
+wrap x d = share x d + 1
+
+bounded : (low : Int64) -> (high : Int64) -> {low < high, high /= 0} => Int64
+bounded low high = share high high - low
+
+main : Int64
+main = wrap 84 2 + share 10 5 + bounded 1 3

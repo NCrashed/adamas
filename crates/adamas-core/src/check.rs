@@ -426,6 +426,37 @@ pub fn evident(signature: &Signature) -> Term {
     ])
 }
 
+/// `Equal Bool claim True` - ограничение-факт `{claim} =>` (§3.7): булево
+/// выражение на месте ограничения пишет утверждение, что оно истинно.
+#[must_use]
+pub fn fact(signature: &Signature, claim: Term) -> Term {
+    declared(signature, crate::prim::EQUAL).apply([
+        declared(signature, crate::prim::BOOL),
+        claim,
+        declared(signature, crate::prim::TRUE),
+    ])
+}
+
+/// Утверждение факта `Equal Bool claim True`, если `ty` - он. Имена сверяются
+/// соглашением, тем же, каким [`fact`] их ставит.
+#[must_use]
+pub fn claim_of<'t>(signature: &Signature, ty: &'t Term) -> Option<&'t Term> {
+    let Term::App(applied, verdict) = ty else {
+        return None;
+    };
+    let Term::App(applied, claim) = &**applied else {
+        return None;
+    };
+    let Term::App(equal, carrier) = &**applied else {
+        return None;
+    };
+    let named = |term: &Term, name: &str| matches!(term, Term::Const(it, _, _) if **it == *signature.convention(name));
+    (named(equal, crate::prim::EQUAL)
+        && named(carrier, crate::prim::BOOL)
+        && named(verdict, crate::prim::TRUE))
+    .then_some(&**claim)
+}
+
 /// Факт о примитиве отражением булевой проверки (§10 вопрос 225):
 /// `Equal Bool (cmpT left right) verdict`, где `verdict` - `True` либо `False`
 /// программы, взятые соглашением.

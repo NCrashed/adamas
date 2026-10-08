@@ -6275,7 +6275,33 @@ impl<'a> Elaborator<'a> {
                 let (term, rest) = self.inserted(term, rest);
                 (term, Some(rest))
             }
-            other => (term, other),
+            Some(rest) => {
+                let (term, rest) = self.facts(term, rest);
+                (term, Some(rest))
+            }
+            None => (term, None),
+        }
+    }
+
+    /// Факты, стоящие после написанных аргументов: `safeDiv x 2` при
+    /// `{d /= 0} =>` последним. Функцией от доказательства результат не
+    /// передают, и доказательство ищется на месте (§3.7).
+    fn facts(&mut self, mut term: Term, mut ty: Rc<Value>) -> (Term, Rc<Value>) {
+        loop {
+            let Value::Pi(binder, _, domain, _, codomain) = &*ty else {
+                return (term, ty);
+            };
+            let quoted = self.ctx.quote(domain);
+            if !binder.visibility.is_implicit()
+                || adamas_core::check::claim_of(self.signature, &quoted).is_none()
+            {
+                return (term, ty);
+            }
+            let (domain, codomain) = (Rc::clone(domain), codomain.clone());
+            let argument = self.fresh_meta(&domain);
+            let value = self.ctx.eval(&argument);
+            term = Term::App(Rc::new(term), Rc::new(argument));
+            ty = codomain.apply(value);
         }
     }
 
@@ -6497,6 +6523,23 @@ impl<'a> Elaborator<'a> {
         self.pi_flat(&flat, codomain, default)
     }
 
+    /// Тип факта для связывания-ограничения, чей «тип» - булево выражение.
+    ///
+    /// Ограничение от прочих implicit-связываний отличается только тем, что
+    /// безымянно (`constrained` в парсере), и `{_ : x > 0}`, написанное руками,
+    /// - тот же факт.
+    fn factual(&mut self, written: &Written<'_>, domain: &Term) -> Option<Term> {
+        if written.visibility != Visibility::Implicit || &*written.name != "_" {
+            return None;
+        }
+        let equal = self.signature.convention(prim::EQUAL);
+        self.signature.lookup(&equal)?;
+        let ty = self.inferred(domain)?;
+        let boolean = self.signature.convention(prim::BOOL);
+        matches!(&ty, Term::Const(name, _, _) if *name == boolean)
+            .then(|| adamas_core::check::fact(self.signature, domain.clone()))
+    }
+
     fn pi_flat(
         &mut self,
         binders: &[Written<'_>],
@@ -6507,6 +6550,13 @@ impl<'a> Elaborator<'a> {
             return self.expr(codomain, default);
         };
         let domain = self.hiding(first.siblings, |inner| inner.expr(first.ty, Mult::Many))?;
+        // Булево выражение на месте ограничения - факт `{d /= 0} =>`: тип его
+        // `Equal Bool (d /= 0) True`, а доказательство стёрто и находится
+        // поиском, как словарь (§3.7).
+        let (domain, mult) = match self.factual(first, &domain) {
+            Some(fact) => (fact, Mult::Zero),
+            None => (domain, first.mult),
+        };
         let owns = self.owned_of(first.ty).is_some();
         let bound = self.typed(&domain);
         // Row снимается с кодомена и у связывания с именем - тем же правилом,
@@ -6523,20 +6573,17 @@ impl<'a> Elaborator<'a> {
         // кодомен, и вправе называть аргумент. Оттого `(0 r : Region) ->
         // {Alloc r} Nat` пишется - имя связано к моменту, когда метка его
         // спрашивает (§3.4, §3.6).
-        let (row, body) = self.binding(
-            Bound::owning(&first.name, first.mult, bound, owns),
-            |inner| {
-                let row = if rest.is_empty() {
-                    inner.curried_row(written, codomain)?
-                } else {
-                    Row::empty()
-                };
-                Ok((row, inner.pi_flat(rest, codomain, default)?))
-            },
-        )?;
+        let (row, body) = self.binding(Bound::owning(&first.name, mult, bound, owns), |inner| {
+            let row = if rest.is_empty() {
+                inner.curried_row(written, codomain)?
+            } else {
+                Row::empty()
+            };
+            Ok((row, inner.pi_flat(rest, codomain, default)?))
+        })?;
         let binder = match first.visibility {
-            Visibility::Explicit => Binder::explicit(first.mult),
-            Visibility::Implicit => Binder::implicit(first.mult),
+            Visibility::Explicit => Binder::explicit(mult),
+            Visibility::Implicit => Binder::implicit(mult),
         };
         Ok(Term::Pi(
             binder,

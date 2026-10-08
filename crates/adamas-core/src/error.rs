@@ -140,6 +140,14 @@ pub enum ErrorKind {
         name: Name,
     },
 
+    /// Факт ограничения не доказан ни вычислением, ни гипотезой контекста
+    /// (§3.7). Телескоп отказа - те самые гипотезы, среди которых искали.
+    #[error("{}", adamas_l10n::tr!("core-unproven", claim = .claim))]
+    Unproven {
+        /// Утверждение факта: `d /= 0` из `{d /= 0} =>`.
+        claim: Term,
+    },
+
     /// Нетотальное определение использовано в стёртом фрагменте.
     #[error("{}", adamas_l10n::tr!("core-partial-constant", name = .name))]
     PartialConstant {
@@ -576,6 +584,7 @@ impl ErrorKind {
             Self::UnsettledLevel { left, right } => levels.extend([left, right]),
             Self::NotAFunction { ty }
             | Self::CannotInfer { term: ty }
+            | Self::Unproven { claim: ty }
             | Self::NotADataSort { found: ty, .. }
             | Self::NotAnEffectSort { found: ty, .. }
             | Self::ConstructorResult { found: ty, .. }
@@ -757,6 +766,19 @@ impl TypeError {
     #[must_use]
     pub fn path(&self) -> impl DoubleEndedIterator<Item = Frame> + '_ {
         self.route().iter().rev().copied()
+    }
+
+    /// Отказ с телескопом, собранным снаружи проверки: поиск доказательства
+    /// (§3.7) знает гипотезы по типу дырки, а не по [`Ctx`].
+    #[must_use]
+    pub fn within(kind: ErrorKind, context: Vec<Binding>) -> Self {
+        Self {
+            kind,
+            trace: Some(Box::new(Trace {
+                context,
+                route: Vec::new(),
+            })),
+        }
     }
 
     /// Дописывает кадр. Зовётся на раскрутке, в точке рекурсивного вызова.

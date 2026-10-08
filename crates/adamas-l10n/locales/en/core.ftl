@@ -12,6 +12,7 @@ core-unknown-constant = definition `{ $name }` not found
 core-level-arity = `{ $name }` takes { $expected } level parameters, { $found } given
 core-erased-constant = `{ $name }` is declared with multiplicity 0 and is not available at runtime
 core-partial-constant = `{ $name }` is not total and cannot appear in a type or a proof
+core-unproven = the fact `{ $claim }` is not proven: it does not compute to `True`, and no hypothesis in scope states it. Provide it as a constraint of the enclosing function (`{"{"}{ $claim }{"}"} =>`) or as an explicit argument (`@proof`)
 core-duplicate-definition = definition `{ $name }` already exists
 core-linear-definition = definition `{ $name }` cannot be linear: there is no whole-program accounting
 core-unsettled-level = levels `{ $left }` and `{ $right }` do not reduce: the solution is ambiguous, an annotation is needed

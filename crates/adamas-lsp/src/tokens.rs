@@ -920,6 +920,7 @@ impl<'a> Names<'a> {
                 self.expr(then_branch);
                 self.expr(else_branch);
             }
+            ExprKind::Guarded { .. } | ExprKind::Section(_) => self.sugar(&expr.kind),
             ExprKind::Case { scrutinee, alts } => {
                 self.expr(scrutinee);
                 for alt in alts {
@@ -957,11 +958,24 @@ impl<'a> Names<'a> {
                     self.expr(operand);
                 }
             }
+        }
+    }
+
+    /// Сахар 2026-10-09: гарды и секции - их части, сам оператор красит лексер.
+    fn sugar(&mut self, kind: &ExprKind) {
+        match kind {
+            ExprKind::Guarded { guards, .. } => {
+                for guard in guards {
+                    self.expr(&guard.cond);
+                    self.expr(&guard.body);
+                }
+            }
             ExprKind::Section(section) => {
                 if let Some(operand) = &section.operand {
                     self.expr(operand);
                 }
             }
+            _ => {}
         }
     }
 

@@ -176,6 +176,12 @@ fn in_expr(expr: &Expr, found: &mut Vec<Warning>) {
             in_expr(then_branch, found);
             in_expr(else_branch, found);
         }
+        ExprKind::Guarded { guards, .. } => {
+            for guard in guards {
+                in_expr(&guard.cond, found);
+                in_expr(&guard.body, found);
+            }
+        }
         ExprKind::Using { body, .. } | ExprKind::Mask(body) | ExprKind::Project(body, _) => {
             in_expr(body, found);
         }
@@ -418,6 +424,12 @@ pub(crate) fn uses(expr: &Expr, wanted: &[&Symbol]) -> bool {
             then_branch,
             else_branch,
         } => implied(&["True", "False"]) || recur(cond) || recur(then_branch) || recur(else_branch),
+        ExprKind::Guarded { guards, .. } => {
+            implied(&["True", "False"])
+                || guards
+                    .iter()
+                    .any(|guard| recur(&guard.cond) || recur(&guard.body))
+        }
         ExprKind::Case { scrutinee, alts } => {
             recur(scrutinee)
                 || alts

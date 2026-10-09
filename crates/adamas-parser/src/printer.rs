@@ -76,9 +76,9 @@ use adamas_core::source::Span;
 
 use crate::ast::{
     Alt, Binder, Binding, Block, Chain, Clause, Constructor, Data, Decl, DeclKind, EffectDecl,
-    EffectLabel, Expr, ExprKind, ExternDecl, Grade, HandlerBranch, LamParam, LamParamKind, Lit,
-    Module, ModuleDecl, Name, Operation, Pattern, PatternKind, Resource, Section, Stmt, StmtKind,
-    Visibility, contains_block,
+    EffectLabel, Expr, ExprKind, ExternDecl, Grade, Guard, HandlerBranch, LamParam, LamParamKind,
+    Lit, Module, ModuleDecl, Name, Operation, Pattern, PatternKind, Resource, Section, Stmt,
+    StmtKind, Visibility, contains_block,
 };
 use crate::lexer::is_operator;
 use crate::token::Comment;
@@ -132,6 +132,7 @@ impl Expr {
             | ExprKind::Arrow(..)
             | ExprKind::Block(_)
             | ExprKind::If { .. }
+            | ExprKind::Guarded { .. }
             | ExprKind::Case { .. }
             | ExprKind::Handle { .. } => Prec::Lowest,
         }
@@ -582,9 +583,17 @@ impl<'a> Printer<'a> {
             self.push(" ");
             self.pattern(pattern, true);
         }
-        self.push(" =");
         let body = self.out.len();
-        self.body(&clause.body);
+        if let ExprKind::Guarded {
+            guards,
+            conditional: false,
+        } = &clause.body.kind
+        {
+            self.guards(guards, " =");
+        } else {
+            self.push(" =");
+            self.body(&clause.body);
+        }
         if clause.wheres.is_empty() {
             return;
         }
@@ -593,11 +602,15 @@ impl<'a> Printer<'a> {
         // операторов, - и `where` с отступом попал бы внутрь: блок веток
         // закрывает только офсайд. На колонке определения `where` закрывает
         // всё открытое и присоединяется к клаузе (§4.1 правило 2).
-        let step = if self.out[body..].contains('\n') {
-            0
-        } else {
-            STEP
+        // Гарды занимают строки сами, но блока не открывают, если его не
+        // открыло тело последнего: тогда `where` - на шаг, как у однострочного.
+        let open = match &clause.body.kind {
+            ExprKind::Guarded { guards, .. } => {
+                guards.last().is_some_and(|last| contains_block(&last.body))
+            }
+            _ => self.out[body..].contains('\n'),
         };
+        let step = if open { 0 } else { STEP };
         self.nested(step, |printer| {
             printer.line();
             printer.push("where");
@@ -907,6 +920,7 @@ impl<'a> Printer<'a> {
             ExprKind::Chain(chain) => self.chain(chain),
             ExprKind::Section(section) => self.section(section),
             ExprKind::Annotated(value, ty) => self.annotated(value, ty),
+            ExprKind::Guarded { guards, .. } => self.multi_if(guards),
         }
     }
 
@@ -1060,8 +1074,36 @@ impl<'a> Printer<'a> {
 
     fn alt(&mut self, alt: &Alt) {
         self.pattern(&alt.pattern, false);
+        if let ExprKind::Guarded {
+            guards,
+            conditional: false,
+        } = &alt.body.kind
+        {
+            self.guards(guards, " ->");
+            return;
+        }
         self.push(" -> ");
         self.expr(&alt.body, Prec::Lowest);
+    }
+
+    /// Многоветочный `if`: слово и гарды под ним.
+    fn multi_if(&mut self, guards: &[Guard]) {
+        self.push("if");
+        self.guards(guards, " ->");
+    }
+
+    /// Гарды - каждый своей строкой на шаг вглубь: `| c = e` у клаузы,
+    /// `| c -> e` у ветки и многоветочного `if` (§4.1).
+    fn guards(&mut self, guards: &[Guard], arrow: &str) {
+        self.nested(STEP, |printer| {
+            for guard in guards {
+                printer.line();
+                printer.push("| ");
+                printer.expr(&guard.cond, Prec::Chain);
+                printer.push(arrow);
+                printer.body(&guard.body);
+            }
+        });
     }
 
     fn chain(&mut self, chain: &Chain) {

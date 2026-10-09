@@ -759,6 +759,12 @@ impl Search<'_> {
                 self.expr(then_branch);
                 self.expr(else_branch);
             }
+            ExprKind::Guarded { guards, .. } => {
+                for guard in guards {
+                    self.expr(&guard.cond);
+                    self.expr(&guard.body);
+                }
+            }
             ExprKind::Case { scrutinee, alts } => {
                 self.expr(scrutinee);
                 for alt in alts {

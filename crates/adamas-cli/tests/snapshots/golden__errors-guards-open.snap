@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+assertion_line: 132
+expression: text
+---
+Ошибка: guards-open.adamas:9:5: последний гард - `otherwise`: провала к следующей клаузе нет, и случай, не покрытый гардами, остался бы без ответа
+    | x == 0 = 0
+      ^^^^^^

@@ -1,0 +1,48 @@
+-- Гарды и многоветочный `if` (§4.1, решение 2026-10-09).
+--
+-- `| c = e` у клаузы, `| c -> e` у ветки `case` и у `if |` - цепочка `if`,
+-- и сужение §3.7 достаётся даром: `| i < n = arrayIndex xs i` доказывает
+-- границу. Провала к следующей клаузе нет - последний гард `otherwise`.
+-- Тело гарда бывает блоком; `where` стоит после гардов, как в Haskell.
+
+sign : Int64 -> Int64
+sign x
+  | x > 0 = 1
+  | x < 0 = -1
+  | otherwise = 0
+
+safe : (ω n : UInt64) -> Array n UInt64 -> UInt64 -> UInt64
+safe n xs i
+  | i < n = arrayIndex xs i
+  | otherwise = 0
+
+describe : Option UInt64 -> String
+describe o = case o of
+  None -> "none"
+  Some v
+    | v > 10 -> "big"
+    | otherwise -> "small"
+
+grade : UInt64 -> UInt64
+grade s = if
+  | s >= 90 -> 5
+  | s >= 70 -> 4
+  | otherwise -> 3
+
+scaled : UInt64 -> UInt64
+scaled k
+  | k == 0 = base
+  | otherwise = base * k
+  where
+    base : UInt64
+    base = 10
+
+clamp : UInt64 -> UInt64
+clamp x
+  | x > 100 =
+    let top = 100
+    top
+  | otherwise = x
+
+main : { signs : Int64, safe : UInt64, outside : UInt64, described : Bool, grades : UInt64, scaled : UInt64, clamped : UInt64 }
+main = {signs = sign 5 * 100 + sign (-3) * 10 + sign 0, safe = safe 3 (arrayNew 3 7) 1, outside = safe 3 (arrayNew 3 7) 9, described = describe (Some 11) == "big" && describe (Some 2) == "small" && describe None == "none", grades = grade 95 * 100 + grade 75 * 10 + grade 10, scaled = scaled 0 + scaled 3, clamped = clamp 500 + clamp 7}

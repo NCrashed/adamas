@@ -149,12 +149,6 @@ fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<
             pending.push((Node::Expr(left), inner));
             pending.push((Node::Expr(right), inner));
         }
-        // Аннотация - `let` над значением и имя под ним: два звена.
-        ExprKind::Annotated(value, ty) => {
-            let inner = deepen(depth, 2, expr.span)?;
-            pending.push((Node::Expr(value), inner));
-            pending.push((Node::Expr(ty), inner));
-        }
         ExprKind::Pi { binders, codomain } => pi(binders, codomain, depth, expr.span, pending)?,
         ExprKind::Lam { params, body } => lam(params, body, depth, expr.span, pending)?,
         // Блок звена не ставит: его ставят операторы.
@@ -219,6 +213,17 @@ fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<
             pending.extend(items.iter().map(|item| (Node::Expr(item), inner)));
         }
         ExprKind::Chain(chain) => chain_at(chain, depth, expr.span, pending)?,
+        ExprKind::Section(_) | ExprKind::Annotated(..) | ExprKind::Guarded { .. } => {
+            sugar_at(expr, depth, pending)?;
+        }
+    }
+    Ok(())
+}
+
+/// Сахар (§4.1, §4.4, решения 2026-10-09) мерится тем, во что его
+/// развернёт элаборация.
+fn sugar_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<(), ParseError> {
+    match &expr.kind {
         // Секция - лямбда над применением оператора: три звена над операндом.
         ExprKind::Section(section) => {
             if let Some(operand) = &section.operand {
@@ -226,6 +231,21 @@ fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<
                 pending.push((Node::Expr(operand), inner));
             }
         }
+        // Аннотация - `let` над значением и имя под ним: два звена.
+        ExprKind::Annotated(value, ty) => {
+            let inner = deepen(depth, 2, expr.span)?;
+            pending.push((Node::Expr(value), inner));
+            pending.push((Node::Expr(ty), inner));
+        }
+        // Гарды - цепочка `if`: каждый следующий вложен в предыдущий.
+        ExprKind::Guarded { guards, .. } => {
+            for (index, guard) in guards.iter().enumerate() {
+                let inner = deepen(depth, index + 1, expr.span)?;
+                pending.push((Node::Expr(&guard.cond), inner));
+                pending.push((Node::Expr(&guard.body), inner));
+            }
+        }
+        _ => {}
     }
     Ok(())
 }

@@ -60,9 +60,9 @@ use adamas_core::source::Span;
 use crate::ast::{
     Alt, Assoc, Binder, Binding, Block, Chain, ClassDecl, Clause, Constructor, Data, Decl,
     DeclKind, EffectDecl, EffectLabel, ExportDecl, Expr, ExprKind, ExternDecl, FixityDecl, Grade,
-    HandlerBranch, ImportDecl, LamParam, LamParamKind, Lit, LitKind, Module, ModuleDecl, Mult,
-    MultAnn, Name, Operation, Pattern, PatternKind, RecordField, Resource, Section, Stmt, StmtKind,
-    Symbol, Visibility, contains_block,
+    Guard, HandlerBranch, ImportDecl, LamParam, LamParamKind, Lit, LitKind, Module, ModuleDecl,
+    Mult, MultAnn, Name, Operation, Pattern, PatternKind, RecordField, Resource, Section, Stmt,
+    StmtKind, Symbol, Visibility, contains_block,
 };
 use crate::token::{Token, TokenKind};
 
@@ -118,6 +118,8 @@ pub enum Misplaced {
     SectionOperand,
     /// `(- e)` - отрицание в Haskell, а не секция вычитания.
     MinusSection,
+    /// Последний гард - не `otherwise`: провала к следующей клаузе нет.
+    OpenGuards,
 }
 
 impl fmt::Display for Misplaced {
@@ -130,6 +132,7 @@ impl fmt::Display for Misplaced {
             Self::Superclass => adamas_l10n::tr!("misplaced-superclass"),
             Self::SectionOperand => adamas_l10n::tr!("misplaced-section-operand"),
             Self::MinusSection => adamas_l10n::tr!("misplaced-minus-section"),
+            Self::OpenGuards => adamas_l10n::tr!("misplaced-open-guards"),
         })
     }
 }
@@ -915,8 +918,12 @@ impl<'a> Parser<'a> {
         while starts_pattern(self.kind()) {
             patterns.push(self.atomic_pattern()?);
         }
-        self.expect(TokenKind::Equals)?;
-        let body = self.body()?;
+        let body = if self.at(TokenKind::Pipe) {
+            self.guarded(TokenKind::Equals, false)?
+        } else {
+            self.expect(TokenKind::Equals)?;
+            self.body()?
+        };
         let wheres = if self.eat(TokenKind::Where).is_some() {
             self.decl_block()?
         } else {
@@ -2265,6 +2272,15 @@ impl<'a> Parser<'a> {
 
     fn conditional(&mut self) -> Result<Expr, ParseError> {
         let start = self.bump().span;
+        // Многоветочный `if | c -> e | otherwise -> e'` (§4.1, решение
+        // 2026-10-09) - те же гарды, что у клаузы.
+        if self.at(TokenKind::Pipe) {
+            let guarded = self.guarded(TokenKind::Arrow, true)?;
+            return Ok(Expr {
+                span: start.merge(guarded.span),
+                kind: guarded.kind,
+            });
+        }
         let cond = self.expr()?;
         if contains_block(&cond) {
             return Err(self.block_not_last(&cond));
@@ -2460,6 +2476,15 @@ impl<'a> Parser<'a> {
 
     fn alt(&mut self) -> Result<Alt, ParseError> {
         let pattern = self.pattern()?;
+        if self.at(TokenKind::Pipe) {
+            let body = self.guarded(TokenKind::Arrow, false)?;
+            let span = pattern.span.merge(body.span);
+            return Ok(Alt {
+                pattern,
+                body,
+                span,
+            });
+        }
         self.expect(TokenKind::Arrow)?;
         // Тело ветки - блок, если стрелка его открыла (§10 вопрос 61): за ней
         // пишут последовательность ровно так же, как за `=`.
@@ -2520,6 +2545,47 @@ impl<'a> Parser<'a> {
         Ok(Expr {
             kind: ExprKind::Tuple(items),
             span: open.span.merge(close.span),
+        })
+    }
+
+    /// Гарды `| c = e` клаузы либо `| c -> e` ветки и многоветочного `if`
+    /// (§4.1, решение 2026-10-09).
+    ///
+    /// Условие - цепочка, а не выражение целиком: у `->`-формы `c -> e`
+    /// читалось бы стрелкой типа. Последний гард обязан быть `otherwise`
+    /// (или `True`): провала к следующей клаузе нет, и не покрытый гардами
+    /// случай иначе остался бы без ответа.
+    fn guarded(&mut self, separator: TokenKind, conditional: bool) -> Result<Expr, ParseError> {
+        let start = self.peek().span;
+        let mut guards = Vec::new();
+        while let Some(bar) = self.eat(TokenKind::Pipe) {
+            let cond = self.chain()?;
+            self.expect(separator)?;
+            let body = self.body()?;
+            guards.push(Guard {
+                span: bar.span.merge(body.span),
+                cond,
+                body,
+            });
+        }
+        let last = guards.last().map_or(start, |guard| guard.cond.span);
+        let closed = guards.last().is_some_and(|guard| {
+            matches!(&guard.cond.kind, ExprKind::Name(name)
+                if matches!(&*name.text, "otherwise" | "True"))
+        });
+        if !closed {
+            return Err(ParseError::Misplaced {
+                what: Misplaced::OpenGuards,
+                span: last,
+            });
+        }
+        let end = guards.last().map_or(start, |guard| guard.span);
+        Ok(Expr {
+            kind: ExprKind::Guarded {
+                guards,
+                conditional,
+            },
+            span: start.merge(end),
         })
     }
 

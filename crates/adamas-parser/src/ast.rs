@@ -380,6 +380,27 @@ pub enum ExprKind {
     Section(Section),
     /// Аннотация выражения: `(e : T)` (§4.1, решение 2026-10-09).
     Annotated(Box<Expr>, Box<Expr>),
+    /// Гарды: тело клаузы `| c = e`, ветки `| c -> e` и многоветочный
+    /// `if | c -> e` (§4.1, решение 2026-10-09). Последний гард - `otherwise`:
+    /// провала к следующей клаузе нет.
+    Guarded {
+        /// Гарды по порядку.
+        guards: Vec<Guard>,
+        /// Написан многоветочным `if`, а не телом клаузы или ветки: печати
+        /// нужно знать, ставить ли `if` и `=` либо `->`.
+        conditional: bool,
+    },
+}
+
+/// Гард: условие и тело.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Guard {
+    /// Условие.
+    pub cond: Expr,
+    /// Тело.
+    pub body: Expr,
+    /// От `|` до конца тела.
+    pub span: Span,
 }
 
 /// Оператор значением и секции (§4.4, решение 2026-10-09).
@@ -973,6 +994,12 @@ pub fn contains_block(expr: &Expr) -> bool {
                 pending.push(then_branch);
                 pending.push(else_branch);
             }
+            ExprKind::Guarded { guards, .. } => {
+                for guard in guards {
+                    pending.push(&guard.cond);
+                    pending.push(&guard.body);
+                }
+            }
             ExprKind::Tuple(items) | ExprKind::List(items) => pending.extend(items),
             ExprKind::Chain(chain) => {
                 pending.push(&chain.head);
@@ -1037,6 +1064,12 @@ pub fn mentions(expr: &Expr, name: &str) -> bool {
                 pending.push(cond);
                 pending.push(then_branch);
                 pending.push(else_branch);
+            }
+            ExprKind::Guarded { guards, .. } => {
+                for guard in guards {
+                    pending.push(&guard.cond);
+                    pending.push(&guard.body);
+                }
             }
             ExprKind::Case { scrutinee, alts } => {
                 pending.push(scrutinee);
@@ -1230,6 +1263,15 @@ fn dump_wrapped(out: &mut String, form: &str, inner: &Expr) {
     out.push_str(form);
     out.push(' ');
     dump_expr(out, inner);
+    out.push(')');
+}
+
+fn dump_guards(out: &mut String, guards: &[Guard]) {
+    out.push_str("(guards");
+    for guard in guards {
+        out.push(' ');
+        dump_pair(out, "guard", &guard.cond, &guard.body);
+    }
     out.push(')');
 }
 
@@ -1678,6 +1720,7 @@ fn dump_expr(out: &mut String, expr: &Expr) {
         }
         ExprKind::Section(section) => dump_section(out, section),
         ExprKind::Annotated(value, ty) => dump_pair(out, "annotated", value, ty),
+        ExprKind::Guarded { guards, .. } => dump_guards(out, guards),
     }
 }
 

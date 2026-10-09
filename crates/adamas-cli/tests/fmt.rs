@@ -149,6 +149,7 @@ const UNPARSED: &[&str] = &[
     "section-operand.adamas",
     "section-minus.adamas",
     "backtick-operator.adamas",
+    "guards-open.adamas",
     "variadic-off-the-boundary.adamas",
     "record-value-multiplicity.adamas",
     "char-literal-two.adamas",

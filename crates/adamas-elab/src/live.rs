@@ -125,6 +125,9 @@ impl<'a> Spent<'a> {
                     || self.in_expr(name, then_branch, bound)
                     || self.in_expr(name, else_branch, bound)
             }
+            ExprKind::Guarded { guards, .. } => guards.iter().any(|guard| {
+                self.in_expr(name, &guard.cond, bound) || self.in_expr(name, &guard.body, bound)
+            }),
             ExprKind::Case { scrutinee, alts } => {
                 self.in_expr(name, scrutinee, bound)
                     || alts.iter().any(|alt| self.in_alt(name, alt, bound))

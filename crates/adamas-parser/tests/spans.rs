@@ -307,6 +307,7 @@ impl Spans<'_> {
                 self.expr(at, then_branch);
                 self.expr(at, else_branch);
             }
+            ExprKind::Guarded { .. } | ExprKind::Section(_) => self.sugar(at, &expr.kind),
             ExprKind::Handle {
                 label,
                 computation,
@@ -326,7 +327,6 @@ impl Spans<'_> {
                     self.expr(at, operand);
                 }
             }
-            ExprKind::Section(section) => self.section(at, section),
         }
     }
 
@@ -388,6 +388,19 @@ impl Spans<'_> {
 
     fn name(&mut self, parent: Span, name: &Name) {
         self.inside("имя", parent, name.span);
+    }
+
+    fn sugar(&mut self, at: Span, kind: &ExprKind) {
+        match kind {
+            ExprKind::Guarded { guards, .. } => {
+                for guard in guards {
+                    self.expr(at, &guard.cond);
+                    self.expr(at, &guard.body);
+                }
+            }
+            ExprKind::Section(section) => self.section(at, section),
+            _ => {}
+        }
     }
 
     fn section(&mut self, at: Span, section: &Section) {

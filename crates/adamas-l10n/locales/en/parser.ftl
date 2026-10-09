@@ -57,4 +57,5 @@ misplaced-context = a constraint context is written in braces: `{"{"}Eq a{"}"} =
 misplaced-superclass = a superclass goes after `when`, not before `=>`: `class Ord a when Eq a where …`
 misplaced-section-operand = a section operand is an application or an expression in its own parentheses: `(+ f x)`, `(* (a + b))`; the parser does not know fixities
 misplaced-minus-section = `(- e)` is not a section: in Haskell it is negation; subtracting from the argument is written `(\v -> v - e)`, negation `0 - e`
+misplaced-open-guards = the last guard is `otherwise`: there is no fall-through to the next clause, and a case the guards miss would have no answer
 parse-misplaced = { $what }

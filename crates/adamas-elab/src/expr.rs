@@ -642,6 +642,9 @@ fn written_row_tail(expr: &Expr) -> Option<&ast::Name> {
         } => recur(cond)
             .or_else(|| recur(then_branch))
             .or_else(|| recur(else_branch)),
+        ExprKind::Guarded { guards, .. } => guards
+            .iter()
+            .find_map(|guard| recur(&guard.cond).or_else(|| recur(&guard.body))),
         ExprKind::Case { scrutinee, alts } => {
             recur(scrutinee).or_else(|| alts.iter().find_map(|alt| recur(&alt.body)))
         }
@@ -692,6 +695,9 @@ pub(crate) fn names_any(expr: &Expr, wanted: &[&Symbol]) -> bool {
             then_branch,
             else_branch,
         } => recur(cond) || recur(then_branch) || recur(else_branch),
+        ExprKind::Guarded { guards, .. } => guards
+            .iter()
+            .any(|guard| recur(&guard.cond) || recur(&guard.body)),
         ExprKind::Case { scrutinee, alts } => {
             recur(scrutinee) || alts.iter().any(|alt| recur(&alt.body))
         }
@@ -1988,6 +1994,7 @@ impl<'a> Elaborator<'a> {
             // равно ответит `Missing`.
             ExprKind::Block(_)
             | ExprKind::If { .. }
+            | ExprKind::Guarded { .. }
             | ExprKind::Case { .. }
             | ExprKind::Handle { .. }
             | ExprKind::Tuple(_)
@@ -2623,9 +2630,21 @@ impl<'a> Elaborator<'a> {
             }
             ExprKind::Block(block) => self.block(block, position),
             ExprKind::Chain(chain) => self.chain(chain, expr.span),
-            ExprKind::Section(section) => self.expr(&sectioned(section, expr.span), Mult::Many),
+            // Сахар разворачивается в формы, которые элаборация умеет, и
+            // разворот получает **всё** окружение формы: ожидание, позицию и
+            // кратности аргументов. Через `expr` они терялись бы - их уже снял
+            // вызывающий, - и гард над массивом не находил доказательства границы.
+            ExprKind::Section(section) => {
+                let desugared = sectioned(section, expr.span);
+                self.form(&desugared, default, expected, position, awaited)
+            }
             ExprKind::Annotated(value, ty) => {
-                self.expr(&annotated(value, ty, expr.span), Mult::Many)
+                let desugared = annotated(value, ty, expr.span);
+                self.form(&desugared, default, expected, position, awaited)
+            }
+            ExprKind::Guarded { guards, .. } => {
+                let desugared = guarded(guards, expr.span);
+                self.form(&desugared, default, expected, position, awaited)
             }
 
             // Тип записи - телескоп: каждое следующее поле элаборируется под
@@ -9802,4 +9821,31 @@ fn annotated(value: &Expr, ty: &Expr, span: Span) -> Expr {
         }),
         span,
     }
+}
+
+/// Гарды - цепочка `if` (§4.1, решение 2026-10-09):
+/// `| c1 = e1 | c2 = e2 | otherwise = e3` есть
+/// `if c1 then e1 else if c2 then e2 else e3`. Условие последнего гарда разбор
+/// уже проверил (`otherwise` либо `True`), и тело его стоит в `else` без
+/// сравнения. Сужение §3.7 достаётся гардам даром: `| i < n = arrayIndex xs i`
+/// доказывает границу, как `if`.
+fn guarded(guards: &[ast::Guard], span: Span) -> Expr {
+    // Пустых гардов разбор не отдаёт; дырка на их месте - отказ, а не паника.
+    let Some((last, leading)) = guards.split_last() else {
+        return Expr {
+            kind: ExprKind::Hole,
+            span,
+        };
+    };
+    leading
+        .iter()
+        .rev()
+        .fold(last.body.clone(), |otherwise, guard| Expr {
+            span: guard.span.merge(otherwise.span),
+            kind: ExprKind::If {
+                cond: Box::new(guard.cond.clone()),
+                then_branch: Box::new(guard.body.clone()),
+                else_branch: Box::new(otherwise),
+            },
+        })
 }

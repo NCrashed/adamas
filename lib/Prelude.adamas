@@ -52,6 +52,10 @@ data Result (e : Type) (a : Type) where
 not : Bool -> Bool
 not a = if a then False else True
 
+-- | Истина под именем последнего гарда: `| otherwise = …` (§4.1).
+otherwise : Bool
+otherwise = True
+
 -- | Конъюнкция. **Считает оба аргумента**: это функция, и аргументы ей считают
 -- до вызова. Где важна ленивость правого, пишется `if`.
 and : Bool -> Bool -> Bool

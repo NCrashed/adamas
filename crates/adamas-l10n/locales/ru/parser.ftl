@@ -57,4 +57,5 @@ misplaced-context = контекст ограничений пишется в ф
 misplaced-superclass = суперкласс пишется после `when`, а не перед `=>`: `class Ord a when Eq a where …`
 misplaced-section-operand = операнд секции - применение либо выражение в своих скобках: `(+ f x)`, `(* (a + b))`; фикситетов разбор не знает
 misplaced-minus-section = `(- e)` - не секция: в Haskell это отрицание; вычитание из аргумента пишется `(\v -> v - e)`, отрицание - `0 - e`
+misplaced-open-guards = последний гард - `otherwise`: провала к следующей клаузе нет, и случай, не покрытый гардами, остался бы без ответа
 parse-misplaced = { $what }

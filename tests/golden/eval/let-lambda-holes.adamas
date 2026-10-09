@@ -1,0 +1,28 @@
+-- Лямбда `let` без аннотации (§4.1, решение 2026-10-09).
+--
+-- `let f = \x -> e` и `let f x = e` без типа значат то же, что с типом из
+-- дырок `(ω _ : _) -> _`: параметр неограничен, а типы решает употребление.
+-- `let` мономорфен - один тип на связывание, как у литерала без ожидания;
+-- линейный параметр требует написанной аннотации.
+
+data Step where
+  Up : Step
+  Down : Step
+
+isUp : Step -> Bool
+isUp Up = True
+isUp Down = False
+
+main : { doubled : UInt64, added : List UInt64, scaled : UInt64, named : Bool, flipped : Bool, picked : UInt64 }
+main =
+  let double = \x -> x + x
+  let add = \x y -> x + y
+  let scale k = k * 3
+  let greet name = "hi, " <> name
+  let flip = \case
+        Up -> Down
+        Down -> Up
+  let pick = \case
+        None -> 0
+        Some v -> v
+  {doubled = double 21, added = map (add 1) [1, 2], scaled = scale 14, named = greet "bob" == "hi, bob", flipped = isUp (flip Down), picked = pick (Some 4) + pick None}

@@ -2995,7 +2995,11 @@ impl<'a> Elaborator<'a> {
         let (value, ty) = self.scrutinized(scrutinee, span)?;
         // Тип, решённый умолчанием, связывается заново: у переменной `let`
         // в контексте лежит прежняя дырка, а компилятор разбора её не знает.
-        if let Some(ty) = self.literal_column(&ty, alts, scrutinee.span)? {
+        let solved = match self.literal_column(&ty, alts, scrutinee.span)? {
+            Some(solved) => Some(solved),
+            None => self.constructor_column(&ty, alts),
+        };
+        if let Some(ty) = solved {
             return self.case_bound(scrutinee, value, &ty, alts, span, position, awaited);
         }
         self.case_on(scrutinee, value, &ty, alts, span, position, awaited)
@@ -3045,6 +3049,104 @@ impl<'a> Elaborator<'a> {
             span,
         });
         Ok(Some(whnf_solved(self.signature, self.metas, ty)))
+    }
+
+    /// Разбираемое открытого типа под конструктором-образцом берёт семейство
+    /// этого конструктора (§4.1, решение 2026-10-09).
+    ///
+    /// `let pick = \case None -> 0; Some v -> v`: параметру лямбды тип - дырка
+    /// ([`holed`]), а компилятору разбора семейство нужно сейчас. Образец
+    /// элаборируется выражением с дырками на месте полей - `Some _` - в стёртой
+    /// позиции, и тип его сводится с разбираемым. Не сошлось - откат, и
+    /// разбор отказывает прежним путём.
+    fn constructor_column(&mut self, ty: &Rc<Value>, alts: &[ast::Alt]) -> Option<Rc<Value>> {
+        if !self.flexible(ty) {
+            return None;
+        }
+        let (head, fields) = alts.iter().find_map(|alt| match &alt.pattern.kind {
+            PatternKind::Name(name) if is_reference(&name.text) => Some((name, 0)),
+            PatternKind::App { head, fields } => Some((head, fields.len())),
+            _ => None,
+        })?;
+        let probe = (0..fields).fold(
+            Expr {
+                kind: ExprKind::Name(head.clone()),
+                span: head.span,
+            },
+            |callee, _| Expr {
+                kind: ExprKind::App(
+                    Box::new(callee),
+                    Box::new(Expr {
+                        kind: ExprKind::Hole,
+                        span: head.span,
+                    }),
+                ),
+                span: head.span,
+            },
+        );
+        let mark = self.metas.mark();
+        // Имплиситы конструктора без полей - `None` - вставляются, как у
+        // головы спайна: иначе тип был бы `{a} -> Option a`, а не семейство.
+        let found = self
+            .aside(|it| it.expr(&probe, Mult::Zero))
+            .ok()
+            .and_then(|term| self.synthesized(&term).map(|ty| (term, ty)))
+            .map(|(term, ty)| self.inserted(term, ty).1)
+            .map(|found| self.outside(ty, &found));
+        let fits = found.is_some_and(|found| {
+            convertible(self.signature, self.metas, self.ctx.size(), ty, &found)
+        });
+        if !fits {
+            self.metas.rollback(mark);
+            return None;
+        }
+        Some(whnf_solved(self.signature, self.metas, ty))
+    }
+
+    /// Семейство образца без зависимости от связываний, заведённых после
+    /// дырки разбираемого.
+    ///
+    /// Дырка типа лямбды без аннотации заведена у `let`, снаружи лямбды, а
+    /// имплиситы образца - `a` у `None` - внутри, и спайн их несёт параметр
+    /// лямбды. Решить внешнюю дырку значением, называющим параметр, нельзя:
+    /// решатель такие отвергает областью видимости. Поэтому каждый аргумент
+    /// семейства, оставшийся дыркой, сводится с новой, заведённой снаружи
+    /// ([`Self::fresh_meta_outside`]): её спайн короче, и решение законно.
+    fn outside(&mut self, hole: &Rc<Value>, found: &Rc<Value>) -> Rc<Value> {
+        let hole = whnf_solved(self.signature, self.metas, hole);
+        let Value::Neutral(Head::Meta(_), outer) = &*hole else {
+            return Rc::clone(found);
+        };
+        let skip = (self.ctx.size() as usize).saturating_sub(outer.len());
+        if skip == 0 {
+            return Rc::clone(found);
+        }
+        let found = whnf_solved(self.signature, self.metas, found);
+        let Value::Neutral(Head::Global(..), spine) = &*found else {
+            return found;
+        };
+        for elim in spine {
+            let Elim::App(argument) = elim else {
+                continue;
+            };
+            if !self.flexible(argument) {
+                continue;
+            }
+            let quoted = quote(self.ctx.size(), argument);
+            let Some(goal) = self.synthesized(&quoted) else {
+                continue;
+            };
+            let replacement = self.fresh_meta_outside(&goal, skip);
+            let replacement = self.ctx.eval(&replacement);
+            convertible(
+                self.signature,
+                self.metas,
+                self.ctx.size(),
+                argument,
+                &replacement,
+            );
+        }
+        whnf_solved(self.signature, self.metas, &found)
     }
 
     /// `if c then a else b` - разбор `inspect c` с фактом в каждой ветви
@@ -7627,6 +7729,13 @@ impl<'a> Elaborator<'a> {
             return self.destructured(binding, pattern, tail, rest, position);
         }
         let Some(ty) = &binding.ty else {
+            // Лямбда без аннотации берёт тип из дырок: `(ω _ : _) -> _` по
+            // параметру, и решает их употребление (§4.1, решение 2026-10-09).
+            if let Some(holed) = holed(binding) {
+                let mut bindings = bindings.to_vec();
+                bindings[0] = holed;
+                return self.bindings(&bindings, rest, position);
+            }
             return self.untyped(binding, tail, rest, position);
         };
         Self::binds(&binding.name)?;
@@ -9700,9 +9809,6 @@ fn local_function(binding: &Binding) -> Result<Binding, ElabError> {
         why: why.to_owned(),
         span: binding.name.span,
     };
-    if binding.ty.is_none() {
-        return Err(refused(adamas_l10n::text!("expr-24")));
-    }
     if crate::unused::uses(&binding.body, &[&binding.name.text]) {
         return Err(refused(adamas_l10n::text!("expr-25")));
     }
@@ -9889,4 +9995,59 @@ fn desugared(expr: &Expr) -> Expr {
         ExprKind::LamCase(alts) => lambda_case(alts, expr.span),
         _ => expr.clone(),
     }
+}
+
+/// Лямбда `let` без аннотации - под аннотацией из дырок (§4.1, решение
+/// 2026-10-09): `let f = \x y -> e` есть `let f : (ω _ : _) -> (ω _ : _) -> _
+/// = \x y -> e`, и дырки решает употребление, как у написанного типа.
+///
+/// Параметр - `ω`: лямбда без аннотации вправе пользоваться им сколько
+/// угодно, а линейный аргумент требует написанного `1`. Параметр с
+/// написанным типом или кратностью обходит правило - его аннотация своя.
+fn holed(binding: &Binding) -> Option<Binding> {
+    // `\case` - лямбда с одним параметром.
+    let (count, plain) = match &binding.body.kind {
+        ExprKind::Lam { params, .. } => (
+            params.len(),
+            params
+                .iter()
+                .all(|param| matches!(param.kind, ast::LamParamKind::Pattern(_))),
+        ),
+        ExprKind::LamCase(_) => (1, true),
+        _ => return None,
+    };
+    if !plain || binding.mult.is_some() {
+        return None;
+    }
+    let span = binding.body.span;
+    let hole = || Expr {
+        kind: ExprKind::Hole,
+        span,
+    };
+    let ty = (0..count).fold(hole(), |codomain, _| Expr {
+        kind: ExprKind::Pi {
+            binders: vec![ast::Binder {
+                visibility: ast::Visibility::Explicit,
+                mult: Some(ast::MultAnn {
+                    mult: ast::Mult::Many,
+                    span,
+                }),
+                names: vec![ast::Name {
+                    text: Rc::from("_"),
+                    span,
+                }],
+                factors: Vec::new(),
+                grade: None,
+                span,
+                ty: Some(hole()),
+                default: None,
+            }],
+            codomain: Box::new(codomain),
+        },
+        span,
+    });
+    Some(Binding {
+        ty: Some(ty),
+        ..binding.clone()
+    })
 }

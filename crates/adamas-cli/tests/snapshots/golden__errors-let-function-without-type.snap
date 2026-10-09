@@ -1,7 +1,0 @@
----
-source: crates/adamas-cli/tests/golden.rs
-expression: text
----
-Ошибка: let-function-without-type.adamas:8:7: локальное определение `step`: у локальной функции нет типа: напишите полный тип после параметров (`let f x : A -> B = …`)
-    let step k = k * 2
-        ^^^^

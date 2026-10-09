@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+assertion_line: 132
+expression: text
+---
+Ошибка: haskell-context.adamas:6:8: контекст ограничений пишется в фигурных скобках: `{Eq a} => a -> Bool`, несколько - через запятую: `{Eq a, Show a} => …`
+  same : Eq a => a -> a -> Bool
+         ^^^^^^^

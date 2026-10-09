@@ -52,4 +52,6 @@ parse-too-deep = nesting deeper than the limit of { $limit }
 misplaced-when = `when` belongs in a class declaration, before the superclasses: `class Ord a when Eq a where …`
 misplaced-using = `using` belongs in an expression, before the instance: `using p (f x)`
 misplaced-braces = braces open nothing here: an effect row is written `{"{"}Ask{"}"} A`, a record type `{"{"}x : A{"}"}`, a group of implicit binders `{"{"}a : Type{"}"}`; an empty row is not written
+misplaced-context = a constraint context is written in braces: `{"{"}Eq a{"}"} => a -> Bool`, several separated by commas: `{"{"}Eq a, Show a{"}"} => …`
+misplaced-superclass = a superclass goes after `when`, not before `=>`: `class Ord a when Eq a where …`
 parse-misplaced = { $what }

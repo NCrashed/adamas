@@ -1,0 +1,11 @@
+-- Контекст инстанса без фигурных скобок - форма Haskell (§4.1).
+--
+-- Инстанс пишется `instance {Show a} => Show (Box a) where …`; без скобок
+-- отказ стоял на `=>` словами «ожидается конец блока», и правильную форму
+-- новичок находил грепом по корпусу.
+
+data Box (a : Type) where
+  MkBox : a -> Box a
+
+instance Show a => Show (Box a) where
+  show (MkBox x) = "Box " <> show x

@@ -52,4 +52,6 @@ parse-too-deep = вложенность глубже предела в { $limit 
 misplaced-when = `when` пишется в объявлении класса, перед суперклассами: `class Ord a when Eq a where …`
 misplaced-using = `using` пишется в выражении, перед инстансом: `using p (f x)`
 misplaced-braces = фигурные скобки здесь ничего не открывают: effect row пишется `{"{"}Ask{"}"} A`, тип записи - `{"{"}x : A{"}"}`, группа implicit-связываний - `{"{"}a : Type{"}"}`; пустой row не пишется
+misplaced-context = контекст ограничений пишется в фигурных скобках: `{"{"}Eq a{"}"} => a -> Bool`, несколько - через запятую: `{"{"}Eq a, Show a{"}"} => …`
+misplaced-superclass = суперкласс пишется после `when`, а не перед `=>`: `class Ord a when Eq a where …`
 parse-misplaced = { $what }

@@ -1,0 +1,7 @@
+-- Суперкласс перед `=>` - форма Haskell (§4.1).
+--
+-- У нас суперклассы перечисляет `when` после головы класса:
+-- `class Sized a when Show a where …`.
+
+class Show a => Sized a where
+  size : a -> UInt64

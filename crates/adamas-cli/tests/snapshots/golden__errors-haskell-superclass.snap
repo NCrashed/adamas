@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+assertion_line: 132
+expression: text
+---
+Ошибка: haskell-superclass.adamas:6:7: суперкласс пишется после `when`, а не перед `=>`: `class Ord a when Eq a where …`
+  class Show a => Sized a where
+        ^^^^^^^^^

@@ -143,6 +143,9 @@ use fixture::{copied, corpus, driven, formatter, read, scratch, sources};
 /// сказать это словами.
 const UNPARSED: &[&str] = &[
     "braces-open-nothing.adamas",
+    "haskell-context.adamas",
+    "haskell-instance-context.adamas",
+    "haskell-superclass.adamas",
     "variadic-off-the-boundary.adamas",
     "record-value-multiplicity.adamas",
     "char-literal-two.adamas",

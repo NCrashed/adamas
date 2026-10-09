@@ -108,6 +108,12 @@ pub enum Misplaced {
     Using,
     /// Фигурные скобки, с которых здесь ничего не начинается.
     Braces,
+    /// `=>` без фигурных скобок у контекста: `Eq a => a -> a` (привычка
+    /// Haskell; §4.1 пишет `{Eq a} => …`).
+    Context,
+    /// `=>` в голове класса: `class Eq a => Ord a` (суперкласс в §4.1 стоит
+    /// после `when`).
+    Superclass,
 }
 
 impl fmt::Display for Misplaced {
@@ -116,6 +122,8 @@ impl fmt::Display for Misplaced {
             Self::When => adamas_l10n::tr!("misplaced-when"),
             Self::Using => adamas_l10n::tr!("misplaced-using"),
             Self::Braces => adamas_l10n::tr!("misplaced-braces"),
+            Self::Context => adamas_l10n::tr!("misplaced-context"),
+            Self::Superclass => adamas_l10n::tr!("misplaced-superclass"),
         })
     }
 }
@@ -1512,6 +1520,14 @@ impl<'a> Parser<'a> {
     /// Цепочка, за которой может идти стрелка.
     fn arrowed(&mut self) -> Result<Expr, ParseError> {
         let left = self.chain()?;
+        // Контекст без скобок - `Eq a => …`, `(Eq a, Show a) => …`: форма
+        // Haskell. Своего прочтения у неё нет, и отказ называет нашу.
+        if self.at(TokenKind::FatArrow) {
+            return Err(ParseError::Misplaced {
+                what: Misplaced::Context,
+                span: left.span.merge(self.peek().span),
+            });
+        }
         if !self.at(TokenKind::Arrow) {
             return Ok(left);
         }
@@ -1787,6 +1803,13 @@ impl<'a> Parser<'a> {
                 kind: ExprKind::Name(written),
             };
             let params = self.params()?;
+            // `class Eq a => Ord a`: суперкласс по-хаскельному, перед именем.
+            if self.at(TokenKind::FatArrow) {
+                return Err(ParseError::Misplaced {
+                    what: Misplaced::Superclass,
+                    span: head.span.merge(self.peek().span),
+                });
+            }
             (head, params)
         };
         if self.at(TokenKind::Where) && contains_block(&head) {

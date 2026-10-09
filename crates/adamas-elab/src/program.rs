@@ -146,6 +146,7 @@ const PRELUDE_TEXT: &str = include_str!("../../../lib/Prelude.adamas");
 const STANDARD: &[(&str, &str)] = &[
     ("Std.Except", include_str!("../../../lib/Std/Except.adamas")),
     ("Std.IO", include_str!("../../../lib/Std/IO.adamas")),
+    ("Std.Text", include_str!("../../../lib/Std/Text.adamas")),
 ];
 
 /// Текст модуля вшитой стандартной библиотеки. `None` - такого модуля нет.

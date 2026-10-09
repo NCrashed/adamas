@@ -2458,6 +2458,18 @@ impl Emitter<'_> {
         let pad = Self::pad(depth);
         let value = self.value(value, depth);
         let name = self.temp();
+        // Функция символа (§4.4) - таблица Юникода в рантайме, тот же путь
+        // слова, что у преобразования.
+        if cast.op != adamas_core::prim::CastOp::Plain {
+            let _ = writeln!(
+                self.out,
+                "{pad}{} {name} = adamas_bits_{}(adamas_char_op(adamas_word_Char({value}), {}u));",
+                c_type(Repr::Flat(cast.to)),
+                cast.to.name(),
+                crate::emit_llvm::char_op_tag(cast.op)
+            );
+            return name;
+        }
         let _ = writeln!(
             self.out,
             "{pad}{} {name} = adamas_bits_{}(adamas_cast(adamas_word_{}({value}), {}u, {}u));",

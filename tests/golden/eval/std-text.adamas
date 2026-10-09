@@ -1,0 +1,15 @@
+-- `Std.Text` - разбор текста поверх `chars` прелюдии (§4.4, решение 2026-10-09).
+--
+-- Числа разбираются целиком или никак: пустой текст, посторонний символ и
+-- переполнение - `None`, граница типа - ещё число. Цифры - только ASCII:
+-- `'٣'` для `isNumber` число, а десятичной цифрой не служит. `trim` снимает
+-- пробельные по Юникоду, `splitOn` держит пустые части.
+
+import Std.Text (digitValue, parseUInt64, parseInt64, trim, splitOn)
+
+count : List a -> UInt64
+count Nil = 0
+count (Cons _x rest) = 1 + count rest
+
+main : { port : Option UInt64, max : Option UInt64, over : Option UInt64, empty : Option UInt64, junk : Option UInt64, neg : Option Int64, min : Option Int64, under : Option Int64, plus : Option Int64, digit : Option UInt64, trimmed : Bool, parts : UInt64, blank : UInt64 }
+main = {port = parseUInt64 (trim " 8080\n"), max = parseUInt64 "18446744073709551615", over = parseUInt64 "18446744073709551616", empty = parseUInt64 "", junk = parseUInt64 "12a", neg = parseInt64 "-42", min = parseInt64 "-9223372036854775808", under = parseInt64 "-9223372036854775809", plus = parseInt64 "+7", digit = digitValue '٣', trimmed = trim "\t кот \n" == "кот", parts = count (splitOn ',' "a,,b"), blank = count (splitOn ',' "")}

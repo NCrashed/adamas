@@ -1691,3 +1691,17 @@ void adamas_fiber_name_release(adamas_value value);
  * `PrimCast::apply`.
  */
 uint64_t adamas_cast(uint64_t bits, uint8_t from, uint8_t to);
+
+/** Функции символа (§4.4) для `adamas_char_op`: маска свойств Юникода и
+ *  простое отображение регистра. Порядок - `char_op_tag` LLVM-эмиттера. */
+#define ADAMAS_CHAR_CLASS 0u
+#define ADAMAS_CHAR_UPPER 1u
+#define ADAMAS_CHAR_LOWER 2u
+
+/**
+ * Функция символа над его кодом: `ADAMAS_CHAR_CLASS` отдаёт маску (буква 1,
+ * пробел 2, верхний 4, нижний 8, число 16), `ADAMAS_CHAR_UPPER` и
+ * `ADAMAS_CHAR_LOWER` - простое отображение регистра. Таблицы - `unicode.c`,
+ * порождённый из стандартной библиотеки Rust.
+ */
+uint64_t adamas_char_op(uint64_t code, uint8_t op);

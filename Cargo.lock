@@ -124,6 +124,7 @@ dependencies = [
 name = "adamas-runtime"
 version = "0.0.0"
 dependencies = [
+ "adamas-core",
  "cc",
 ]
 

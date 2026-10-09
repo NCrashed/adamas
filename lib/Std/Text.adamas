@@ -1,0 +1,68 @@
+-- | Разбор текста (§4.4): числа, обрезка, разрезание.
+--
+-- Основа - `chars`, `words`, `lines` и классы символа - живёт в прелюдии; здесь
+-- то, что нужно реже и что пишется поверх неё:
+--
+--     import Std.Text (parseUInt64, trim)
+--
+--     port : Option UInt64
+--     port = parseUInt64 (trim " 8080\n")
+--
+-- Разбор чисел отвечает `None` на всё, что числом не является целиком: пустой
+-- текст, посторонний символ, переполнение. Цифры - только ASCII `0`-`9`:
+-- `isNumber` прелюдии узнаёт и `'٣'`, и `'Ⅻ'`, но десятичной записью они не
+-- служат.
+
+-- | Значение десятичной цифры ASCII; не цифра - `None`.
+digitValue : Char -> Option UInt64
+digitValue c = if isDigit c then Some (uInt32ToUInt64 (charToUInt32 c - 48)) else None
+
+-- Накопленное `acc`, продолженное цифрами; `None` на не-цифре и на переполнении.
+digitsFrom : UInt64 -> List Char -> Option UInt64
+digitsFrom acc Nil = Some acc
+digitsFrom acc (Cons c rest) = case digitValue c of
+  None -> None
+  Some d -> if acc > 1844674407370955161 || (acc == 1844674407370955161 && d > 5) then None else digitsFrom (acc * 10 + d) rest
+
+-- Непустая запись из цифр.
+digits : List Char -> Option UInt64
+digits Nil = None
+digits (Cons c rest) = digitsFrom 0 (Cons c rest)
+
+-- | Десятичное `UInt64`: только цифры, без знака и пробелов.
+parseUInt64 : String -> Option UInt64
+parseUInt64 s = digits (chars s)
+
+-- Число со знаком из модуля не больше `limit`; `negative` - был ли минус.
+signed : Bool -> UInt64 -> Option UInt64 -> Option Int64
+signed negative limit None = None
+signed negative limit (Some m) = if m > limit then None else Some (uInt64ToInt64 (if negative then 0 - m else m))
+
+-- Запись числа со знаком или без.
+integer : List Char -> Option Int64
+integer (Cons '-' rest) = signed True 9223372036854775808 (digits rest)
+integer (Cons '+' rest) = signed False 9223372036854775807 (digits rest)
+integer other = signed False 9223372036854775807 (digits other)
+
+-- | Десятичное `Int64` с необязательным знаком `-` или `+` впереди.
+parseInt64 : String -> Option Int64
+parseInt64 s = integer (chars s)
+
+-- Символы без пробельных впереди.
+spaceless : List Char -> List Char
+spaceless Nil = Nil
+spaceless (Cons c rest) = if isSpace c then spaceless rest else Cons c rest
+
+-- | Текст без пробельных символов (`isSpace`) по краям.
+trim : String -> String
+trim s = fromChars (reverse (spaceless (reverse (spaceless (chars s)))))
+
+-- Части по разделителю; текущая собирается задом наперёд.
+pieces : Char -> List Char -> List Char -> List String
+pieces sep Nil current = Cons (fromChars (reverse current)) Nil
+pieces sep (Cons c rest) current = if c == sep then Cons (fromChars (reverse current)) (pieces sep rest Nil) else pieces sep rest (Cons c current)
+
+-- | Части текста между разделителями, пустые тоже: `splitOn ',' "a,,b"` -
+-- `["a", "", "b"]`, а пустой текст - одна пустая часть.
+splitOn : Char -> String -> List String
+splitOn sep s = pieces sep (chars s) Nil

@@ -905,12 +905,49 @@ pub struct PrimCast {
     pub from: PrimTy,
     /// Куда.
     pub to: PrimTy,
+    /// Что делается с битами: преобразование рода либо функция символа.
+    pub op: CastOp,
 }
+
+/// Род одноместной операции над примитивом (§4.3, §4.4).
+///
+/// Функции символа живут здесь, а не отдельным видом примитива: они так же
+/// одноместны, так же берут слово и отдают слово, и путь их через понижение,
+/// Perceus и машину тот же, что у преобразования. Различие - в том, что
+/// считается: у символа это свойство Юникода, и считает его таблица.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CastOp {
+    /// Преобразование между родами: `int32ToInt64`, `charToUInt32`.
+    Plain,
+    /// `charClass : Char -> UInt32` - маска свойств Юникода ([`CHAR_ALPHA`] …).
+    Class,
+    /// `charToUpper : Char -> Char` - простое отображение в верхний регистр.
+    Upper,
+    /// `charToLower : Char -> Char` - простое отображение в нижний регистр.
+    Lower,
+}
+
+/// Бит маски `charClass`: буква (свойство Alphabetic).
+pub const CHAR_ALPHA: u64 = 1;
+/// Бит маски: пробельный (`White_Space`).
+pub const CHAR_SPACE: u64 = 2;
+/// Бит маски: верхний регистр (Uppercase).
+pub const CHAR_UPPER: u64 = 4;
+/// Бит маски: нижний регистр (Lowercase).
+pub const CHAR_LOWER: u64 = 8;
+/// Бит маски: число (общая категория N).
+pub const CHAR_NUMBER: u64 = 16;
 
 impl PrimCast {
     /// Имя, которым преобразование пишется в программе.
     #[must_use]
     pub fn name(self) -> String {
+        match self.op {
+            CastOp::Plain => {}
+            CastOp::Class => return "charClass".to_owned(),
+            CastOp::Upper => return "charToUpper".to_owned(),
+            CastOp::Lower => return "charToLower".to_owned(),
+        }
         let head = self.from.name();
         let mut out = String::with_capacity(head.len() + 2 + self.to.name().len());
         let mut letters = head.chars();
@@ -931,6 +968,19 @@ impl PrimCast {
     /// Имена типов `To` не содержат, поэтому разделитель однозначен.
     #[must_use]
     pub fn named(text: &str) -> Option<Self> {
+        let char_fn = |to, op| {
+            Some(Self {
+                from: PrimTy::Char,
+                to,
+                op,
+            })
+        };
+        match text {
+            "charClass" => return char_fn(PrimTy::UInt32, CastOp::Class),
+            "charToUpper" => return char_fn(PrimTy::Char, CastOp::Upper),
+            "charToLower" => return char_fn(PrimTy::Char, CastOp::Lower),
+            _ => {}
+        }
         let at = text.find("To")?;
         let (head, tail) = text.split_at(at);
         let to = PrimTy::named(tail.strip_prefix("To")?)?;
@@ -940,7 +990,11 @@ impl PrimCast {
         // У символа пара одна - `UInt32`: код символа и символ по коду (§4.4).
         // Прочие числа к символу не ведут, и имени у такого преобразования нет.
         let paired = |one: PrimTy, other: PrimTy| one != PrimTy::Char || other == PrimTy::UInt32;
-        (from != to && paired(from, to) && paired(to, from)).then_some(Self { from, to })
+        (from != to && paired(from, to) && paired(to, from)).then_some(Self {
+            from,
+            to,
+            op: CastOp::Plain,
+        })
     }
 
     /// Считает преобразование над битами литерала.
@@ -957,6 +1011,13 @@ impl PrimCast {
         // Символ по коду: не-скалярное значение - суррогат либо код за
         // `U+10FFFF` - становится `U+FFFD`, знаком замены. Отказа нет, как и у
         // прочих преобразований; точный ответ даёт `charFrom` прелюдии.
+        let symbol = || char::from_u32(u32::try_from(bits).unwrap_or(0)).unwrap_or('\u{FFFD}');
+        match self.op {
+            CastOp::Plain => {}
+            CastOp::Class => return char_class(symbol()),
+            CastOp::Upper => return u64::from(simple(symbol(), symbol().to_uppercase())),
+            CastOp::Lower => return u64::from(simple(symbol(), symbol().to_lowercase())),
+        }
         if self.to == PrimTy::Char {
             return if scalar(bits) { bits } else { REPLACEMENT };
         }
@@ -969,6 +1030,42 @@ impl PrimCast {
         } else {
             self.to.saturated(value)
         }
+    }
+}
+
+/// Маска свойств символа для `charClass` (§4.4): свойства Юникода той версии,
+/// что у стандартной библиотеки Rust. Таблицы рантайма (`unicode.c`)
+/// порождены из этих же функций и сверяются тестом - версия Юникода у трёх
+/// вычислителей одна.
+#[must_use]
+pub fn char_class(symbol: char) -> u64 {
+    let mut mask = 0;
+    if symbol.is_alphabetic() {
+        mask |= CHAR_ALPHA;
+    }
+    if symbol.is_whitespace() {
+        mask |= CHAR_SPACE;
+    }
+    if symbol.is_uppercase() {
+        mask |= CHAR_UPPER;
+    }
+    if symbol.is_lowercase() {
+        mask |= CHAR_LOWER;
+    }
+    if symbol.is_numeric() {
+        mask |= CHAR_NUMBER;
+    }
+    mask
+}
+
+/// Простое отображение регистра: символ в символ. Полное отображение бывает
+/// длиннее одного символа (`ß` в верхнем - `SS`), и тогда символ остаётся
+/// собой - строковое отображение есть отдельная операция над текстом.
+#[must_use]
+pub fn simple(symbol: char, mut mapped: impl Iterator<Item = char>) -> u32 {
+    match (mapped.next(), mapped.next()) {
+        (Some(only), None) => u32::from(only),
+        _ => u32::from(symbol),
     }
 }
 

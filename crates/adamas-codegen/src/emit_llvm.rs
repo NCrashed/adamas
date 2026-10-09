@@ -355,7 +355,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 
-use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
+use adamas_core::prim::{CastOp, PrimCmp, PrimOp, PrimTy};
 
 use adamas_core::source::Location;
 
@@ -659,6 +659,16 @@ fn tag_of(ty: PrimTy) -> u8 {
     .unwrap_or_default()
 }
 
+/// Тег функции символа для `adamas_char_op` (§4.4): тот же порядок, что у
+/// `ADAMAS_CHAR_*` в `adamas.h`.
+pub(crate) const fn char_op_tag(op: CastOp) -> u8 {
+    match op {
+        CastOp::Plain | CastOp::Class => 0,
+        CastOp::Upper => 1,
+        CastOp::Lower => 2,
+    }
+}
+
 /// Объявление преобразования между числовыми типами (§4.3, §10 вопрос 205).
 ///
 /// Условно, как и объявления массива, и по тому же доводу: на программе без
@@ -681,8 +691,20 @@ fn conversions(out: &mut String, program: &Program) {
     out.push_str(concat!(
         "; Преобразование чисел (§4.3): реализация в рантайме, одна на оба пути.\n",
         "declare i64 @adamas_cast(i64, i8, i8)\n",
-        "\n",
     ));
+    // Функции символа (§4.4) - таблицы Юникода в рантайме; объявление
+    // условно, чтобы прочие программы выходили байт в байт прежними.
+    let symbolic = program.functions.iter().any(|function| {
+        let mut seen = false;
+        walk(&function.body, &mut |expr| {
+            seen |= matches!(expr, Expr::Convert { cast, .. } if cast.op != CastOp::Plain);
+        });
+        seen
+    });
+    if symbolic {
+        out.push_str("declare i64 @adamas_char_op(i64, i8)\n");
+    }
+    out.push('\n');
 }
 
 fn arrays(out: &mut String, program: &Program) {
@@ -3055,14 +3077,19 @@ impl<'a> Builder<'a> {
                 let value = self.value(value)?;
                 let word = self.widen(cast.from, &value);
                 let answer = self.temp();
-                self.instruction(
-                    &format!(
+                let call = if cast.op == CastOp::Plain {
+                    format!(
                         "{answer} = call i64 @adamas_cast(i64 {word}, i8 {}, i8 {})",
                         tag_of(cast.from),
                         tag_of(cast.to)
-                    ),
-                    self.here(),
-                );
+                    )
+                } else {
+                    format!(
+                        "{answer} = call i64 @adamas_char_op(i64 {word}, i8 {})",
+                        char_op_tag(cast.op)
+                    )
+                };
+                self.instruction(&call, self.here());
                 Ok(self.narrow(cast.to, &answer))
             }
             Expr::Call {

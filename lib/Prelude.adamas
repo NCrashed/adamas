@@ -488,6 +488,42 @@ instance Ord Char where
   lt = ltChar
   le = leChar
 
+-- | Буква (свойство Юникода Alphabetic): `isAlpha 'я'` - да. Свойства
+-- символа - маска `charClass`, порождённая из таблиц Юникода.
+isAlpha : Char -> Bool
+isAlpha c = andUInt32 (charClass c) 1 /= 0
+
+-- | Пробельный (White_Space): пробел, табуляция, перевод строки, `U+00A0` и
+-- прочие.
+isSpace : Char -> Bool
+isSpace c = andUInt32 (charClass c) 2 /= 0
+
+-- | Заглавная (Uppercase).
+isUpper : Char -> Bool
+isUpper c = andUInt32 (charClass c) 4 /= 0
+
+-- | Строчная (Lowercase).
+isLower : Char -> Bool
+isLower c = andUInt32 (charClass c) 8 /= 0
+
+-- | Число в смысле Юникода (общая категория N): `'٣'` и `'½'` - тоже.
+isNumber : Char -> Bool
+isNumber c = andUInt32 (charClass c) 16 /= 0
+
+-- | Десятичная цифра ASCII, `'0'`-`'9'` - те, что читает разбор чисел.
+-- Цифры других письменностей - `isNumber`.
+isDigit : Char -> Bool
+isDigit c = leChar '0' c && leChar c '9'
+
+-- | Заглавная пара символа, если она один символ: `toUpper 'я'` - `'Я'`,
+-- `toUpper 'ß'` - `'ß'` (полная пара - два символа).
+toUpper : Char -> Char
+toUpper c = charToUpper c
+
+-- | Строчная пара символа.
+toLower : Char -> Char
+toLower c = charToLower c
+
 -- # Деление (§3.7)
 --
 -- `/` и `%` - методы класса `Div`, и делитель у них требует **предусловия**
@@ -982,3 +1018,65 @@ sameList _xs _ys = False
 
 instance {Eq a} => Eq (List a) where
   eq xs ys = sameList xs ys
+
+-- # Символы текста (§4.4, §4.5)
+
+-- Байт текста с номером `i`; за длиной - ноль. Номер доказывает сужение.
+byteAt : (ω n : UInt64) -> Array n UInt8 -> UInt64 -> UInt32
+byteAt n bytes i = if ltUInt64 i n then uInt8ToUInt32 (arrayIndex bytes i) else 0
+
+-- Шесть битов байта продолжения на `k` дальше `i`.
+continuation : (ω n : UInt64) -> Array n UInt8 -> UInt64 -> UInt64 -> UInt32
+continuation n bytes i k = andUInt32 (byteAt n bytes (addUInt64 i k)) 63
+
+-- Код символа, начинающегося байтом `lead` на месте `i`.
+codeAt : (ω n : UInt64) -> Array n UInt8 -> UInt64 -> UInt32 -> UInt32
+codeAt n bytes i lead =
+  let tail = continuation n bytes i
+  if ltUInt32 lead 128 then lead
+  else if ltUInt32 lead 224 then orUInt32 (shlUInt32 (andUInt32 lead 31) 6) (tail 1)
+  else if ltUInt32 lead 240 then orUInt32 (orUInt32 (shlUInt32 (andUInt32 lead 15) 12) (shlUInt32 (tail 1) 6)) (tail 2)
+  else orUInt32 (orUInt32 (orUInt32 (shlUInt32 (andUInt32 lead 7) 18) (shlUInt32 (tail 1) 12)) (shlUInt32 (tail 2) 6)) (tail 3)
+
+-- Символы текста с байта `i`.
+charsFrom : (ω n : UInt64) -> Array n UInt8 -> UInt64 -> List Char
+charsFrom n bytes i = if ltUInt64 i n then
+  let lead = byteAt n bytes i
+  let width : UInt64 = if ltUInt32 lead 128 then 1 else if ltUInt32 lead 224 then 2 else if ltUInt32 lead 240 then 3 else 4
+  Cons (uInt32ToChar (codeAt n bytes i lead)) (charsFrom n bytes (addUInt64 i width))
+else Nil
+
+-- | Символы текста по порядку - раскодировка UTF-8, за проход.
+chars : String -> List Char
+chars (MkString n bytes) = charsFrom n bytes 0
+
+-- | Текст из символов.
+fromChars : List Char -> String
+fromChars Nil = ""
+fromChars (Cons c rest) = charText c <> fromChars rest
+
+-- Собранное задом наперёд слово перед остальными; пустое - не слово.
+flushed : List Char -> List String -> List String
+flushed Nil rest = rest
+flushed (Cons c cs) rest = Cons (fromChars (reverse (Cons c cs))) rest
+
+-- Слова с текущим, собранным задом наперёд.
+wordsFrom : List Char -> List Char -> List String
+wordsFrom Nil current = flushed current Nil
+wordsFrom (Cons c rest) current = if isSpace c then flushed current (wordsFrom rest Nil) else wordsFrom rest (Cons c current)
+
+-- | Слова текста: части между пробельными символами (`isSpace`), пустые
+-- части не в счёт.
+words : String -> List String
+words s = wordsFrom (chars s) Nil
+
+-- Строки с текущей, собранной задом наперёд.
+linesFrom : List Char -> List Char -> List String
+linesFrom Nil Nil = Nil
+linesFrom Nil (Cons c cs) = Cons (fromChars (reverse (Cons c cs))) Nil
+linesFrom (Cons c rest) current = if c == '\n' then Cons (fromChars (reverse current)) (linesFrom rest Nil) else linesFrom rest (Cons c current)
+
+-- | Строки текста: части между переводами строки `'\n'`. Пустая строка в
+-- середине - пустая строка ответа, перевод в конце новой строки не даёт.
+lines : String -> List String
+lines s = linesFrom (chars s) Nil

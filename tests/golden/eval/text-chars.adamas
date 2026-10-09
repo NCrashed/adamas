@@ -1,0 +1,24 @@
+-- Функции символа и разбор текста на части (§4.4, решение 2026-10-09).
+--
+-- Классы символа - по Юникоду, а не по ASCII: `isAlpha 'я'` истинно, `isSpace`
+-- узнаёт и неразрывный пробел. Регистр - простое отображение, символ в символ:
+-- `toUpper 'ß'` остаётся `'ß'`, потому что его заглавная - две буквы. Машина
+-- считает через стандартную библиотеку Rust, собранная программа - по
+-- таблицам рантайма, порождённым из неё же; ответ у трёх вычислителей один.
+--
+-- `chars` раскладывает текст на символы, `words` режет по пробельным, `lines`
+-- по переводам строки.
+
+count : List a -> UInt64
+count Nil = 0
+count (Cons _x rest) = 1 + count rest
+
+joined : List String -> String
+joined Nil = ""
+joined (Cons s rest) = s <> "|" <> joined rest
+
+classes : Char -> UInt32
+classes c = (if isAlpha c then 1 else 0) + (if isSpace c then 2 else 0) + (if isUpper c then 4 else 0) + (if isLower c then 8 else 0) + (if isNumber c then 16 else 0) + (if isDigit c then 32 else 0)
+
+main : { letters : UInt32, cyrillic : UInt32, space : UInt32, digit : UInt32, roman : UInt32, upper : Bool, lower : Bool, sharp : Char, chars : UInt64, words : Bool, lines : Bool }
+main = {letters = classes 'a' + classes 'Q' * 100, cyrillic = classes 'я', space = classes '\u{A0}', digit = classes '7', roman = classes 'Ⅻ', upper = fromChars (map toUpper (chars "привет, world")) == "ПРИВЕТ, WORLD", lower = fromChars (map toLower (chars "ÄÖÜ ЁЖ")) == "äöü ёж", sharp = toUpper 'ß', chars = count (chars "кот😀"), words = joined (words "  раз два\tтри\n ") == "раз|два|три|", lines = joined (lines "a\n\nb\n") == "a||b|"}

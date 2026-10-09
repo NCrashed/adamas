@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+{letters = 509, cyrillic = 9, space = 2, digit = 48, roman = 21, upper = True, lower = True, sharp = 'ß', chars = 4, words = True, lines = True}

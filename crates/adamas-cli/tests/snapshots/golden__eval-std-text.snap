@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+{port = Some 8080, max = Some 18446744073709551615, over = None, empty = None, junk = None, neg = Some (-42), min = Some (-9223372036854775808), under = None, plus = Some 7, digit = None, trimmed = True, parts = 3, blank = 1}

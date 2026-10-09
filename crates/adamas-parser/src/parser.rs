@@ -279,6 +279,21 @@ pub enum ParseError {
         next: Span,
     },
 
+    /// `data T a = C x | D` - объявление типа по-хаскельному (§4.1).
+    ///
+    /// Отказ показывает ту же декларацию по-нашему, если хвост прочёлся:
+    /// новичку правильная форма нужнее правила.
+    #[error("{}", match .suggestion {
+        Some(suggestion) => adamas_l10n::tr!("parse-haskell-data", suggestion = suggestion.as_str()),
+        None => adamas_l10n::tr!("parse-haskell-data-generic"),
+    })]
+    HaskellData {
+        /// Та же декларация по-нашему, если хвост прочёлся.
+        suggestion: Option<String>,
+        /// От `=` до конца прочитанного.
+        span: Span,
+    },
+
     /// `import Module (..)` - wildcard, которого в языке нет.
     ///
     /// §4.4 отказывает ему не по недосмотру: все имена в scope пишутся явно,
@@ -339,6 +354,7 @@ impl ParseError {
             | Self::Misplaced { span, .. }
             | Self::Wildcard { span }
             | Self::NestedImport { span }
+            | Self::HaskellData { span, .. }
             | Self::BlockNotLast { next: span, .. }
             | Self::TooDeep { span, .. } => *span,
         }
@@ -1029,6 +1045,11 @@ impl<'a> Parser<'a> {
             }
         }
 
+        // `data Shape = Circle UInt64 | …` - форма Haskell. Своего прочтения у
+        // неё нет, и отказ показывает ту же декларацию по-нашему.
+        if self.at(TokenKind::Equals) {
+            return Err(self.haskell_data(&name, &params));
+        }
         let mut end = kind.as_ref().map_or(name.span, |kind| kind.span);
         let mut constructors = Vec::new();
         if self.eat(TokenKind::Where).is_some() {
@@ -1165,6 +1186,66 @@ impl<'a> Parser<'a> {
 
     /// Параметры объявления: голые имена (`data Pair a b`) вперемешку с
     /// группами в скобках (`data Vect {0 n : Nat}`).
+    /// Отказ на `data T a = C x | D` - со стоящей на `=` декларацией,
+    /// переписанной по-нашему (§4.1): конструкторы после `where`, каждый со
+    /// своим типом. Хвост читается применениями через `|`; не прочёлся -
+    /// подсказка общая, с примером.
+    fn haskell_data(&mut self, name: &Name, params: &[Binder]) -> ParseError {
+        let source = self.text;
+        let slice = |span: Span| source.get(span.start()..span.end()).unwrap_or_default();
+        let equals = self.bump().span;
+        let result = std::iter::once(&*name.text)
+            .chain(
+                params
+                    .iter()
+                    .flat_map(|it| it.names.iter().map(|it| &*it.text)),
+            )
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut lines = Vec::new();
+        let mut end = equals;
+        let read = loop {
+            let Ok(constructor) = self.application() else {
+                break false;
+            };
+            end = constructor.span;
+            let mut fields = Vec::new();
+            let mut head = &constructor;
+            while let ExprKind::App(callee, field) = &head.kind {
+                // Применение в домене стрелки скобок не требует: `Tree a -> …`.
+                let text = slice(field.span);
+                let bare = matches!(field.kind, ExprKind::App(..))
+                    .then(|| text.strip_prefix('(').and_then(|it| it.strip_suffix(')')))
+                    .flatten();
+                fields.push(bare.unwrap_or(text).to_owned());
+                head = callee;
+            }
+            let ExprKind::Name(written) = &head.kind else {
+                break false;
+            };
+            fields.reverse();
+            fields.push(result.clone());
+            lines.push(format!("  {} : {}", written.text, fields.join(" -> ")));
+            if self.eat(TokenKind::Pipe).is_none() {
+                break true;
+            }
+        };
+        let written: Vec<&str> = std::iter::once("data")
+            .chain(std::iter::once(&*name.text))
+            .chain(params.iter().map(|it| slice(it.span)))
+            .chain(std::iter::once("where"))
+            .collect();
+        let suggestion = if read && !lines.is_empty() {
+            Some(format!("\n\n{}\n{}", written.join(" "), lines.join("\n")))
+        } else {
+            None
+        };
+        ParseError::HaskellData {
+            suggestion,
+            span: equals.merge(end),
+        }
+    }
+
     fn params(&mut self) -> Result<Vec<Binder>, ParseError> {
         let mut params = Vec::new();
         loop {

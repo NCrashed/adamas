@@ -47,6 +47,8 @@ parse-duplicate-state = `state`: the initial state is written twice
 parse-split-clauses = clauses of `{ $name }` are separated by another declaration
 parse-block-not-last = nothing follows a form with a block on its line: only indentation shows where it ends
 parse-wildcard = there is no wildcard import: opened names are listed one by one
+parse-haskell-data = a type is not declared with `=`: constructors are listed after `where`, each on its own line with its own type - the same declaration our way is below{ $suggestion }
+parse-haskell-data-generic = a type is not declared with `=`: constructors are listed after `where`, each on its own line with its own type - `data Box a where`, and on the next line `MkBox : a -> Box a`
 parse-nested-import = `import` is written at the top level of a file
 parse-too-deep = nesting deeper than the limit of { $limit }
 

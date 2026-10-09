@@ -65,6 +65,11 @@ pub(crate) fn related(error: &ElabError) -> Vec<Related> {
 /// разбора: у него спан есть с самого начала, а ошибка своя.
 #[must_use]
 pub fn located(file: &SourceFile, span: Span, message: &str) -> String {
+    // Первая строка - заголовок у места, остальное - под кареткой: так же
+    // сообщение разбирает редактор (заголовок и подробности диагностики).
+    if let Some((headline, detail)) = message.split_once('\n') {
+        return format!("{}\n{detail}", located(file, span, headline));
+    }
     let Some(Location { line, column }) = file.location(span.start()) else {
         return format!("{}: {message}", file.name());
     };

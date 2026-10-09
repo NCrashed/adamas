@@ -1,0 +1,12 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+assertion_line: 132
+expression: text
+---
+Ошибка: haskell-data.adamas:7:13: тип объявляется не через `=`: конструкторы перечисляются после `where`, каждый своей строкой со своим типом - эта же декларация по-нашему ниже
+  data Tree a = Leaf | Node (Tree a) a (Tree a)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+data Tree a where
+  Leaf : Tree a
+  Node : Tree a -> a -> Tree a -> Tree a

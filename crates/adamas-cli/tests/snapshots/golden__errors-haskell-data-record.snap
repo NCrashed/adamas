@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+assertion_line: 132
+expression: text
+---
+Ошибка: haskell-data-record.adamas:7:8: тип объявляется не через `=`: конструкторы перечисляются после `where`, каждый своей строкой со своим типом - `data Box a where`, а строкой ниже `MkBox : a -> Box a`
+  data P = P { x :: Int }
+         ^

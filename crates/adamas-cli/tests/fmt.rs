@@ -150,6 +150,8 @@ const UNPARSED: &[&str] = &[
     "section-minus.adamas",
     "backtick-operator.adamas",
     "guards-open.adamas",
+    "haskell-data.adamas",
+    "haskell-data-record.adamas",
     "variadic-off-the-boundary.adamas",
     "record-value-multiplicity.adamas",
     "char-literal-two.adamas",

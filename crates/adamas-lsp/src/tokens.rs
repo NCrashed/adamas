@@ -354,7 +354,8 @@ fn lexical(text: &str) -> (Tokens, Option<Piece>) {
             modifiers: 0,
         }),
         adamas_parser::lexer::LexError::UnexpectedChar { .. }
-        | adamas_parser::lexer::LexError::TabInIndentation { .. } => None,
+        | adamas_parser::lexer::LexError::TabInIndentation { .. }
+        | adamas_parser::lexer::LexError::BadBacktick { .. } => None,
     };
     (lexed, tail)
 }

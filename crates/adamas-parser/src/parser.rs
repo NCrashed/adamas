@@ -614,8 +614,14 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Текст лексемы; у имени в обратных кавычках - без них (§4.4).
     fn symbol(&self, token: Token) -> Symbol {
-        Rc::from(token.text(self.text))
+        let text = token.text(self.text);
+        Rc::from(
+            text.strip_prefix('`')
+                .and_then(|it| it.strip_suffix('`'))
+                .unwrap_or(text),
+        )
     }
 
     fn name_of(&self, token: Token) -> Name {

@@ -69,6 +69,13 @@ pub enum LexError {
         /// Где она.
         span: Span,
     },
+
+    /// Обратные кавычки не обрамляют имя: `` x `div` y `` (§4.4).
+    #[error("{}", adamas_l10n::tr!("lex-bad-backtick"))]
+    BadBacktick {
+        /// От открывающей кавычки до места, где имя кончилось.
+        span: Span,
+    },
 }
 
 impl LexError {
@@ -80,7 +87,8 @@ impl LexError {
             | Self::UnterminatedString { span }
             | Self::UnknownEscape { span }
             | Self::BadChar { span }
-            | Self::TabInIndentation { span } => span,
+            | Self::TabInIndentation { span }
+            | Self::BadBacktick { span } => span,
             Self::UnterminatedComment { open } => open,
         }
     }
@@ -138,6 +146,8 @@ pub fn lex(text: &str) -> Result<Tokens, LexError> {
             string(&mut cursor)?
         } else if ch == '\'' {
             character(&mut cursor)?
+        } else if ch == '`' {
+            backtick(&mut cursor)?
         } else if let Some(kind) = punctuation(ch) {
             cursor.bump();
             kind
@@ -251,6 +261,26 @@ fn block_comment(cursor: &mut Cursor<'_>, start: Mark) -> Result<(), LexError> {
 }
 
 /// Идентификатор или ключевое слово.
+/// Имя в обратных кавычках - оператор (§4.4, решение 2026-10-09):
+/// `` x `div` y `` есть `div x y`. Лексема одна, вместе с кавычками; имя
+/// оператора без них отдаёт парсер.
+fn backtick(cursor: &mut Cursor<'_>) -> Result<TokenKind, LexError> {
+    let start = cursor.mark();
+    cursor.bump();
+    if !cursor.peek().is_some_and(is_ident_start) {
+        return Err(LexError::BadBacktick {
+            span: cursor.span_from(start),
+        });
+    }
+    if identifier(cursor) != TokenKind::Ident || cursor.peek() != Some('`') {
+        return Err(LexError::BadBacktick {
+            span: cursor.span_from(start),
+        });
+    }
+    cursor.bump();
+    Ok(TokenKind::Operator)
+}
+
 fn identifier(cursor: &mut Cursor<'_>) -> TokenKind {
     let start = cursor.mark();
     while cursor.peek().is_some_and(is_ident_continue) {

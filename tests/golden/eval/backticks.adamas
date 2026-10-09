@@ -1,0 +1,17 @@
+-- Имя в обратных кавычках - оператор (§4.4, решение 2026-10-09).
+--
+-- `` x `div` y `` есть `div x y`; фикситет - `infixl 9`, как в Haskell, и
+-- объявлять его не нужно: `` 1 + 2 `plus` 3 * 2 `` - это `1 + (plus 2 3) * 2`.
+-- Работает и в секции, и с конструктором: `` 1 `Cons` Nil ``.
+
+avg : UInt64 -> UInt64 -> UInt64
+avg a b = (a + b) `half` 0
+  where
+    half : UInt64 -> UInt64 -> UInt64
+    half s _z = s / 2
+
+plus : UInt64 -> UInt64 -> UInt64
+plus x y = x + y
+
+main : { mixed : UInt64, sec : List UInt64, left : List UInt64, chained : UInt64, cons : List UInt64 }
+main = {mixed = 1 + 2 `plus` 3 * 2, sec = map (`plus` 10) [1, 2], left = map (100 `plus`) [1], chained = 1 `plus` 2 `plus` 3, cons = 1 `Cons` Nil}

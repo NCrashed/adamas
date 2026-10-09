@@ -1,0 +1,6 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+assertion_line: 117
+expression: text
+---
+{mixed = 11, sec = Cons 11 (Cons 12 Nil), left = Cons 101 Nil, chained = 6, cons = Cons 1 Nil}

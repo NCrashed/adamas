@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+assertion_line: 132
+expression: text
+---
+Ошибка: backtick-operator.adamas:8:10: в обратных кавычках пишется имя функции: «x `div` y» значит «div x y»
+  main = 1 `+` 2
+           ^

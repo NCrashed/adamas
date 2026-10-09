@@ -8,6 +8,7 @@ lex-unterminated-string = unterminated string literal
 lex-unknown-escape = unknown escape in a string
 lex-bad-char = a character literal is exactly one character in single quotes: `'a'`, `'\n'`, `'\u{"{"}1F600{"}"}'`
 lex-tab-in-indentation = tab in indentation: indentation is significant, tab width is not
+lex-bad-backtick = backticks enclose a function name: «x `div` y» means «div x y»
 
 layout-shallow-block = a block body must be indented further than the enclosing block
 layout-empty-block = no block body after the keyword

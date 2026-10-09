@@ -95,6 +95,15 @@ impl Fixities {
     }
 
     fn fixity(&self, operator: &Name) -> Result<Fixity, ElabError> {
+        // Имя в обратных кавычках - `` x `div` y `` - связывает `infixl 9`,
+        // как в Haskell (§4.4, решение 2026-10-09). Оператором имя стоит
+        // только так, и спросить его написание достаточно.
+        if !adamas_parser::lexer::is_operator(&operator.text) {
+            return Ok(Fixity {
+                assoc: Assoc::Left,
+                precedence: 9,
+            });
+        }
         self.0
             .get(&operator.text)
             .copied()

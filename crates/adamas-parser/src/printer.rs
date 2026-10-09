@@ -1069,7 +1069,7 @@ impl<'a> Printer<'a> {
         self.expr(&chain.head, Prec::App);
         for (operator, operand) in &chain.tail {
             self.push(" ");
-            self.push(&operator.text);
+            self.infix(&operator.text);
             self.push(" ");
             self.expr(operand, Prec::App);
         }
@@ -1083,12 +1083,23 @@ impl<'a> Printer<'a> {
             self.expr(operand, Prec::App);
             self.push(" ");
         }
-        self.push(&section.operator.text);
+        self.infix(&section.operator.text);
         if let Some(operand) = section.operand.as_deref().filter(|_| !section.left) {
             self.push(" ");
             self.expr(operand, Prec::App);
         }
         self.push(")");
+    }
+
+    /// Оператор в инфиксной позиции; имя - в обратных кавычках (§4.4).
+    fn infix(&mut self, text: &str) {
+        if is_operator(text) {
+            self.push(text);
+        } else {
+            self.push("`");
+            self.push(text);
+            self.push("`");
+        }
     }
 
     fn sequence(&mut self, open: &str, items: &[Expr], close: &str) {

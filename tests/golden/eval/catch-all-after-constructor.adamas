@@ -1,0 +1,21 @@
+-- Ветвь-переменная за ветвью-конструктором (находка разбора текста,
+-- 2026-10-09).
+--
+-- Компилятор клауз подставляет переменную `current` уточнённым разбираемым
+-- (`Cons #1 #0`), и дырка имплисита `reverse`, решаемая ядром по дереву,
+-- переставала быть паттерном Миллера: программа отвергалась. Тело клаузы и
+-- ветки теперь проверяется раньше, пока переменные образцов - переменные.
+
+g : List UInt64 -> List UInt64
+g Nil = Nil
+g current = reverse current
+
+f : List UInt64 -> Option UInt64
+f xs = case xs of
+  Cons 1 _rest -> None
+  other -> case Some (length other) of
+    None -> None
+    Some m -> Some m
+
+main : { reversed : List UInt64, nested : Option UInt64, words : UInt64 }
+main = {reversed = g [1, 2, 3], nested = f [5, 6], words = length (words "раз два")}

@@ -4210,13 +4210,17 @@ impl<'a> Elaborator<'a> {
             // бы цель только проверкой ядра, а она перед досчётом литералов
             // молчит (§10 вопрос 212). Не сошлось - откат: отвечать будет
             // проверка, как раньше.
-            if let Some(goal) = goal.filter(|goal| it.flexible(goal)) {
+            if let Some(goal) = goal.clone().filter(|goal| it.flexible(goal)) {
                 if let Some(found) = it.synthesized(&term) {
                     let mark = it.metas.mark();
                     if !convertible(it.signature, it.metas, it.ctx.size(), &found, &goal) {
                         it.metas.rollback(mark);
                     }
                 }
+            } else if let Some(goal) = &goal {
+                // Ветвь-переменная за ветвью-конструктором - тот же случай, что
+                // у клаузы ([`Self::solved_here`]).
+                it.solved_here(&term, Some(goal));
             }
             Ok(term)
         });
@@ -8447,7 +8451,9 @@ impl<'a> Elaborator<'a> {
         // (§10 вопросы 131, 234): снаружи она отдаёт приостановленное.
         let body = self.closing_all(&closing, |it| {
             let body = it.placed(Position::Returned, |it| it.expr(&clause.body, Mult::Many))?;
-            Ok(it.executed(body, rest.result.as_ref()))
+            let body = it.executed(body, rest.result.as_ref());
+            it.solved_here(&body, rest.result.as_ref());
+            Ok(body)
         });
         self.scope.truncate(depth);
         self.ctx = outer;
@@ -8456,6 +8462,30 @@ impl<'a> Elaborator<'a> {
             patterns,
             body: body?,
         })
+    }
+
+    /// Дырки тела клаузы решаются в контексте клаузы, пока переменные
+    /// образцов - переменные.
+    ///
+    /// Элаборация имплиситы аргумента не решает - `stepped` откатывает свою
+    /// проверку, - и решает их ядро, проверяя дерево разбора. А там переменная
+    /// ветки-переменной за веткой-конструктором подставлена уточнённым
+    /// разбираемым: `g Nil = Nil; g current = reverse current` проверялось с
+    /// `current = Cons #1 #0`, спайн дырки `a` у `reverse` переставал быть
+    /// паттерном Миллера, и программа отвергалась. Здесь та же проверка тела
+    /// идёт раньше, по связываниям; не сошлась - откат, и решает, как прежде,
+    /// ядро.
+    fn solved_here(&mut self, body: &Term, result: Option<&Rc<Value>>) {
+        let Some(result) = result else {
+            return;
+        };
+        if adamas_core::meta::unsolved_term_meta(self.metas, body).is_none() {
+            return;
+        }
+        let mark = self.metas.mark();
+        if check(&self.ctx, self.metas, Mult::Many, body, result).is_err() {
+            self.metas.rollback(mark);
+        }
     }
 
     /// Паттерны клаузы, разложенные по связываниям объявленного типа.

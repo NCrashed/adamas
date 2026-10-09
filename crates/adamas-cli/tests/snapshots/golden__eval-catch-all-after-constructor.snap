@@ -1,0 +1,6 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+assertion_line: 117
+expression: text
+---
+{reversed = Cons 3 (Cons 2 (Cons 1 Nil)), nested = Some 2, words = 2}

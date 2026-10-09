@@ -1067,7 +1067,7 @@ fromChars (Cons c rest) = charText c <> fromChars rest
 -- Собранное задом наперёд слово перед остальными; пустое - не слово.
 flushed : List Char -> List String -> List String
 flushed Nil rest = rest
-flushed (Cons c cs) rest = Cons (fromChars (reverse (Cons c cs))) rest
+flushed current rest = Cons (fromChars (reverse current)) rest
 
 -- Слова с текущим, собранным задом наперёд.
 wordsFrom : List Char -> List Char -> List String
@@ -1082,7 +1082,7 @@ words s = wordsFrom (chars s) Nil
 -- Строки с текущей, собранной задом наперёд.
 linesFrom : List Char -> List Char -> List String
 linesFrom Nil Nil = Nil
-linesFrom Nil (Cons c cs) = Cons (fromChars (reverse (Cons c cs))) Nil
+linesFrom Nil current = Cons (fromChars (reverse current)) Nil
 linesFrom (Cons c rest) current = if c == '\n' then Cons (fromChars (reverse current)) (linesFrom rest Nil) else linesFrom rest (Cons c current)
 
 -- | Строки текста: части между переводами строки `'\n'`. Пустая строка в

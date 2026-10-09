@@ -1,0 +1,11 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+assertion_line: 132
+expression: text
+---
+Ошибка: literal-let-one-type.adamas:17:5: несовпадение типов: ожидался `Int32`, получен `UInt64`
+    g m
+      ^
+  в контексте:
+    (m : UInt64)
+    (a : UInt64)

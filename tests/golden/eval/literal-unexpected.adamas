@@ -1,0 +1,56 @@
+-- Литерал без ожидания (§4.3, решение 2026-10-09): `let` и `where` без
+-- сигнатуры, поле записи без типа, разбираемое `case`.
+--
+-- Тип ему - дырка в очереди объявления, как у литерала нерешённой позиции, и
+-- решает её место употребления: `k` ниже - `UInt64`, потому что прибавлен к
+-- `UInt64`. Не решил никто - умолчание `Int` с предупреждением; разбираемое
+-- под литералом-образцом берёт его сразу, образцу нужен примитив. Прежде
+-- такой литерал разворачивался в `Nat`, и `x + k` отвергался.
+
+scaled : UInt64 -> UInt64
+scaled x = x * scale + offset
+  where
+    scale = 3
+    offset = scale + 1
+
+type Pt = {x : Int32}
+
+origin : Int32
+origin =
+  let p = {x = 1}
+  p.x
+
+slots : Array 4 UInt64
+slots = arrayNew 4 0
+
+stored : UInt64
+stored =
+  let i = 2
+  arrayIndex (arraySet slots i 9) i
+
+signed : Int8
+signed =
+  let d = -3
+  let e = d * 2
+  e + 1
+
+half : Float32
+half =
+  let h = 0.5
+  h * 3.0
+
+which : UInt64
+which =
+  let k = 7
+  case k of
+    7 -> 1
+    _n -> 2
+
+-- Никто тип не задал: `Int`, и `show` печатает `Int64`.
+defaulted : String
+defaulted =
+  let n = 40
+  show (n + 2)
+
+main : { scaled : UInt64, origin : Int32, stored : UInt64, signed : Int8, half : Float32, which : UInt64, defaulted : Bool }
+main = {scaled = scaled 2, origin = origin, stored = stored, signed = signed, half = half, which = which, defaulted = defaulted == "42"}

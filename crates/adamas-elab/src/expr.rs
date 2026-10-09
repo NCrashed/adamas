@@ -2956,7 +2956,58 @@ impl<'a> Elaborator<'a> {
             return self.placed(position, |it| it.expr(&rewritten, Mult::Many));
         }
         let (value, ty) = self.scrutinized(scrutinee, span)?;
+        // Тип, решённый умолчанием, связывается заново: у переменной `let`
+        // в контексте лежит прежняя дырка, а компилятор разбора её не знает.
+        if let Some(ty) = self.literal_column(&ty, alts, scrutinee.span)? {
+            return self.case_bound(scrutinee, value, &ty, alts, span, position, awaited);
+        }
         self.case_on(scrutinee, value, &ty, alts, span, position, awaited)
+    }
+
+    /// Разбираемое открытого типа под литералом-образцом берёт умолчание §4.3.
+    ///
+    /// `case 5 of 5 -> …`: разбираемое - литерал без ожидания, тип ему - дырка
+    /// ([`Self::unexpected_literal`]), а образцу-литералу нужен примитив сейчас,
+    /// до конца объявления. Контекст типа не задал - значит, `Int`, а у
+    /// дробного образца `Float`, с тем же предупреждением. Отвечает решённым
+    /// типом; `None` - умолчание не понадобилось.
+    fn literal_column(
+        &mut self,
+        ty: &Rc<Value>,
+        alts: &[ast::Alt],
+        span: Span,
+    ) -> Result<Option<Rc<Value>>, ElabError> {
+        let Some(kind) = alts.iter().find_map(|alt| match &alt.pattern.kind {
+            PatternKind::Lit(lit) if matches!(lit.kind, ast::LitKind::Nat | ast::LitKind::Int) => {
+                Some(DEFAULT_INT)
+            }
+            PatternKind::Lit(lit) if lit.kind == ast::LitKind::Float => Some(DEFAULT_FLOAT),
+            _ => None,
+        }) else {
+            return Ok(None);
+        };
+        if !self.flexible(ty) {
+            return Ok(None);
+        }
+        let declared = self.signature.convention(kind);
+        if self.signature.lookup(&declared).is_none() {
+            return Ok(None);
+        }
+        let named = self.name(&ast::Name {
+            text: Rc::clone(&declared),
+            span,
+        })?;
+        let value = whnf(self.signature, &self.ctx.eval(&named));
+        let mark = self.metas.mark();
+        if !convertible(self.signature, self.metas, self.ctx.size(), ty, &value) {
+            self.metas.rollback(mark);
+            return Ok(None);
+        }
+        self.warnings.push(Warning::DefaultedLiteral {
+            name: Rc::from(kind),
+            span,
+        });
+        Ok(Some(whnf_solved(self.signature, self.metas, ty)))
     }
 
     /// `if c then a else b` - разбор `inspect c` с фактом в каждой ветви
@@ -3094,7 +3145,26 @@ impl<'a> Elaborator<'a> {
                 return self.discriminated(level, &ty, alts, span, position, awaited);
             }
         }
-        let domain = quote(self.ctx.size(), &ty);
+        self.case_bound(scrutinee, value, &ty, alts, span, position, awaited)
+    }
+
+    /// Разбор через связывание `let` под именем `case`: колонка у ядра -
+    /// переменная, и её тип - тот, что передан, а не тот, что в контексте.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "разбор несёт позицию и ожидание ветвей, как и `case`"
+    )]
+    fn case_bound(
+        &mut self,
+        scrutinee: &Expr,
+        value: Term,
+        ty: &Rc<Value>,
+        alts: &[ast::Alt],
+        span: Span,
+        position: Position,
+        awaited: Option<&Rc<Value>>,
+    ) -> Result<Term, ElabError> {
+        let domain = quote(self.ctx.size(), ty);
         let mult = self.consumption(scrutinee, &domain);
         let name: Symbol = Rc::from("case");
         let outer = self.scope.len();
@@ -3102,7 +3172,7 @@ impl<'a> Elaborator<'a> {
         let evaluated = self.ctx.eval(&value);
         self.ctx = self
             .ctx
-            .define(CoreName::from(&*name), mult, Rc::clone(&ty), evaluated);
+            .define(CoreName::from(&*name), mult, Rc::clone(ty), evaluated);
         // Значение связывания лежит и в контексте, и здесь - как у `let`. Без
         // него дырка ставила связывание в свой спайн переменной, а вычисление
         // подставляло вместо неё сам терм: имплисит `arraySet` в ветви
@@ -3112,10 +3182,9 @@ impl<'a> Elaborator<'a> {
             visible: false,
             transparent: true,
             value: Some(Rc::new(value.clone())),
-            ..Bound::visible(&name, mult, Rc::clone(&ty))
+            ..Bound::visible(&name, mult, Rc::clone(ty))
         });
-        let inner =
-            self.discriminated(Lvl(self.ctx.size() - 1), &ty, alts, span, position, awaited);
+        let inner = self.discriminated(Lvl(self.ctx.size() - 1), ty, alts, span, position, awaited);
         self.scope.truncate(outer);
         self.ctx = saved;
         Ok(Term::Let(
@@ -3449,6 +3518,9 @@ impl<'a> Elaborator<'a> {
     /// **Ожидание осталось дыркой - умолчание по имени** (§4.3, вопрос 150):
     /// [`Self::defaulted`].
     ///
+    /// **Ожидания нет вовсе - тоже дырка** (решение 2026-10-09):
+    /// [`Self::unexpected_literal`].
+    ///
     /// **Иначе - как прежде.** `42` разворачивается унарно в `Succ`-цепочку над
     /// `Zero` и, если `fromNat` объявлена, применяется к ней. Имена берутся по
     /// соглашению - тем же, каким `if` берёт `Bool`. Цена этого пути названа:
@@ -3483,6 +3555,11 @@ impl<'a> Elaborator<'a> {
         }
         if let Some(ty) = awaited.and_then(|ty| self.primitive_type(ty)) {
             return Self::primitive_literal(lit, ty);
+        }
+        if awaited.is_none()
+            && let Some(hole) = self.unexpected_literal(lit)
+        {
+            return Ok(hole);
         }
         if let Some(hole) = self.deferring_literal(lit, awaited) {
             return Ok(hole);
@@ -3546,8 +3623,8 @@ impl<'a> Elaborator<'a> {
     /// нет и путь прежний. Решённая дырка возвращается в [`Self::literal`], и
     /// примитивен ли тип за именем - решает обычный разбор.
     ///
-    /// Названная граница: литерал **без ожидания вовсе** (скрутини `case`,
-    /// голова спайна) умолчания не берёт и разворачивается унарно, как раньше.
+    /// Литерал **без ожидания вовсе** сюда приходит дыркой из очереди:
+    /// [`Self::unexpected_literal`].
     fn defaulted(
         &mut self,
         lit: &ast::Lit,
@@ -4031,6 +4108,26 @@ impl<'a> Elaborator<'a> {
             given.push(argument);
         }
         (term, ty)
+    }
+
+    /// Числовой литерал без ожидания вовсе - `let k = 5`, поле записи без
+    /// типа, скрутини `case` (§4.3, решение 2026-10-09).
+    ///
+    /// Тип ему - дырка, и литерал уходит в очередь объявления, как всякий
+    /// литерал нерешённой позиции: тип решает место употребления, а не решил
+    /// никто - умолчание `Int`. `let` при этом мономорфен: связывание одно, и
+    /// тип у него один. Без имени умолчания в области видимости - `None`, и
+    /// литерал идёт прежним путём: программе без прелюдии выбирать не из чего.
+    fn unexpected_literal(&mut self, lit: &ast::Lit) -> Option<Term> {
+        if lit.kind == ast::LitKind::Str || self.literals.is_none() {
+            return None;
+        }
+        let declared = self.signature.convention(DEFAULT_INT);
+        self.signature.lookup(&declared)?;
+        let level = self.metas.fresh_level();
+        let goal = self.fresh_meta(&Rc::new(Value::Universe(level)));
+        let goal = self.ctx.eval(&goal);
+        self.deferring_literal(lit, Some(&goal))
     }
 
     /// Ставит дырку на место литерала, чей тип ещё дырка, и откладывает его до

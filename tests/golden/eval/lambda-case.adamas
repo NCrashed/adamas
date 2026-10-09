@@ -1,0 +1,27 @@
+-- `\case` - лямбда над разбором своего аргумента (§4.1, решение
+-- 2026-10-09).
+--
+-- Ветки идут сразу за `case`, без `of`, блоком, как у разбора: строковые
+-- образцы, гарды веток, `where` - всё то же. Внутри скобок `\case`, как и
+-- `case`, блока не открывает - layout там выключен.
+
+orZero : Option UInt64 -> UInt64
+orZero = \case
+  None -> 0
+  Some v -> v
+
+named : String -> UInt64
+named = \case
+  "one" -> 1
+  "two" -> 2
+  _other -> 0
+
+main : { got : List UInt64, names : UInt64, inline : UInt64, guarded : UInt64 }
+main = {got = map orZero [Some 3, None], names = named "two" * 10 + named "zzz", inline = orZero (Some 9), guarded = guardedCase (Some 50)}
+  where
+    guardedCase : Option UInt64 -> UInt64
+    guardedCase = \case
+      Some v
+        | v > 10 -> 1
+        | otherwise -> 2
+      None -> 3

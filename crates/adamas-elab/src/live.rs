@@ -132,6 +132,7 @@ impl<'a> Spent<'a> {
                 self.in_expr(name, scrutinee, bound)
                     || alts.iter().any(|alt| self.in_alt(name, alt, bound))
             }
+            ExprKind::LamCase(alts) => alts.iter().any(|alt| self.in_alt(name, alt, bound)),
             // Ветка хендлера связывает свои имена - аргументы операции и
             // резумпцию, - и упоминание под ними именем считается чужим.
             ExprKind::Handle {

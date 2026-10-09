@@ -113,6 +113,19 @@ fn binders(pattern: &Pattern, into: &mut Vec<Name>) {
     }
 }
 
+/// Ветки разбора: имена образца, не встреченные в теле, и сами тела.
+fn in_alts(alts: &[ast::Alt], found: &mut Vec<Warning>) {
+    for alt in alts {
+        let mut bound = Vec::new();
+        binders(&alt.pattern, &mut bound);
+        for name in bound {
+            let used = names_any(&alt.body, &[&name.text]);
+            report(Site::Alt, name, used, found);
+        }
+        in_expr(&alt.body, found);
+    }
+}
+
 fn in_expr(expr: &Expr, found: &mut Vec<Warning>) {
     match &expr.kind {
         ExprKind::Lam { params, body } => {
@@ -132,16 +145,9 @@ fn in_expr(expr: &Expr, found: &mut Vec<Warning>) {
         ExprKind::Block(block) => in_block(&block.stmts, found),
         ExprKind::Case { scrutinee, alts } => {
             in_expr(scrutinee, found);
-            for alt in alts {
-                let mut bound = Vec::new();
-                binders(&alt.pattern, &mut bound);
-                for name in bound {
-                    let used = names_any(&alt.body, &[&name.text]);
-                    report(Site::Alt, name, used, found);
-                }
-                in_expr(&alt.body, found);
-            }
+            in_alts(alts, found);
         }
+        ExprKind::LamCase(alts) => in_alts(alts, found),
         ExprKind::Handle {
             computation,
             state,
@@ -436,6 +442,9 @@ pub(crate) fn uses(expr: &Expr, wanted: &[&Symbol]) -> bool {
                     .iter()
                     .any(|alt| pattern_uses(&alt.pattern, wanted) || recur(&alt.body))
         }
+        ExprKind::LamCase(alts) => alts
+            .iter()
+            .any(|alt| pattern_uses(&alt.pattern, wanted) || recur(&alt.body)),
         ExprKind::RecordType(fields, _) => fields.iter().any(|it| recur(&it.ty)),
         ExprKind::Record(fields) => fields.iter().any(|(_, value)| recur(value)),
         ExprKind::Update(base, fields) => {

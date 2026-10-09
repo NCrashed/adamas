@@ -201,6 +201,7 @@ pub fn layout(tokens: &[Token]) -> Result<Vec<Token>, LayoutError> {
         "layout ждёт поток целиком, вместе с Eof"
     );
 
+    let tokens = &lambda_case(tokens);
     let mut out = Vec::with_capacity(tokens.len() + tokens.len() / 4);
     // Открытые блоки, снаружи внутрь. Первый - блок файла.
     let mut blocks: Vec<Block> = Vec::new();
@@ -529,6 +530,26 @@ fn branchless(pending: Option<Pending>, token: &Token, blocks: &[Block]) -> bool
 /// Виртуальный токен в позиции того, что его вызвал. Спан пустой: в исходнике
 /// этой лексемы нет, но указать на место, где она подразумевается, диагностика
 /// обязана уметь.
+/// `\case` открывает ветки без `of` (§4.1, решение 2026-10-09): после `case`,
+/// стоящего за `\`, встаёт невидимое `of`, и блок веток открывается тем же
+/// правилом, что у разбора. Своего правила у layout для `\case` нет.
+fn lambda_case(tokens: &[Token]) -> Vec<Token> {
+    let mut out = Vec::with_capacity(tokens.len());
+    for (index, token) in tokens.iter().enumerate() {
+        out.push(*token);
+        let lambda = index > 0 && tokens[index - 1].kind == TokenKind::Backslash;
+        if lambda && token.kind == TokenKind::Case {
+            out.push(Token {
+                kind: TokenKind::Of,
+                span: Span::at(token.span.end()),
+                line: token.line,
+                column: token.column + 4,
+            });
+        }
+    }
+    out
+}
+
 fn virtual_token(kind: TokenKind, at: &Token) -> Token {
     Token {
         kind,

@@ -380,6 +380,9 @@ pub enum ExprKind {
     Section(Section),
     /// Аннотация выражения: `(e : T)` (§4.1, решение 2026-10-09).
     Annotated(Box<Expr>, Box<Expr>),
+    /// `\case` с ветками: лямбда над разбором своего аргумента (§4.1,
+    /// решение 2026-10-09).
+    LamCase(Vec<Alt>),
     /// Гарды: тело клаузы `| c = e`, ветки `| c -> e` и многоветочный
     /// `if | c -> e` (§4.1, решение 2026-10-09). Последний гард - `otherwise`:
     /// провала к следующей клаузе нет.
@@ -959,8 +962,11 @@ pub fn contains_block(expr: &Expr) -> bool {
             // про форму с блоком к нему поэтому не относится: иначе `absurd v
             // = case v of` не пишется нигде, кроме конца файла (§9 Фаза 1,
             // сверка 2026-09-08).
-            ExprKind::Case { alts, .. } if alts.is_empty() => {}
-            ExprKind::Case { .. } | ExprKind::Block(_) | ExprKind::Handle { .. } => return true,
+            ExprKind::Case { alts, .. } | ExprKind::LamCase(alts) if alts.is_empty() => {}
+            ExprKind::Case { .. }
+            | ExprKind::LamCase(_)
+            | ExprKind::Block(_)
+            | ExprKind::Handle { .. } => return true,
             ExprKind::Name(_) | ExprKind::Lit(_) | ExprKind::Hole => {}
             ExprKind::Effectful { labels, body, .. } => {
                 pending.push(body);
@@ -1075,6 +1081,7 @@ pub fn mentions(expr: &Expr, name: &str) -> bool {
                 pending.push(scrutinee);
                 pending.extend(alts.iter().map(|alt| &alt.body));
             }
+            ExprKind::LamCase(alts) => pending.extend(alts.iter().map(|alt| &alt.body)),
             ExprKind::Block(block) => pending.extend(block.stmts.iter().flat_map(stmt_terms)),
             ExprKind::Handle {
                 computation,
@@ -1263,6 +1270,36 @@ fn dump_wrapped(out: &mut String, form: &str, inner: &Expr) {
     out.push_str(form);
     out.push(' ');
     dump_expr(out, inner);
+    out.push(')');
+}
+
+/// Сахар 2026-10-09: секции, аннотация, гарды, `\case`.
+fn dump_sugar(out: &mut String, expr: &Expr) {
+    match &expr.kind {
+        ExprKind::Section(section) => dump_section(out, section),
+        ExprKind::Annotated(value, ty) => dump_pair(out, "annotated", value, ty),
+        ExprKind::Guarded { guards, .. } => dump_guards(out, guards),
+        ExprKind::LamCase(alts) => {
+            let argument = Expr {
+                kind: ExprKind::Hole,
+                span: expr.span,
+            };
+            dump_case(out, &argument, alts);
+        }
+        _ => {}
+    }
+}
+
+fn dump_chain(out: &mut String, chain: &Chain) {
+    out.push_str("(chain ");
+    dump_expr(out, &chain.head);
+    for (operator, operand) in &chain.tail {
+        out.push_str(" (");
+        out.push_str(&operator.text);
+        out.push(' ');
+        dump_expr(out, operand);
+        out.push(')');
+    }
     out.push(')');
 }
 
@@ -1690,6 +1727,10 @@ fn dump_expr(out: &mut String, expr: &Expr) {
             branches,
         ),
         ExprKind::Case { scrutinee, alts } => dump_case(out, scrutinee, alts),
+        ExprKind::Section(_)
+        | ExprKind::Annotated(..)
+        | ExprKind::Guarded { .. }
+        | ExprKind::LamCase(_) => dump_sugar(out, expr),
         ExprKind::Tuple(items) => {
             out.push_str("(tuple");
             for item in items {
@@ -1706,21 +1747,7 @@ fn dump_expr(out: &mut String, expr: &Expr) {
             }
             out.push(')');
         }
-        ExprKind::Chain(chain) => {
-            out.push_str("(chain ");
-            dump_expr(out, &chain.head);
-            for (operator, operand) in &chain.tail {
-                out.push_str(" (");
-                out.push_str(&operator.text);
-                out.push(' ');
-                dump_expr(out, operand);
-                out.push(')');
-            }
-            out.push(')');
-        }
-        ExprKind::Section(section) => dump_section(out, section),
-        ExprKind::Annotated(value, ty) => dump_pair(out, "annotated", value, ty),
-        ExprKind::Guarded { guards, .. } => dump_guards(out, guards),
+        ExprKind::Chain(chain) => dump_chain(out, chain),
     }
 }
 

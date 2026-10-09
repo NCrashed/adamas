@@ -134,6 +134,7 @@ impl Expr {
             | ExprKind::If { .. }
             | ExprKind::Guarded { .. }
             | ExprKind::Case { .. }
+            | ExprKind::LamCase(_)
             | ExprKind::Handle { .. } => Prec::Lowest,
         }
     }
@@ -918,9 +919,10 @@ impl<'a> Printer<'a> {
             ExprKind::Tuple(items) => self.sequence("(", items, ")"),
             ExprKind::List(items) => self.sequence("[", items, "]"),
             ExprKind::Chain(chain) => self.chain(chain),
-            ExprKind::Section(section) => self.section(section),
-            ExprKind::Annotated(value, ty) => self.annotated(value, ty),
-            ExprKind::Guarded { guards, .. } => self.multi_if(guards),
+            ExprKind::Section(_)
+            | ExprKind::Annotated(..)
+            | ExprKind::Guarded { .. }
+            | ExprKind::LamCase(_) => self.sugar(expr),
         }
     }
 
@@ -1084,6 +1086,21 @@ impl<'a> Printer<'a> {
         }
         self.push(" -> ");
         self.expr(&alt.body, Prec::Lowest);
+    }
+
+    /// Сахар 2026-10-09 печатается так, как написан: секции, аннотация,
+    /// многоветочный `if`, `\case`.
+    fn sugar(&mut self, expr: &Expr) {
+        match &expr.kind {
+            ExprKind::Section(section) => self.section(section),
+            ExprKind::Annotated(value, ty) => self.annotated(value, ty),
+            ExprKind::Guarded { guards, .. } => self.multi_if(guards),
+            ExprKind::LamCase(alts) => {
+                self.push("\\case");
+                self.block_of(alts, Self::alt);
+            }
+            _ => {}
+        }
     }
 
     /// Многоветочный `if`: слово и гарды под ним.

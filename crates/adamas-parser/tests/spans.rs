@@ -14,9 +14,9 @@
 
 use adamas_core::source::Span;
 use adamas_parser::ast::{
-    Alt, Binder, Binding, Block, Clause, Data, Decl, DeclKind, EffectDecl, EffectLabel, Expr,
-    ExprKind, HandlerBranch, LamParamKind, Module, Name, Pattern, PatternKind, Resource, Section,
-    Stmt, StmtKind,
+    Alt, Binder, Binding, Block, Chain, Clause, Data, Decl, DeclKind, EffectDecl, EffectLabel,
+    Expr, ExprKind, HandlerBranch, LamParamKind, Module, Name, Pattern, PatternKind, Resource,
+    Section, Stmt, StmtKind,
 };
 use adamas_parser::parse;
 use proptest::prelude::*;
@@ -307,7 +307,9 @@ impl Spans<'_> {
                 self.expr(at, then_branch);
                 self.expr(at, else_branch);
             }
-            ExprKind::Guarded { .. } | ExprKind::Section(_) => self.sugar(at, &expr.kind),
+            ExprKind::Guarded { .. } | ExprKind::Section(_) | ExprKind::LamCase(_) => {
+                self.sugar(at, &expr.kind);
+            }
             ExprKind::Handle {
                 label,
                 computation,
@@ -320,13 +322,7 @@ impl Spans<'_> {
                     self.expr(at, item);
                 }
             }
-            ExprKind::Chain(chain) => {
-                self.expr(at, &chain.head);
-                for (operator, operand) in &chain.tail {
-                    self.name(at, operator);
-                    self.expr(at, operand);
-                }
-            }
+            ExprKind::Chain(chain) => self.chain(at, chain),
         }
     }
 
@@ -390,6 +386,14 @@ impl Spans<'_> {
         self.inside("имя", parent, name.span);
     }
 
+    fn chain(&mut self, at: Span, chain: &Chain) {
+        self.expr(at, &chain.head);
+        for (operator, operand) in &chain.tail {
+            self.name(at, operator);
+            self.expr(at, operand);
+        }
+    }
+
     fn sugar(&mut self, at: Span, kind: &ExprKind) {
         match kind {
             ExprKind::Guarded { guards, .. } => {
@@ -397,6 +401,13 @@ impl Spans<'_> {
                     self.expr(at, &guard.cond);
                     self.expr(at, &guard.body);
                 }
+            }
+            ExprKind::LamCase(alts) => {
+                let argument = Expr {
+                    kind: ExprKind::Hole,
+                    span: at,
+                };
+                self.alts(at, &argument, alts);
             }
             ExprKind::Section(section) => self.section(at, section),
             _ => {}

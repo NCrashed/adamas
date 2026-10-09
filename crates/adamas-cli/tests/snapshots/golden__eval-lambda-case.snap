@@ -1,0 +1,6 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+assertion_line: 117
+expression: text
+---
+{got = Cons 3 (Cons 0 Nil), names = 20, inline = 9, guarded = 1}

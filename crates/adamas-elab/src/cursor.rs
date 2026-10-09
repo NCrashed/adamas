@@ -774,6 +774,14 @@ impl Search<'_> {
                     self.scope.truncate(depth);
                 }
             }
+            ExprKind::LamCase(alts) => {
+                for alt in alts {
+                    let depth = self.scope.len();
+                    self.pattern(&alt.pattern);
+                    self.expr(&alt.body);
+                    self.scope.truncate(depth);
+                }
+            }
             // Поля типа записи - телескоп: тип поля видит предыдущие (§4.2).
             ExprKind::RecordType(fields, tail) => {
                 let depth = self.scope.len();

@@ -2236,6 +2236,17 @@ impl<'a> Parser<'a> {
 
     fn lambda(&mut self) -> Result<Expr, ParseError> {
         let start = self.bump().span;
+        // `\case` - лямбда над разбором (§4.1, решение 2026-10-09): `of` за
+        // `case` поставил layout, ветки - те же, что у разбора.
+        if self.eat(TokenKind::Case).is_some() {
+            self.expect(TokenKind::Of)?;
+            let alts = self.alts()?;
+            let end = alts.last().map_or(start, |last| last.span);
+            return Ok(Expr {
+                kind: ExprKind::LamCase(alts),
+                span: start.merge(end),
+            });
+        }
         let mut params = Vec::new();
         loop {
             if self.at_binder() {
@@ -2316,16 +2327,7 @@ impl<'a> Parser<'a> {
         // Отличить пустой разбор от забытого блока нечем, и это цена: `case v
         // of` с опечаткой в теле прочтётся пустым, а отвергнет его проверка -
         // сообщением про необитаемость, а не про отступ.
-        let mut alts = Vec::new();
-        if self.eat(TokenKind::Open).is_some() {
-            loop {
-                alts.push(self.alt()?);
-                if self.eat(TokenKind::Sep).is_none() {
-                    break;
-                }
-            }
-            self.expect(TokenKind::Close)?;
-        }
+        let alts = self.alts()?;
         let end = alts.last().map_or(start, |last| last.span);
         Ok(Expr {
             kind: ExprKind::Case {
@@ -2472,6 +2474,21 @@ impl<'a> Parser<'a> {
             body,
             span,
         })
+    }
+
+    /// Ветки после `of`: блок либо ничего - разбор без ветвей законен.
+    fn alts(&mut self) -> Result<Vec<Alt>, ParseError> {
+        let mut alts = Vec::new();
+        if self.eat(TokenKind::Open).is_some() {
+            loop {
+                alts.push(self.alt()?);
+                if self.eat(TokenKind::Sep).is_none() {
+                    break;
+                }
+            }
+            self.expect(TokenKind::Close)?;
+        }
+        Ok(alts)
     }
 
     fn alt(&mut self) -> Result<Alt, ParseError> {

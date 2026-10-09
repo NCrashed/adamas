@@ -648,6 +648,7 @@ fn written_row_tail(expr: &Expr) -> Option<&ast::Name> {
         ExprKind::Case { scrutinee, alts } => {
             recur(scrutinee).or_else(|| alts.iter().find_map(|alt| recur(&alt.body)))
         }
+        ExprKind::LamCase(alts) => alts.iter().find_map(|alt| recur(&alt.body)),
         ExprKind::Handle {
             computation,
             branches,
@@ -701,6 +702,7 @@ pub(crate) fn names_any(expr: &Expr, wanted: &[&Symbol]) -> bool {
         ExprKind::Case { scrutinee, alts } => {
             recur(scrutinee) || alts.iter().any(|alt| recur(&alt.body))
         }
+        ExprKind::LamCase(alts) => alts.iter().any(|alt| recur(&alt.body)),
         ExprKind::Handle {
             label,
             computation,
@@ -1996,6 +1998,7 @@ impl<'a> Elaborator<'a> {
             | ExprKind::If { .. }
             | ExprKind::Guarded { .. }
             | ExprKind::Case { .. }
+            | ExprKind::LamCase(_)
             | ExprKind::Handle { .. }
             | ExprKind::Tuple(_)
             | ExprKind::List(_)
@@ -2634,16 +2637,11 @@ impl<'a> Elaborator<'a> {
             // разворот получает **всё** окружение формы: ожидание, позицию и
             // кратности аргументов. Через `expr` они терялись бы - их уже снял
             // вызывающий, - и гард над массивом не находил доказательства границы.
-            ExprKind::Section(section) => {
-                let desugared = sectioned(section, expr.span);
-                self.form(&desugared, default, expected, position, awaited)
-            }
-            ExprKind::Annotated(value, ty) => {
-                let desugared = annotated(value, ty, expr.span);
-                self.form(&desugared, default, expected, position, awaited)
-            }
-            ExprKind::Guarded { guards, .. } => {
-                let desugared = guarded(guards, expr.span);
+            ExprKind::Section(_)
+            | ExprKind::Annotated(..)
+            | ExprKind::Guarded { .. }
+            | ExprKind::LamCase(_) => {
+                let desugared = desugared(expr);
                 self.form(&desugared, default, expected, position, awaited)
             }
 
@@ -9848,4 +9846,47 @@ fn guarded(guards: &[ast::Guard], span: Span) -> Expr {
                 else_branch: Box::new(otherwise),
             },
         })
+}
+
+/// `\case` - лямбда над разбором своего аргумента (§4.1, решение
+/// 2026-10-09): `\case p -> e` есть `\case -> case case of p -> e`. Параметр -
+/// ключевое слово, автор его не напишет.
+fn lambda_case(alts: &[ast::Alt], span: Span) -> Expr {
+    let parameter = ast::Name {
+        text: Rc::from("case"),
+        span,
+    };
+    Expr {
+        kind: ExprKind::Lam {
+            params: vec![ast::LamParam {
+                kind: ast::LamParamKind::Pattern(ast::Pattern {
+                    kind: PatternKind::Name(parameter.clone()),
+                    span,
+                }),
+                span,
+            }],
+            body: Box::new(Expr {
+                kind: ExprKind::Case {
+                    scrutinee: Box::new(Expr {
+                        kind: ExprKind::Name(parameter),
+                        span,
+                    }),
+                    alts: alts.to_vec(),
+                },
+                span,
+            }),
+        },
+        span,
+    }
+}
+
+/// Сахар 2026-10-09 - в формы, которые элаборация уже умеет (§4.1, §4.4).
+fn desugared(expr: &Expr) -> Expr {
+    match &expr.kind {
+        ExprKind::Section(section) => sectioned(section, expr.span),
+        ExprKind::Annotated(value, ty) => annotated(value, ty, expr.span),
+        ExprKind::Guarded { guards, .. } => guarded(guards, expr.span),
+        ExprKind::LamCase(alts) => lambda_case(alts, expr.span),
+        _ => expr.clone(),
+    }
 }

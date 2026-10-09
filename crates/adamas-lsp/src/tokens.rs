@@ -920,7 +920,9 @@ impl<'a> Names<'a> {
                 self.expr(then_branch);
                 self.expr(else_branch);
             }
-            ExprKind::Guarded { .. } | ExprKind::Section(_) => self.sugar(&expr.kind),
+            ExprKind::Guarded { .. } | ExprKind::Section(_) | ExprKind::LamCase(_) => {
+                self.sugar(&expr.kind);
+            }
             ExprKind::Case { scrutinee, alts } => {
                 self.expr(scrutinee);
                 for alt in alts {
@@ -968,6 +970,11 @@ impl<'a> Names<'a> {
                 for guard in guards {
                     self.expr(&guard.cond);
                     self.expr(&guard.body);
+                }
+            }
+            ExprKind::LamCase(alts) => {
+                for alt in alts {
+                    self.alt(alt);
                 }
             }
             ExprKind::Section(section) => {

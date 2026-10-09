@@ -213,7 +213,10 @@ fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<
             pending.extend(items.iter().map(|item| (Node::Expr(item), inner)));
         }
         ExprKind::Chain(chain) => chain_at(chain, depth, expr.span, pending)?,
-        ExprKind::Section(_) | ExprKind::Annotated(..) | ExprKind::Guarded { .. } => {
+        ExprKind::Section(_)
+        | ExprKind::Annotated(..)
+        | ExprKind::Guarded { .. }
+        | ExprKind::LamCase(_) => {
             sugar_at(expr, depth, pending)?;
         }
     }
@@ -236,6 +239,14 @@ fn sugar_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result
             let inner = deepen(depth, 2, expr.span)?;
             pending.push((Node::Expr(value), inner));
             pending.push((Node::Expr(ty), inner));
+        }
+        // `\case` - лямбда над разбором: два звена над ветками.
+        ExprKind::LamCase(alts) => {
+            let inner = deepen(depth, 2, expr.span)?;
+            for alt in alts {
+                pending.push((Node::Pattern(&alt.pattern), inner));
+                pending.push((Node::Expr(&alt.body), inner));
+            }
         }
         // Гарды - цепочка `if`: каждый следующий вложен в предыдущий.
         ExprKind::Guarded { guards, .. } => {

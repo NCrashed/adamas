@@ -149,6 +149,12 @@ fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<
             pending.push((Node::Expr(left), inner));
             pending.push((Node::Expr(right), inner));
         }
+        // Аннотация - `let` над значением и имя под ним: два звена.
+        ExprKind::Annotated(value, ty) => {
+            let inner = deepen(depth, 2, expr.span)?;
+            pending.push((Node::Expr(value), inner));
+            pending.push((Node::Expr(ty), inner));
+        }
         ExprKind::Pi { binders, codomain } => pi(binders, codomain, depth, expr.span, pending)?,
         ExprKind::Lam { params, body } => lam(params, body, depth, expr.span, pending)?,
         // Блок звена не ставит: его ставят операторы.

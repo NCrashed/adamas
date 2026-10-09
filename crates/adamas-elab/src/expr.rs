@@ -618,7 +618,8 @@ fn written_row_tail(expr: &Expr) -> Option<&ast::Name> {
         ExprKind::Mask(inner) | ExprKind::Project(inner, _) => recur(inner),
         ExprKind::App(left, right)
         | ExprKind::TypeApp(left, right)
-        | ExprKind::Arrow(left, right) => recur(left).or_else(|| recur(right)),
+        | ExprKind::Arrow(left, right)
+        | ExprKind::Annotated(left, right) => recur(left).or_else(|| recur(right)),
         ExprKind::Using { body, .. } | ExprKind::Lam { body, .. } => recur(body),
         ExprKind::Pi { binders, codomain } => binders
             .iter()
@@ -674,7 +675,8 @@ pub(crate) fn names_any(expr: &Expr, wanted: &[&Symbol]) -> bool {
         ExprKind::Mask(inner) | ExprKind::Project(inner, _) => recur(inner),
         ExprKind::App(left, right)
         | ExprKind::TypeApp(left, right)
-        | ExprKind::Arrow(left, right) => recur(left) || recur(right),
+        | ExprKind::Arrow(left, right)
+        | ExprKind::Annotated(left, right) => recur(left) || recur(right),
         ExprKind::Using { body, .. } | ExprKind::Lam { body, .. } => recur(body),
         ExprKind::Pi { binders, codomain } => {
             binders.iter().filter_map(|it| it.ty.as_ref()).any(&recur) || recur(codomain)
@@ -1906,7 +1908,9 @@ impl<'a> Elaborator<'a> {
             // Имя инстанса свободным не считается: оно обязано быть
             // объявленным, как и всякая ссылка (§4.3).
             ExprKind::Using { body, .. } => self.free_in(body, bound, found),
-            ExprKind::App(callee, argument) | ExprKind::TypeApp(callee, argument) => {
+            ExprKind::App(callee, argument)
+            | ExprKind::TypeApp(callee, argument)
+            | ExprKind::Annotated(callee, argument) => {
                 self.free_in(callee, bound, found);
                 self.free_in(argument, bound, found);
             }
@@ -2620,6 +2624,9 @@ impl<'a> Elaborator<'a> {
             ExprKind::Block(block) => self.block(block, position),
             ExprKind::Chain(chain) => self.chain(chain, expr.span),
             ExprKind::Section(section) => self.expr(&sectioned(section, expr.span), Mult::Many),
+            ExprKind::Annotated(value, ty) => {
+                self.expr(&annotated(value, ty, expr.span), Mult::Many)
+            }
 
             // Тип записи - телескоп: каждое следующее поле элаборируется под
             // предыдущими, потому что вправе на них ссылаться (§4.2).
@@ -9749,6 +9756,50 @@ fn sectioned(section: &ast::Section, span: Span) -> Expr {
                 span,
             }),
         },
+        span,
+    }
+}
+
+/// Аннотация выражения - `let` под написанным типом (§4.1, решение
+/// 2026-10-09): `(e : T)` есть `let 1 case : T = e` и `case`.
+///
+/// Связывание, а не проверка значения на месте: тип остаётся при терме, и
+/// лямбда под аннотацией синтезируется, как у `let` с типом. Кратность `1` -
+/// имя употреблено ровно однажды, и линейное значение проходит тоже.
+fn annotated(value: &Expr, ty: &Expr, span: Span) -> Expr {
+    let name = ast::Name {
+        text: Rc::from("case"),
+        span,
+    };
+    let binding = ast::Binding {
+        mult: Some(ast::MultAnn {
+            mult: ast::Mult::One,
+            span,
+        }),
+        name: name.clone(),
+        pattern: None,
+        params: Vec::new(),
+        ty: Some(ty.clone()),
+        body: value.clone(),
+        span,
+    };
+    Expr {
+        kind: ExprKind::Block(ast::Block {
+            stmts: vec![
+                ast::Stmt {
+                    kind: ast::StmtKind::Let(vec![binding]),
+                    span,
+                },
+                ast::Stmt {
+                    kind: ast::StmtKind::Expr(Expr {
+                        kind: ExprKind::Name(name),
+                        span,
+                    }),
+                    span,
+                },
+            ],
+            span,
+        }),
         span,
     }
 }

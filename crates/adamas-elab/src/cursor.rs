@@ -681,7 +681,8 @@ impl Search<'_> {
             ExprKind::Lit(_) | ExprKind::Hole => {}
             ExprKind::App(left, right)
             | ExprKind::TypeApp(left, right)
-            | ExprKind::Arrow(left, right) => {
+            | ExprKind::Arrow(left, right)
+            | ExprKind::Annotated(left, right) => {
                 self.expr(left);
                 self.expr(right);
             }

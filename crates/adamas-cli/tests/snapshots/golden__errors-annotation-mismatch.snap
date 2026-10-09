@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+assertion_line: 132
+expression: text
+---
+Ошибка: annotation-mismatch.adamas:7:8: несовпадение типов: ожидался `UInt64`, получен `Bool`
+  main = (True : UInt64)
+         ^^^^^^^^^^^^^^^

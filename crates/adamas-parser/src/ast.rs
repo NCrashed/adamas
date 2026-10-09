@@ -378,6 +378,8 @@ pub enum ExprKind {
     Chain(Chain),
     /// Оператор в скобках: `(+)`, `(+ 1)`, `(1 +)` (§4.4).
     Section(Section),
+    /// Аннотация выражения: `(e : T)` (§4.1, решение 2026-10-09).
+    Annotated(Box<Expr>, Box<Expr>),
 }
 
 /// Оператор значением и секции (§4.4, решение 2026-10-09).
@@ -952,7 +954,8 @@ pub fn contains_block(expr: &Expr) -> bool {
             }
             ExprKind::App(left, right)
             | ExprKind::TypeApp(left, right)
-            | ExprKind::Arrow(left, right) => {
+            | ExprKind::Arrow(left, right)
+            | ExprKind::Annotated(left, right) => {
                 pending.push(left);
                 pending.push(right);
             }
@@ -1016,7 +1019,8 @@ pub fn mentions(expr: &Expr, name: &str) -> bool {
             }
             ExprKind::App(left, right)
             | ExprKind::TypeApp(left, right)
-            | ExprKind::Arrow(left, right) => {
+            | ExprKind::Arrow(left, right)
+            | ExprKind::Annotated(left, right) => {
                 pending.push(left);
                 pending.push(right);
             }
@@ -1226,6 +1230,16 @@ fn dump_wrapped(out: &mut String, form: &str, inner: &Expr) {
     out.push_str(form);
     out.push(' ');
     dump_expr(out, inner);
+    out.push(')');
+}
+
+fn dump_pair(out: &mut String, form: &str, left: &Expr, right: &Expr) {
+    out.push('(');
+    out.push_str(form);
+    out.push(' ');
+    dump_expr(out, left);
+    out.push(' ');
+    dump_expr(out, right);
     out.push(')');
 }
 
@@ -1663,6 +1677,7 @@ fn dump_expr(out: &mut String, expr: &Expr) {
             out.push(')');
         }
         ExprKind::Section(section) => dump_section(out, section),
+        ExprKind::Annotated(value, ty) => dump_pair(out, "annotated", value, ty),
     }
 }
 

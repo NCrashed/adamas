@@ -118,7 +118,8 @@ impl Expr {
             | ExprKind::Project(..)
             | ExprKind::Update(..)
             | ExprKind::List(_)
-            | ExprKind::Section(_) => Prec::Atom,
+            | ExprKind::Section(_)
+            | ExprKind::Annotated(..) => Prec::Atom,
             // `mask` держится как применение: аргумент читается до того же
             // уровня, и в скобки его берут по тем же поводам.
             ExprKind::App(..) | ExprKind::TypeApp(..) | ExprKind::Mask(_) => Prec::App,
@@ -836,17 +837,7 @@ impl<'a> Printer<'a> {
                 self.push(&name.text);
             }
             ExprKind::App(..) | ExprKind::TypeApp(..) => self.spine(expr),
-            ExprKind::Lam { params, body } => {
-                self.push("\\");
-                for (index, param) in params.iter().enumerate() {
-                    if index > 0 {
-                        self.push(" ");
-                    }
-                    self.lam_param(param);
-                }
-                self.push(" -> ");
-                self.expr(body, Prec::Lowest);
-            }
+            ExprKind::Lam { params, body } => self.lambda(params, body),
             // Контекст ограничений `{Eq a, d /= 0} =>` парсер раскрывает в
             // безымянные implicit-связывания, у которых имя стоит на месте
             // типа (`constrained`), - и печатается он так, как написан.
@@ -875,7 +866,14 @@ impl<'a> Printer<'a> {
             }
             ExprKind::Arrow(domain, codomain) => {
                 // Стрелка правоассоциативна, поэтому скобки нужны только слева.
-                self.expr(domain, Prec::Chain);
+                // Аннотация слева читалась бы группой связываний: `((x : T)) -> U`.
+                if matches!(domain.kind, ExprKind::Annotated(..)) {
+                    self.push("(");
+                    self.expr(domain, Prec::Chain);
+                    self.push(")");
+                } else {
+                    self.expr(domain, Prec::Chain);
+                }
                 self.push(" -> ");
                 self.expr(codomain, Prec::Lowest);
             }
@@ -908,6 +906,7 @@ impl<'a> Printer<'a> {
             ExprKind::List(items) => self.sequence("[", items, "]"),
             ExprKind::Chain(chain) => self.chain(chain),
             ExprKind::Section(section) => self.section(section),
+            ExprKind::Annotated(value, ty) => self.annotated(value, ty),
         }
     }
 
@@ -1088,6 +1087,27 @@ impl<'a> Printer<'a> {
             self.push(" ");
             self.expr(operand, Prec::App);
         }
+        self.push(")");
+    }
+
+    fn lambda(&mut self, params: &[LamParam], body: &Expr) {
+        self.push("\\");
+        for (index, param) in params.iter().enumerate() {
+            if index > 0 {
+                self.push(" ");
+            }
+            self.lam_param(param);
+        }
+        self.push(" -> ");
+        self.expr(body, Prec::Lowest);
+    }
+
+    /// Аннотация пишется в своих скобках: `(e : T)`.
+    fn annotated(&mut self, value: &Expr, ty: &Expr) {
+        self.push("(");
+        self.expr(value, Prec::Lowest);
+        self.push(" : ");
+        self.expr(ty, Prec::Lowest);
         self.push(")");
     }
 

@@ -276,7 +276,8 @@ impl Spans<'_> {
             }
             ExprKind::App(left, right)
             | ExprKind::TypeApp(left, right)
-            | ExprKind::Arrow(left, right) => {
+            | ExprKind::Arrow(left, right)
+            | ExprKind::Annotated(left, right) => {
                 self.expr(at, left);
                 self.expr(at, right);
             }

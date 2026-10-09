@@ -157,6 +157,8 @@ impl<'a> Spent<'a> {
                         mults.get(place) != Some(&Mult::Zero) && self.in_expr(name, operand, bound)
                     })
             }
+            // Аннотация расходует значение; тип при нём стёрт.
+            ExprKind::Annotated(value, _) => self.in_expr(name, value, bound),
             // `Pi` и стрелка - типы целиком: что в них написано, стёрто.
             // Тип записи стёрт, как и всё в позиции типа.
             ExprKind::RecordType(..)

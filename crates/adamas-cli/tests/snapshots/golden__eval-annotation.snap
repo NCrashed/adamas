@@ -1,0 +1,6 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+assertion_line: 117
+expression: text
+---
+{lit = 6, shown = True, lam = 42, viaThe = True, shift = -1}

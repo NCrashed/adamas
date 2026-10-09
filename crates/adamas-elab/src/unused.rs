@@ -162,7 +162,8 @@ fn in_expr(expr: &Expr, found: &mut Vec<Warning>) {
         }
         ExprKind::App(left, right)
         | ExprKind::TypeApp(left, right)
-        | ExprKind::Arrow(left, right) => {
+        | ExprKind::Arrow(left, right)
+        | ExprKind::Annotated(left, right) => {
             in_expr(left, found);
             in_expr(right, found);
         }
@@ -374,7 +375,8 @@ pub(crate) fn uses(expr: &Expr, wanted: &[&Symbol]) -> bool {
         ExprKind::Hole => false,
         ExprKind::App(left, right)
         | ExprKind::TypeApp(left, right)
-        | ExprKind::Arrow(left, right) => recur(left) || recur(right),
+        | ExprKind::Arrow(left, right)
+        | ExprKind::Annotated(left, right) => recur(left) || recur(right),
         ExprKind::Using { name, body } => wanted.contains(&&name.text) || recur(body),
         ExprKind::Lam { params, body } => {
             params.iter().any(|param| match &param.kind {

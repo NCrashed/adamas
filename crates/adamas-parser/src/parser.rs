@@ -1333,6 +1333,11 @@ impl<'a> Parser<'a> {
             // отвечать не о том, что написано.
             let mark = self.index;
             let braces = self.at(TokenKind::LBrace);
+            // Круглая скобка без стрелки за цепочкой групп - не связывание, а
+            // аннотация выражения: `(x : Nat)` (§4.1, решение 2026-10-09).
+            if !braces && !self.at_binder_chain() {
+                return self.arrowed();
+            }
             // Неоднозначность разрешается **просмотром**, а не разбором с
             // возвратом. Возврат стоил экспоненты: тип поля разбирался целиком
             // внутри группы, отказывал на отсутствующей стрелке и разбирался
@@ -2487,6 +2492,15 @@ impl<'a> Parser<'a> {
         let first = self.expr()?;
         if self.at_left_section() {
             return self.left_section(open, first);
+        }
+        // `(e : T)` - аннотация (§4.1, решение 2026-10-09).
+        if self.eat(TokenKind::Colon).is_some() {
+            let ty = self.expr()?;
+            let close = self.expect(TokenKind::RParen)?;
+            return Ok(Expr {
+                kind: ExprKind::Annotated(Box::new(first), Box::new(ty)),
+                span: open.span.merge(close.span),
+            });
         }
         if let Some(close) = self.eat(TokenKind::RParen) {
             // Отдельного узла у скобок нет: печать расставит их заново по

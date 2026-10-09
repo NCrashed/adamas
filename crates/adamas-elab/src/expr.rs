@@ -1155,6 +1155,9 @@ pub(crate) struct Elaborator<'a> {
     /// Оставить ли хвостовые факты ближайшего применения невставленными:
     /// `arraySet xs i x @(lemma …)` пишет факт явно (см. `type_app`).
     written_facts: bool,
+    /// Аннотация связывания `let` - из дырок, по числу параметров лямбды
+    /// ([`holed`]): тип строит [`Elaborator::holes`], а не разбор `_`.
+    holes: Option<usize>,
     /// Модуль, чьё тело элаборируется (§4.8). `None` - верхний уровень.
     enclosing: Option<Enclosing>,
     /// Именованные инстансы, выбранные `using`: класс и имя (§4.3).
@@ -1465,6 +1468,7 @@ impl<'a> Elaborator<'a> {
             awaited: None,
             bare: false,
             written_facts: false,
+            holes: None,
             enclosing: None,
             using: Vec::new(),
             rows: None,
@@ -7733,9 +7737,13 @@ impl<'a> Elaborator<'a> {
             return self.destructured(binding, pattern, tail, rest, position);
         }
         let Some(ty) = &binding.ty else {
-            // Лямбда без аннотации берёт тип из дырок: `(ω _ : _) -> _` по
-            // параметру, и решает их употребление (§4.1, решение 2026-10-09).
-            if let Some(holed) = holed(binding) {
+            // Лямбда без аннотации берёт тип из дырок по параметру, и решает
+            // их употребление (§4.1, решение 2026-10-09). Не употреблённой
+            // решать их нечем: прежний отказ «напишите тип связывания» тогда
+            // точнее нерешённой дырки с номером.
+            let used = self.mentioned_later(&binding.name.text, tail, rest);
+            if let Some(holed) = holed(binding).filter(|_| used) {
+                self.holes = Some(arity(binding));
                 let mut bindings = bindings.to_vec();
                 bindings[0] = holed;
                 return self.bindings(&bindings, rest, position);
@@ -7748,7 +7756,10 @@ impl<'a> Elaborator<'a> {
         // стёртое связывание - нет, расходовать там нечего.
         let how = self.owned_of(ty);
         let owns = how.is_some();
-        let ty = self.typing(|inner| inner.expr(ty, Mult::Many))?;
+        let ty = match self.holes.take() {
+            Some(count) => self.holes_type(count),
+            None => self.typing(|inner| inner.expr(ty, Mult::Many))?,
+        };
         // Закрыватель берётся у значения аннотации: у записи с ресурсным полем
         // головы нет, и написанное его не называет (§10 вопрос 231).
         let annotated = self.typed(&ty);
@@ -8486,6 +8497,40 @@ impl<'a> Elaborator<'a> {
         if check(&self.ctx, self.metas, Mult::Many, body, result).is_err() {
             self.metas.rollback(mark);
         }
+    }
+
+    /// Тип лямбды `let` без аннотации: `count` стрелок из дырок (§4.1,
+    /// решение 2026-10-09).
+    ///
+    /// Все дырки - домены и результат - заводятся здесь, в контексте `let`, и
+    /// в цепочку `Pi` встают сдвинутыми: ни одна не зависит от параметров.
+    /// Написанное `_ -> _` элаборировало бы результат под связыванием, и на
+    /// вызове `move Up` дырка становилась `?c Up` - не паттерн Миллера:
+    /// предварительная проверка объявления обрывалась, и литералы
+    /// досчитывались без сведений о типе.
+    fn holes_type(&mut self, count: usize) -> Term {
+        let mut holes: Vec<Term> = (0..=count)
+            .map(|_| {
+                let level = self.metas.fresh_level();
+                self.fresh_meta(&Rc::new(Value::Universe(level)))
+            })
+            .collect();
+        let result = holes.pop().unwrap_or(Term::Universe(Level::Zero));
+        let depth = |index: usize| u32::try_from(index).unwrap_or(u32::MAX);
+        let codomain = adamas_core::pattern::shift_free(&result, depth(count));
+        holes
+            .iter()
+            .enumerate()
+            .rev()
+            .fold(codomain, |codomain, (index, domain)| {
+                Term::Pi(
+                    Binder::explicit(Mult::Many),
+                    CoreName::from("_"),
+                    Rc::new(adamas_core::pattern::shift_free(domain, depth(index))),
+                    Row::empty(),
+                    Rc::new(codomain),
+                )
+            })
     }
 
     /// Паттерны клаузы, разложенные по связываниям объявленного типа.
@@ -10028,11 +10073,15 @@ fn desugared(expr: &Expr) -> Expr {
 }
 
 /// Лямбда `let` без аннотации - под аннотацией из дырок (§4.1, решение
-/// 2026-10-09): `let f = \x y -> e` есть `let f : (ω _ : _) -> (ω _ : _) -> _
-/// = \x y -> e`, и дырки решает употребление, как у написанного типа.
+/// 2026-10-09): `let f = \x y -> e` есть `let f : _ -> _ -> _ = \x y -> e`, и
+/// дырки решает употребление, как у написанного типа.
 ///
-/// Параметр - `ω`: лямбда без аннотации вправе пользоваться им сколько
-/// угодно, а линейный аргумент требует написанного `1`. Параметр с
+/// Стрелка - независимая, а не `(ω _ : _) -> _`: дырка результата под
+/// связыванием несла бы в спайне сам параметр, и на вызове `move Up` она
+/// становилась `?c Up` - не паттерн Миллера, предварительная проверка
+/// объявления обрывалась, и литералы досчитывались без сведений о типе.
+/// Параметр стрелки неограничен: лямбда без аннотации вправе пользоваться
+/// им сколько угодно, а линейный требует написанного типа. Параметр с
 /// написанным типом или кратностью обходит правило - его аннотация своя.
 fn holed(binding: &Binding) -> Option<Binding> {
     // `\case` - лямбда с одним параметром.
@@ -10055,29 +10104,19 @@ fn holed(binding: &Binding) -> Option<Binding> {
         span,
     };
     let ty = (0..count).fold(hole(), |codomain, _| Expr {
-        kind: ExprKind::Pi {
-            binders: vec![ast::Binder {
-                visibility: ast::Visibility::Explicit,
-                mult: Some(ast::MultAnn {
-                    mult: ast::Mult::Many,
-                    span,
-                }),
-                names: vec![ast::Name {
-                    text: Rc::from("_"),
-                    span,
-                }],
-                factors: Vec::new(),
-                grade: None,
-                span,
-                ty: Some(hole()),
-                default: None,
-            }],
-            codomain: Box::new(codomain),
-        },
+        kind: ExprKind::Arrow(Box::new(hole()), Box::new(codomain)),
         span,
     });
     Some(Binding {
         ty: Some(ty),
         ..binding.clone()
     })
+}
+
+/// Число параметров лямбды, которой [`holed`] дал аннотацию из дырок.
+fn arity(binding: &Binding) -> usize {
+    match &binding.body.kind {
+        ExprKind::Lam { params, .. } => params.len(),
+        _ => 1,
+    }
 }

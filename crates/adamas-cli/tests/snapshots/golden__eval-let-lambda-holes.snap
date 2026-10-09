@@ -3,4 +3,4 @@ source: crates/adamas-cli/tests/golden.rs
 assertion_line: 117
 expression: text
 ---
-{doubled = 42, added = Cons 2 (Cons 3 Nil), scaled = 42, named = True, flipped = True, picked = 4}
+{doubled = 42, added = Cons 2 (Cons 3 Nil), scaled = 42, named = True, flipped = True, picked = 4, moved = 1, scaledAgain = 15, compared = True}

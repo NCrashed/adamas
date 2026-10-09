@@ -1,9 +1,13 @@
 -- Лямбда `let` без аннотации (§4.1, решение 2026-10-09).
 --
 -- `let f = \x -> e` и `let f x = e` без типа значат то же, что с типом из
--- дырок `(ω _ : _) -> _`: параметр неограничен, а типы решает употребление.
+-- дырок `_ -> _`: параметр неограничен, а типы решает употребление.
 -- `let` мономорфен - один тип на связывание, как у литерала без ожидания;
 -- линейный параметр требует написанной аннотации.
+--
+-- Дырки заводятся в контексте `let` и от параметров не зависят: `move`
+-- с литералами в ветках, `Int64` и `UInt64` в соседних полях и сравнение
+-- без единого написанного типа досчитываются верно.
 
 data Step where
   Up : Step
@@ -13,7 +17,7 @@ isUp : Step -> Bool
 isUp Up = True
 isUp Down = False
 
-main : { doubled : UInt64, added : List UInt64, scaled : UInt64, named : Bool, flipped : Bool, picked : UInt64 }
+main : { doubled : UInt64, added : List UInt64, scaled : UInt64, named : Bool, flipped : Bool, picked : UInt64, moved : Int64, scaledAgain : UInt64, compared : Bool }
 main =
   let double = \x -> x + x
   let add = \x y -> x + y
@@ -22,7 +26,10 @@ main =
   let flip = \case
         Up -> Down
         Down -> Up
+  let move = \case
+        Up -> 1
+        Down -> -1
   let pick = \case
         None -> 0
         Some v -> v
-  {doubled = double 21, added = map (add 1) [1, 2], scaled = scale 14, named = greet "bob" == "hi, bob", flipped = isUp (flip Down), picked = pick (Some 4) + pick None}
+  {doubled = double 21, added = map (add 1) [1, 2], scaled = scale 14, named = greet "bob" == "hi, bob", flipped = isUp (flip Down), picked = pick (Some 4) + pick None, moved = move Up + move Down + move Up, scaledAgain = scale 5, compared = map (add 10) [1, 2] == [11, 12]}

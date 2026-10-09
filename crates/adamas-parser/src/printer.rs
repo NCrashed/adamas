@@ -77,7 +77,7 @@ use adamas_core::source::Span;
 use crate::ast::{
     Alt, Binder, Binding, Block, Chain, Clause, Constructor, Data, Decl, DeclKind, EffectDecl,
     EffectLabel, Expr, ExprKind, ExternDecl, Grade, HandlerBranch, LamParam, LamParamKind, Lit,
-    Module, ModuleDecl, Name, Operation, Pattern, PatternKind, Resource, Stmt, StmtKind,
+    Module, ModuleDecl, Name, Operation, Pattern, PatternKind, Resource, Section, Stmt, StmtKind,
     Visibility, contains_block,
 };
 use crate::lexer::is_operator;
@@ -117,7 +117,8 @@ impl Expr {
             | ExprKind::Record(_)
             | ExprKind::Project(..)
             | ExprKind::Update(..)
-            | ExprKind::List(_) => Prec::Atom,
+            | ExprKind::List(_)
+            | ExprKind::Section(_) => Prec::Atom,
             // `mask` держится как применение: аргумент читается до того же
             // уровня, и в скобки его берут по тем же поводам.
             ExprKind::App(..) | ExprKind::TypeApp(..) | ExprKind::Mask(_) => Prec::App,
@@ -906,6 +907,7 @@ impl<'a> Printer<'a> {
             ExprKind::Tuple(items) => self.sequence("(", items, ")"),
             ExprKind::List(items) => self.sequence("[", items, "]"),
             ExprKind::Chain(chain) => self.chain(chain),
+            ExprKind::Section(section) => self.section(section),
         }
     }
 
@@ -1071,6 +1073,22 @@ impl<'a> Printer<'a> {
             self.push(" ");
             self.expr(operand, Prec::App);
         }
+    }
+
+    /// Секция пишется в своих скобках: `(+)`, `(+ e)`, `(e +)`. Операнд -
+    /// на уровне применения, как у цепочки.
+    fn section(&mut self, section: &Section) {
+        self.push("(");
+        if let Some(operand) = section.operand.as_deref().filter(|_| section.left) {
+            self.expr(operand, Prec::App);
+            self.push(" ");
+        }
+        self.push(&section.operator.text);
+        if let Some(operand) = section.operand.as_deref().filter(|_| !section.left) {
+            self.push(" ");
+            self.expr(operand, Prec::App);
+        }
+        self.push(")");
     }
 
     fn sequence(&mut self, open: &str, items: &[Expr], close: &str) {

@@ -61,8 +61,8 @@ use crate::ast::{
     Alt, Assoc, Binder, Binding, Block, Chain, ClassDecl, Clause, Constructor, Data, Decl,
     DeclKind, EffectDecl, EffectLabel, ExportDecl, Expr, ExprKind, ExternDecl, FixityDecl, Grade,
     HandlerBranch, ImportDecl, LamParam, LamParamKind, Lit, LitKind, Module, ModuleDecl, Mult,
-    MultAnn, Name, Operation, Pattern, PatternKind, RecordField, Resource, Stmt, StmtKind, Symbol,
-    Visibility, contains_block,
+    MultAnn, Name, Operation, Pattern, PatternKind, RecordField, Resource, Section, Stmt, StmtKind,
+    Symbol, Visibility, contains_block,
 };
 use crate::token::{Token, TokenKind};
 
@@ -114,6 +114,10 @@ pub enum Misplaced {
     /// `=>` в голове класса: `class Eq a => Ord a` (суперкласс в §4.1 стоит
     /// после `when`).
     Superclass,
+    /// Операнд секции с оператором или блоком: `(* a + b)`, `(a + b *)`.
+    SectionOperand,
+    /// `(- e)` - отрицание в Haskell, а не секция вычитания.
+    MinusSection,
 }
 
 impl fmt::Display for Misplaced {
@@ -124,6 +128,8 @@ impl fmt::Display for Misplaced {
             Self::Braces => adamas_l10n::tr!("misplaced-braces"),
             Self::Context => adamas_l10n::tr!("misplaced-context"),
             Self::Superclass => adamas_l10n::tr!("misplaced-superclass"),
+            Self::SectionOperand => adamas_l10n::tr!("misplaced-section-operand"),
+            Self::MinusSection => adamas_l10n::tr!("misplaced-minus-section"),
         })
     }
 }
@@ -1547,7 +1553,7 @@ impl<'a> Parser<'a> {
     /// Цепочка операторов. Скобок не расставляет - фикситетов ещё нет.
     fn chain(&mut self) -> Result<Expr, ParseError> {
         let head = self.application()?;
-        if !self.at(TokenKind::Operator) {
+        if !self.at(TokenKind::Operator) || self.at_left_section() {
             return Ok(head);
         }
         if contains_block(&head) {
@@ -1555,7 +1561,16 @@ impl<'a> Parser<'a> {
         }
         let mut span = head.span;
         let mut tail = Vec::new();
-        while let Some(operator) = self.eat(TokenKind::Operator) {
+        while self.at(TokenKind::Operator) {
+            // `(a + b *)`: левая секция над цепочкой. Фикситетов разбор не
+            // знает, и скобки вокруг операнда пишет автор.
+            if self.at_left_section() {
+                return Err(ParseError::Misplaced {
+                    what: Misplaced::SectionOperand,
+                    span: span.merge(self.peek().span),
+                });
+            }
+            let operator = self.bump();
             let operand = self.application()?;
             if self.at(TokenKind::Operator) && contains_block(&operand) {
                 return Err(self.block_not_last(&operand));
@@ -2456,7 +2471,17 @@ impl<'a> Parser<'a> {
                 span: open.span.merge(close.span),
             });
         }
+        if self.at(TokenKind::Operator)
+            && !self.negative_literal_ahead()
+            && !self.at_projection()
+            && !self.at_variadic()
+        {
+            return self.right_section(open);
+        }
         let first = self.expr()?;
+        if self.at_left_section() {
+            return self.left_section(open, first);
+        }
         if let Some(close) = self.eat(TokenKind::RParen) {
             // Отдельного узла у скобок нет: печать расставит их заново по
             // приоритетам, а хранить их значило бы иметь два способа записать
@@ -2474,6 +2499,93 @@ impl<'a> Parser<'a> {
         let close = self.expect(TokenKind::RParen)?;
         Ok(Expr {
             kind: ExprKind::Tuple(items),
+            span: open.span.merge(close.span),
+        })
+    }
+
+    /// Стоит ли на операторе, за которым скобка закрывается: `(e +)`.
+    fn at_left_section(&self) -> bool {
+        self.at(TokenKind::Operator) && self.kind_ahead(1) == TokenKind::RParen
+    }
+
+    /// `(+)` и `(+ e)` - открывающая скобка уже съедена (§4.4).
+    ///
+    /// Операнд - уровня применения: `(+ f x)` пишется, `(* a + b)` - нет,
+    /// фикситетов разбор не знает. `(- e)` - не секция: в Haskell это
+    /// отрицание, и прочесть её вычитанием значило бы ответить не тем.
+    fn right_section(&mut self, open: Token) -> Result<Expr, ParseError> {
+        let token = self.bump();
+        let operator = self.name_of(token);
+        if let Some(close) = self.eat(TokenKind::RParen) {
+            return Ok(Expr {
+                kind: ExprKind::Section(Section {
+                    operator,
+                    operand: None,
+                    left: false,
+                }),
+                span: open.span.merge(close.span),
+            });
+        }
+        if &*operator.text == "-" {
+            return Err(ParseError::Misplaced {
+                what: Misplaced::MinusSection,
+                span: open.span.merge(operator.span),
+            });
+        }
+        let operand = self.application()?;
+        if self.at(TokenKind::Operator) || contains_block(&operand) {
+            return Err(ParseError::Misplaced {
+                what: Misplaced::SectionOperand,
+                span: open.span.merge(self.peek().span),
+            });
+        }
+        let close = self.expect(TokenKind::RParen)?;
+        Ok(Expr {
+            kind: ExprKind::Section(Section {
+                operator,
+                operand: Some(Box::new(operand)),
+                left: false,
+            }),
+            span: open.span.merge(close.span),
+        })
+    }
+
+    /// `(e +)` - операнд разобран, на операторе стоим (§4.4).
+    ///
+    /// Операнд - уровня применения либо в своих скобках: `(\x -> x +)`
+    /// читалось бы лямбдой, отданной оператору, а не тем, что написано.
+    fn left_section(&mut self, open: Token, operand: Expr) -> Result<Expr, ParseError> {
+        let bracketed = self.text.as_bytes().get(operand.span.start()) == Some(&b'(');
+        let applied = matches!(
+            operand.kind,
+            ExprKind::Name(_)
+                | ExprKind::Lit(_)
+                | ExprKind::Hole
+                | ExprKind::App(..)
+                | ExprKind::TypeApp(..)
+                | ExprKind::Mask(_)
+                | ExprKind::Tuple(_)
+                | ExprKind::Record(_)
+                | ExprKind::RecordType(..)
+                | ExprKind::Project(..)
+                | ExprKind::Update(..)
+                | ExprKind::List(_)
+                | ExprKind::Section(_)
+        );
+        if !applied && !bracketed {
+            return Err(ParseError::Misplaced {
+                what: Misplaced::SectionOperand,
+                span: open.span.merge(self.peek().span),
+            });
+        }
+        let token = self.bump();
+        let close = self.expect(TokenKind::RParen)?;
+        Ok(Expr {
+            kind: ExprKind::Section(Section {
+                operator: self.name_of(token),
+                operand: Some(Box::new(operand)),
+                left: true,
+            }),
             span: open.span.merge(close.span),
         })
     }

@@ -147,6 +147,16 @@ impl<'a> Spent<'a> {
                 items.iter().any(|item| self.in_expr(name, item, bound))
             }
             ExprKind::Chain(chain) => self.in_chain(name, chain, bound),
+            // Секция - применение оператора: операнд - его аргумент слева у
+            // `(e +)` и справа у `(+ e)`.
+            ExprKind::Section(section) => {
+                let mults = self.named_mults(&section.operator.text, bound);
+                let place = usize::from(!section.left);
+                &*section.operator.text == name
+                    || section.operand.as_deref().is_some_and(|operand| {
+                        mults.get(place) != Some(&Mult::Zero) && self.in_expr(name, operand, bound)
+                    })
+            }
             // `Pi` и стрелка - типы целиком: что в них написано, стёрто.
             // Тип записи стёрт, как и всё в позиции типа.
             ExprKind::RecordType(..)

@@ -195,6 +195,7 @@ fn in_expr(expr: &Expr, found: &mut Vec<Warning>) {
             in_expr(&chain.head, found);
             chain.tail.iter().for_each(|(_, it)| in_expr(it, found));
         }
+        ExprKind::Section(section) => section.operand.iter().for_each(|it| in_expr(it, found)),
         ExprKind::Name(_)
         | ExprKind::Lit(_)
         | ExprKind::Hole
@@ -436,6 +437,11 @@ pub(crate) fn uses(expr: &Expr, wanted: &[&Symbol]) -> bool {
                         || (matches!(&*operator.text, "&&" | "||") && implied(&["True", "False"]))
                         || recur(item)
                 })
+        }
+        // Секция `&&` и `||` - обычное применение: особой формы у неё нет.
+        ExprKind::Section(section) => {
+            wanted.contains(&&section.operator.text)
+                || section.operand.as_deref().is_some_and(recur)
         }
     }
 }

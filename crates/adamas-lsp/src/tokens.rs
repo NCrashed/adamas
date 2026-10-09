@@ -955,6 +955,11 @@ impl<'a> Names<'a> {
                     self.expr(operand);
                 }
             }
+            ExprKind::Section(section) => {
+                if let Some(operand) = &section.operand {
+                    self.expr(operand);
+                }
+            }
         }
     }
 

@@ -808,6 +808,12 @@ impl Search<'_> {
                     self.expr(operand);
                 }
             }
+            ExprKind::Section(section) => {
+                self.refer(&section.operator);
+                if let Some(operand) = &section.operand {
+                    self.expr(operand);
+                }
+            }
         }
     }
 }

@@ -15,8 +15,8 @@
 use adamas_core::source::Span;
 use adamas_parser::ast::{
     Alt, Binder, Binding, Block, Clause, Data, Decl, DeclKind, EffectDecl, EffectLabel, Expr,
-    ExprKind, HandlerBranch, LamParamKind, Module, Name, Pattern, PatternKind, Resource, Stmt,
-    StmtKind,
+    ExprKind, HandlerBranch, LamParamKind, Module, Name, Pattern, PatternKind, Resource, Section,
+    Stmt, StmtKind,
 };
 use adamas_parser::parse;
 use proptest::prelude::*;
@@ -325,6 +325,7 @@ impl Spans<'_> {
                     self.expr(at, operand);
                 }
             }
+            ExprKind::Section(section) => self.section(at, section),
         }
     }
 
@@ -386,6 +387,13 @@ impl Spans<'_> {
 
     fn name(&mut self, parent: Span, name: &Name) {
         self.inside("имя", parent, name.span);
+    }
+
+    fn section(&mut self, at: Span, section: &Section) {
+        self.name(at, &section.operator);
+        if let Some(operand) = &section.operand {
+            self.expr(at, operand);
+        }
     }
 }
 

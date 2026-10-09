@@ -658,6 +658,7 @@ fn written_row_tail(expr: &Expr) -> Option<&ast::Name> {
         ExprKind::Chain(chain) => {
             recur(&chain.head).or_else(|| chain.tail.iter().find_map(|(_, item)| recur(item)))
         }
+        ExprKind::Section(section) => section.operand.as_deref().and_then(recur),
     }
 }
 
@@ -708,6 +709,11 @@ pub(crate) fn names_any(expr: &Expr, wanted: &[&Symbol]) -> bool {
         ExprKind::Tuple(items) | ExprKind::List(items) => items.iter().any(&recur),
         ExprKind::Chain(chain) => {
             recur(&chain.head) || chain.tail.iter().any(|(_, item)| recur(item))
+        }
+        // `(+)` - имя оператора, написанное значением.
+        ExprKind::Section(section) => {
+            wanted.contains(&&section.operator.text)
+                || section.operand.as_deref().is_some_and(&recur)
         }
     }
 }
@@ -1915,6 +1921,12 @@ impl<'a> Elaborator<'a> {
                     self.free_in(operand, bound, found);
                 }
             }
+            ExprKind::Section(section) => {
+                self.free_name(&section.operator, bound, found);
+                if let Some(operand) = &section.operand {
+                    self.free_in(operand, bound, found);
+                }
+            }
             // Связывание закрывает своё имя для всего, что под ним. Тип группы
             // `(x y : A)` при этом читается до обоих имён - как и в самой
             // элаборации, где та же группа прячет их от собственного домена.
@@ -2607,6 +2619,7 @@ impl<'a> Elaborator<'a> {
             }
             ExprKind::Block(block) => self.block(block, position),
             ExprKind::Chain(chain) => self.chain(chain, expr.span),
+            ExprKind::Section(section) => self.expr(&sectioned(section, expr.span), Mult::Many),
 
             // Тип записи - телескоп: каждое следующее поле элаборируется под
             // предыдущими, потому что вправе на них ссылаться (§4.2).
@@ -5200,6 +5213,20 @@ impl<'a> Elaborator<'a> {
         // Цепочкой `&&` с `let` это не пишется: та требует Rust 2024, а MSRV
         // проекта 1.85 (джоба `msrv` его и ловит). `?` внутри цепочки тем более:
         // редекс вправе отказать по существу, и отказ обязан уехать наверх.
+        // Секция в голове - `(+ 1) 2` - разворачивается до спайна: лямбда
+        // `(+ e)` тогда идёт путём бета-редекса, как написанная руками.
+        if let ExprKind::Section(section) = &head.kind {
+            let rebuilt =
+                arguments
+                    .iter()
+                    .rev()
+                    .fold(sectioned(section, head.span), |callee, argument| Expr {
+                        span: callee.span.merge(argument.span),
+                        kind: ExprKind::App(Box::new(callee), Box::new((*argument).clone())),
+                    });
+            self.written_facts = written_facts;
+            return self.application(&rebuilt);
+        }
         if let ExprKind::Lam { params, body } = &head.kind {
             if let Some(term) = self.redex(params, body, &arguments, expr.span)? {
                 return Ok(term);
@@ -9674,4 +9701,54 @@ fn local_function(binding: &Binding) -> Result<Binding, ElabError> {
         },
         ..binding.clone()
     })
+}
+
+/// Оператор значением и секция - тем, что элаборация уже умеет (§4.4,
+/// решение 2026-10-09).
+///
+/// `(+)` - имя оператора, `(e +)` - его частичное применение `(+) e`; лямбда
+/// нужна только `(+ e)`: `\case -> case + e`, цепочкой, чтобы `(&& b)` осталось
+/// особой формой. Параметр назван ключевым словом - автор его не напишет, и
+/// печать контекста его прячет.
+fn sectioned(section: &ast::Section, span: Span) -> Expr {
+    let operator = Expr {
+        kind: ExprKind::Name(section.operator.clone()),
+        span: section.operator.span,
+    };
+    let Some(operand) = &section.operand else {
+        return operator;
+    };
+    if section.left {
+        return Expr {
+            kind: ExprKind::App(Box::new(operator), operand.clone()),
+            span,
+        };
+    }
+    let parameter = ast::Name {
+        text: Rc::from("case"),
+        span,
+    };
+    let argument = Expr {
+        kind: ExprKind::Name(parameter.clone()),
+        span,
+    };
+    Expr {
+        kind: ExprKind::Lam {
+            params: vec![ast::LamParam {
+                kind: ast::LamParamKind::Pattern(ast::Pattern {
+                    kind: PatternKind::Name(parameter),
+                    span,
+                }),
+                span,
+            }],
+            body: Box::new(Expr {
+                kind: ExprKind::Chain(ast::Chain {
+                    head: Box::new(argument),
+                    tail: vec![(section.operator.clone(), (**operand).clone())],
+                }),
+                span,
+            }),
+        },
+        span,
+    }
 }

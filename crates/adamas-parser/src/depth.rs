@@ -213,6 +213,13 @@ fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<
             pending.extend(items.iter().map(|item| (Node::Expr(item), inner)));
         }
         ExprKind::Chain(chain) => chain_at(chain, depth, expr.span, pending)?,
+        // Секция - лямбда над применением оператора: три звена над операндом.
+        ExprKind::Section(section) => {
+            if let Some(operand) = &section.operand {
+                let inner = deepen(depth, 3, expr.span)?;
+                pending.push((Node::Expr(operand), inner));
+            }
+        }
     }
     Ok(())
 }

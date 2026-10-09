@@ -376,6 +376,23 @@ pub enum ExprKind {
     List(Vec<Expr>),
     /// Цепочка операторов.
     Chain(Chain),
+    /// Оператор в скобках: `(+)`, `(+ 1)`, `(1 +)` (§4.4).
+    Section(Section),
+}
+
+/// Оператор значением и секции (§4.4, решение 2026-10-09).
+///
+/// `(+)` - сам оператор, `(e +)` - его частичное применение, `(+ e)` -
+/// `\x -> x + e`. Операнд - без своего оператора на верхнем уровне:
+/// фикситеты разбору не известны, и `(* a + b)` скобки обязан написать автор.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Section {
+    /// Оператор.
+    pub operator: Name,
+    /// Операнд, если написан.
+    pub operand: Option<Box<Expr>>,
+    /// Операнд слева от оператора: `(e +)`.
+    pub left: bool,
 }
 
 /// Поле в типе записи: имя и тип.
@@ -958,6 +975,7 @@ pub fn contains_block(expr: &Expr) -> bool {
                 pending.push(&chain.head);
                 pending.extend(chain.tail.iter().map(|(_, operand)| operand));
             }
+            ExprKind::Section(section) => pending.extend(section.operand.as_deref()),
         }
     }
     false
@@ -1036,6 +1054,7 @@ pub fn mentions(expr: &Expr, name: &str) -> bool {
                 pending.push(&chain.head);
                 pending.extend(chain.tail.iter().map(|(_, operand)| operand));
             }
+            ExprKind::Section(section) => pending.extend(section.operand.as_deref()),
         }
     }
     false
@@ -1530,6 +1549,20 @@ fn dump_record(out: &mut String, kind: &ExprKind) {
     out.push(')');
 }
 
+fn dump_section(out: &mut String, section: &Section) {
+    out.push_str(if section.left {
+        "(section-left "
+    } else {
+        "(section "
+    });
+    out.push_str(&section.operator.text);
+    if let Some(operand) = &section.operand {
+        out.push(' ');
+        dump_expr(out, operand);
+    }
+    out.push(')');
+}
+
 fn dump_expr(out: &mut String, expr: &Expr) {
     match &expr.kind {
         ExprKind::Name(name) => out.push_str(&name.text),
@@ -1629,6 +1662,7 @@ fn dump_expr(out: &mut String, expr: &Expr) {
             }
             out.push(')');
         }
+        ExprKind::Section(section) => dump_section(out, section),
     }
 }
 

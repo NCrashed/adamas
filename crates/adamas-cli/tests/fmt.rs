@@ -146,6 +146,8 @@ const UNPARSED: &[&str] = &[
     "haskell-context.adamas",
     "haskell-instance-context.adamas",
     "haskell-superclass.adamas",
+    "section-operand.adamas",
+    "section-minus.adamas",
     "variadic-off-the-boundary.adamas",
     "record-value-multiplicity.adamas",
     "char-literal-two.adamas",

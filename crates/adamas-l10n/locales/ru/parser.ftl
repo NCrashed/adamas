@@ -54,4 +54,6 @@ misplaced-using = `using` пишется в выражении, перед ин�
 misplaced-braces = фигурные скобки здесь ничего не открывают: effect row пишется `{"{"}Ask{"}"} A`, тип записи - `{"{"}x : A{"}"}`, группа implicit-связываний - `{"{"}a : Type{"}"}`; пустой row не пишется
 misplaced-context = контекст ограничений пишется в фигурных скобках: `{"{"}Eq a{"}"} => a -> Bool`, несколько - через запятую: `{"{"}Eq a, Show a{"}"} => …`
 misplaced-superclass = суперкласс пишется после `when`, а не перед `=>`: `class Ord a when Eq a where …`
+misplaced-section-operand = операнд секции - применение либо выражение в своих скобках: `(+ f x)`, `(* (a + b))`; фикситетов разбор не знает
+misplaced-minus-section = `(- e)` - не секция: в Haskell это отрицание; вычитание из аргумента пишется `(\v -> v - e)`, отрицание - `0 - e`
 parse-misplaced = { $what }

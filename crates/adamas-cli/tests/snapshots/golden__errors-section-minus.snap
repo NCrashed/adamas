@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+assertion_line: 132
+expression: text
+---
+Ошибка: section-minus.adamas:11:12: `(- e)` - не секция: в Haskell это отрицание; вычитание из аргумента пишется `(\v -> v - e)`, отрицание - `0 - e`
+  main = map (- shift 1) [5]
+             ^^

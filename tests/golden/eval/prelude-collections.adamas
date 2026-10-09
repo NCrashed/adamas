@@ -32,7 +32,7 @@ main =
   let xs : List UInt64 = [1, 2, 3, 4, 5]
   let doubled : List UInt64 = map double xs
   let text : String = show doubled <> show (filter big doubled) <> show (reverse xs)
-  let summed : UInt64 = foldl (\acc x -> acc + x) 0 xs
+  let summed : UInt64 = foldl (+) 0 xs
   let pairs : List (UInt64, String) = zip xs ["a", "b"]
   let n : Nat = 3
   let ne : NonEmpty UInt64 = { head = 9, tail = [10] }

@@ -1,0 +1,6 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+assertion_line: 117
+expression: text
+---
+{total = 6, incs = True, from = True, scaled = True, cons = True, kept = True, both = False, either = True, applied = 5, head = 40}

@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+assertion_line: 132
+expression: text
+---
+Ошибка: section-operand.adamas:8:12: операнд секции - применение либо выражение в своих скобках: `(+ f x)`, `(* (a + b))`; фикситетов разбор не знает
+  main = map (* 2 + 1) [1, 2]
+             ^^^^^^

@@ -1,0 +1,19 @@
+-- Оператор значением и секции (§4.4, решение 2026-10-09).
+--
+-- `(+)` - сам оператор, `(e op)` - его частичное применение, `(op e)` -
+-- `\x -> x op e`, как в Haskell. Операнд секции - применение либо выражение в
+-- своих скобках: фикситетов разбор не знает, и `(* (a + b))` пишет автор.
+-- `(&& b)` - обычная функция: особой формой `&&` остаётся только с обоими
+-- операндами. Секция в голове применения разворачивается до спайна.
+
+sum : List UInt64 -> UInt64
+sum xs = foldl (+) 0 xs
+
+words : List UInt64 -> List UInt64
+words xs = xs
+
+nonZero : List UInt64 -> List UInt64
+nonZero xs = filter (/= 0) xs
+
+main : { total : UInt64, incs : Bool, from : Bool, scaled : Bool, cons : Bool, kept : Bool, both : Bool, either : Bool, applied : UInt64, head : UInt64 }
+main = {total = sum [1, 2, 3], incs = words (map (+ 1) [1, 2]) == [2, 3], from = words (map (100 -) [1, 2]) == [99, 98], scaled = words (map (* (2 + 1)) [1, 2]) == [3, 6], cons = words ((0 ::) [5]) == [0, 5], kept = nonZero [0, 4, 0, 7] == [4, 7], both = (True &&) False, either = (|| True) False, applied = (+) 2 3, head = (* 10) 4}

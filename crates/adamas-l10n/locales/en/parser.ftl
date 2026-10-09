@@ -54,4 +54,6 @@ misplaced-using = `using` belongs in an expression, before the instance: `using 
 misplaced-braces = braces open nothing here: an effect row is written `{"{"}Ask{"}"} A`, a record type `{"{"}x : A{"}"}`, a group of implicit binders `{"{"}a : Type{"}"}`; an empty row is not written
 misplaced-context = a constraint context is written in braces: `{"{"}Eq a{"}"} => a -> Bool`, several separated by commas: `{"{"}Eq a, Show a{"}"} => …`
 misplaced-superclass = a superclass goes after `when`, not before `=>`: `class Ord a when Eq a where …`
+misplaced-section-operand = a section operand is an application or an expression in its own parentheses: `(+ f x)`, `(* (a + b))`; the parser does not know fixities
+misplaced-minus-section = `(- e)` is not a section: in Haskell it is negation; subtracting from the argument is written `(\v -> v - e)`, negation `0 - e`
 parse-misplaced = { $what }

@@ -39,7 +39,8 @@ elab-not-total = `{ $name }` is declared `@total`, but the verdict is negative: 
 elab-class-head = a class head is a name with arguments: `class Eqv a`, `instance Eqv Nat`
 elab-no-instance = instance `{ $written }` not found
 elab-rigid-instance = an instance of `{ $class }` is not chosen for a type variable: its dictionary comes only from the context - add `{"{"}{ $class } …{"}"} =>` to the signature; for a default method, declare `{ $class }` a superclass
-elab-widened-signature = the body of `{ $name }` widens its declared type with effects `{ $effects }` that are not in the signature: a computation passed as a value unifies its row with the parameter of the callee. Apply it under the ambient row (`\_x -> k MkUnit`) or write the effects in the signature
+elab-impure-lambda = the lambda `{ $name }` has no annotation and is pure, but its body needs effects `{ $effects }`: effects of a local lambda are written in the type of the binding - `let { $name } : A -> { $effects } B = …`
+elab-widened-signature =the body of `{ $name }` widens its declared type with effects `{ $effects }` that are not in the signature: a computation passed as a value unifies its row with the parameter of the callee. Apply it under the ambient row (`\_x -> k MkUnit`) or write the effects in the signature
 elab-partial-instance = instance `{ $written }` is not total and cannot appear in a type or a proof
 elab-instance-depth = resolving `{ $written }` failed: the nesting limit of instance contexts ({ $limit }) is exhausted, and the chain of goals does not decrease
 elab-declaring-instance = instance `{ $written }` is being declared right now, and its dictionary is built only on its own parameters: there is nothing to discharge a goal of another shape

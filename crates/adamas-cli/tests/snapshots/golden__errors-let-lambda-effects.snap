@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+assertion_line: 132
+expression: text
+---
+Ошибка: let-lambda-effects.adamas:14:14: лямбда `plus` без аннотации чиста, а её тело требует эффектов `{Ask}`: эффекты локальной лямбды пишутся в типе связывания - `let plus : A -> {Ask} B = …`
+    let plus = \x -> x + ask
+               ^^^^^^^^^^^^^

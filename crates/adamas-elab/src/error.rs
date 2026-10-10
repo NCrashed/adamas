@@ -480,6 +480,18 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Лямбда `let` без аннотации требует эффектов (§4.1, §10 вопрос 5): её
+    /// тип из дырок чист, и эффекты пишутся аннотацией.
+    #[error("{}", adamas_l10n::tr!("elab-impure-lambda", name = .name, effects = .effects))]
+    ImpureLambda {
+        /// Связывание.
+        name: Symbol,
+        /// Row, которой требует тело.
+        effects: String,
+        /// Где тело её потребовало.
+        span: Span,
+    },
+
     /// Тело решило поднятый хвост своей сигнатуры эффектами (§4.1, §10 вопрос
     /// 246): написанная сигнатура - договор, и тело вправе ему не
     /// соответствовать, но не вправе его переписать.
@@ -1651,6 +1663,7 @@ impl ElabError {
             | Self::RigidInstance { span, .. }
             | Self::PartialInstance { span, .. }
             | Self::WidenedSignature { span, .. }
+            | Self::ImpureLambda { span, .. }
             | Self::InstanceDepth { span, .. }
             | Self::DeclaringInstance { span, .. }
             | Self::ProjectingHead { span, .. }

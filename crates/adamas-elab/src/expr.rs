@@ -7949,7 +7949,8 @@ impl<'a> Elaborator<'a> {
         // стёртое связывание - нет, расходовать там нечего.
         let how = self.owned_of(ty);
         let owns = how.is_some();
-        let ty = match self.holes.take() {
+        let holed = self.holes.take();
+        let ty = match holed {
             Some(count) => self.holes_type(count),
             None => self.typing(|inner| inner.expr(ty, Mult::Many))?,
         };
@@ -7986,6 +7987,9 @@ impl<'a> Elaborator<'a> {
         // Аннотация и есть ожидаемый тип - `let n : Bool = get` исполняет,
         // `let f : {State Bool} Bool = get` передаёт (§3.4).
         let value = self.executed(value, Some(&annotation));
+        if holed.is_some() {
+            self.pure_lambda(binding, &value, &annotation)?;
+        }
         // Ожидание объемлющего возвращается хвосту: аннотация - тип
         // связывания, а не блока. У поля три потребителя, и делить его надо
         // по месту: значению - остаток аннотации, хвосту - решение об
@@ -8690,6 +8694,61 @@ impl<'a> Elaborator<'a> {
         if check(&self.ctx, self.metas, Mult::Many, body, result).is_err() {
             self.metas.rollback(mark);
         }
+    }
+
+    /// Лямбда `let` без аннотации чиста (§4.1, §10 вопрос 5, решение
+    /// 2026-10-10): её тип из дырок row не несёт, и эффекты локальной лямбды
+    /// пишутся. Проверяется здесь, а не итоговой проверкой объявления: та
+    /// назвала бы окружающую row, которой автор не писал, а не связывание и
+    /// его тип.
+    fn pure_lambda(
+        &mut self,
+        binding: &Binding,
+        value: &Term,
+        ty: &Rc<Value>,
+    ) -> Result<(), ElabError> {
+        let mark = self.metas.mark();
+        let outcome = check(&self.ctx, self.metas, Mult::Many, value, ty);
+        // Row печатается человеческой печатью (§7.6) и с решениями дырок -
+        // до отката, который их снимет.
+        let effects = match &outcome {
+            Err(error) => match &error.kind {
+                adamas_core::error::ErrorKind::Undischarged { wanted, .. } => {
+                    let zonked = self.metas.zonk_row(wanted);
+                    // Метка печатается так, как её пишет автор в этом месте: короткое
+                    // имя, если оно здесь разрешается в ту же метку.
+                    let labels = zonked.labels().iter().map(|label| {
+                        let short = label.name.rsplit('.').next().unwrap_or(&label.name);
+                        let name = match self.qualified(short) {
+                            Some(full) if *full == *label.name => Rc::from(short),
+                            _ => Rc::clone(&label.name),
+                        };
+                        adamas_core::row::Label {
+                            name,
+                            arguments: label.arguments.clone(),
+                        }
+                    });
+                    let zonked = Row::closing(labels.collect::<Vec<_>>(), zonked.tail());
+                    Some(adamas_core::human::humanly(|| {
+                        adamas_core::human::humane_row(&zonked)
+                            .to_string()
+                            .trim_end()
+                            .to_owned()
+                    }))
+                }
+                _ => None,
+            },
+            Ok(_) => None,
+        };
+        self.metas.rollback(mark);
+        let Some(effects) = effects else {
+            return Ok(());
+        };
+        Err(ElabError::ImpureLambda {
+            name: Rc::clone(&binding.name.text),
+            effects,
+            span: binding.body.span,
+        })
     }
 
     /// Тип лямбды `let` без аннотации: `count` стрелок из дырок (§4.1,

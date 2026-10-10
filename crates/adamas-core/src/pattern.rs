@@ -1042,12 +1042,135 @@ impl Compiler<'_> {
             });
         }
 
+        if let Some(flipped) = self.flipped(ctx, columns, rows, target, example, split) {
+            return flipped;
+        }
         match columns[split].level() {
             Some(_) => self.split(ctx, columns, rows, target, example, split),
             // Значение уже построено конструктором: узел разбора не нужен,
             // потому что выбирать не из чего.
             None => self.known(ctx, columns, rows, target, example, split),
         }
+    }
+
+    /// Разбор равенства, у которого переменная стоит на месте параметра
+    /// (§10 вопрос 247).
+    ///
+    /// Мотив `case` абстрагирует индексы, а параметры у него закреплены:
+    /// разбор `Refl` у `p : Equal T b A` переписывает в ветви `A` на `b`, а
+    /// не `b` на `A`, и `Slot b` уточнения не получал. Здесь разбирается
+    /// симметричное доказательство - `let q : Equal T A b = case p of Refl ->
+    /// Refl`, - у которого переменная стоит индексом и уточняется штатно.
+    ///
+    /// Семейство узнаётся по форме, а не по имени: один конструктор без полей,
+    /// чей единственный индекс - последний параметр (`Refl : Equal a x x`).
+    /// Колонка не должна связывать переменную ни в одной строке: значением
+    /// её стало бы `q`, а не написанное `p`.
+    fn flipped(
+        &mut self,
+        ctx: &Ctx<'_>,
+        columns: &[Column],
+        rows: &[Row],
+        target: &Term,
+        example: &[Pattern],
+        split: usize,
+    ) -> Option<Result<Tree, PatternError>> {
+        let column = &columns[split];
+        let scrutinee = column.level()?;
+        if rows
+            .iter()
+            .any(|row| matches!(row.patterns[split], Pat::Var(_)))
+        {
+            return None;
+        }
+        let Equality {
+            data,
+            levels,
+            arguments,
+            params,
+            constructor,
+        } = equality(self.signature, &column.ty)?;
+        let (left, right) = (&arguments[params - 1], &arguments[params]);
+
+        let size = ctx.size();
+        let applied = |args: &mut dyn Iterator<Item = Term>| {
+            args.fold(
+                Term::Const(Rc::clone(&data), Rc::clone(&levels), Args::none()),
+                |applied, argument| Term::App(Rc::new(applied), Rc::new(argument)),
+            )
+        };
+        let fixed = &arguments[..params - 1];
+        // Тип `q` - `D fixed right left`, в контексте разбора.
+        let ty = applied(&mut fixed.iter().chain([right, left]).map(|it| quote(size, it)));
+        // Мотив `\(0 i) (0 _) -> D fixed i left`: под двумя связываниями.
+        let motive_body = applied(
+            &mut fixed
+                .iter()
+                .map(|it| quote(size + 2, it))
+                .chain([Term::var(1), quote(size + 2, left)]),
+        );
+        let motive = Term::Lam(
+            Mult::Zero,
+            "i".into(),
+            Rc::new(Term::Lam(Mult::Zero, "_".into(), Rc::new(motive_body))),
+        );
+        // Ветвь: сам конструктор при параметрах разбираемого - `D fixed left left`.
+        let built = arguments[..params].iter().fold(
+            Term::Const(Rc::clone(&constructor), Rc::clone(&levels), Args::none()),
+            |applied, param| Term::App(Rc::new(applied), Rc::new(quote(size, param))),
+        );
+        let bound = binding(ctx, scrutinee);
+        let mult = bound.mult;
+        let name = Rc::clone(&bound.name);
+        let consumed = if mult == Mult::Zero {
+            Mult::Zero
+        } else {
+            Mult::One
+        };
+        let value = Term::Case(Rc::new(Case {
+            data: Rc::clone(&data),
+            levels: Rc::clone(&levels),
+            params: u32::try_from(params).unwrap_or(u32::MAX),
+            consumed,
+            scrutinee: Rc::new(Term::Var(Lvl(scrutinee).to_index(size))),
+            motive: Rc::new(motive),
+            branches: vec![Branch {
+                constructor: Rc::clone(&constructor),
+                body: Rc::new(built),
+            }],
+        }));
+
+        let ty_value = ctx.eval(&ty);
+        let inner = ctx.define(
+            Rc::clone(&name),
+            mult,
+            Rc::clone(&ty_value),
+            ctx.eval(&value),
+        );
+        let mut moved: Vec<Column> = columns
+            .iter()
+            .map(|column| Column {
+                value: Rc::clone(&column.value),
+                path: column.path.clone(),
+                ty: Rc::clone(&column.ty),
+            })
+            .collect();
+        moved[split] = Column {
+            value: Value::var(Lvl(size)),
+            path: column.path.clone(),
+            ty: ty_value,
+        };
+        let target = rewrite(target, 0, size, &|level| {
+            Term::Var(Lvl(level).to_index(size + 1))
+        });
+        Some(
+            self.solve(&inner, &moved, rows, &target, example)
+                .map(|body| {
+                    body.under(Frame::BindingBody).map(|body| {
+                        Term::Let(mult, name, Rc::new(ty), Rc::new(value), Rc::new(body))
+                    })
+                }),
+        )
     }
 
     /// Первая колонка-переменная, населить которую нечем.
@@ -2682,6 +2805,60 @@ fn data_head(signature: &Signature, ty: &Rc<Value>) -> Option<DataHead> {
         })
         .collect::<Option<Vec<_>>>()?;
     Some((Rc::clone(name), Rc::clone(levels), arguments))
+}
+
+/// Тип равенства, у которого переменная стоит на месте параметра, а индекс -
+/// не переменная (§10 вопрос 247, [`Compiler::flipped`]).
+struct Equality {
+    data: Name,
+    levels: Rc<[Level]>,
+    /// Параметры, потом единственный индекс.
+    arguments: Vec<Rc<Value>>,
+    params: usize,
+    constructor: Name,
+}
+
+/// Узнаёт [`Equality`] по форме: один конструктор без полей, чей единственный
+/// индекс - последний параметр (`Refl : Equal a x x`).
+fn equality(signature: &Signature, ty: &Rc<Value>) -> Option<Equality> {
+    let (data, levels, arguments) = data_head(signature, ty)?;
+    let DefinitionKind::Data {
+        constructors,
+        params,
+        ..
+    } = &signature.lookup(&data)?.kind
+    else {
+        return None;
+    };
+    let params = *params as usize;
+    let [constructor] = constructors.as_slice() else {
+        return None;
+    };
+    if params == 0 || arguments.len() != params + 1 {
+        return None;
+    }
+    let declared = &signature.lookup(constructor)?.ty;
+    if binders(declared) != params {
+        return None;
+    }
+    let mut result = declared;
+    while let Term::Pi(_, _, _, _, codomain) = result {
+        result = codomain;
+    }
+    let Term::App(_, index) = result else {
+        return None;
+    };
+    let variable = |value: &Rc<Value>| matches!(&**value, Value::Neutral(Head::Local(_), spine) if spine.is_empty());
+    let shaped = matches!(&**index, Term::Var(Index(0)))
+        && variable(&arguments[params - 1])
+        && !variable(&arguments[params]);
+    shaped.then(|| Equality {
+        data,
+        levels,
+        arguments,
+        params,
+        constructor: Rc::clone(constructor),
+    })
 }
 
 /// Сколько связываний у типа.

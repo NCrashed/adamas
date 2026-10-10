@@ -1,0 +1,25 @@
+-- Образец `Refl` уточняет переменную на месте параметра (§10 вопрос 247,
+-- решение 2026-10-10).
+--
+-- У `Equal (a : Type) (x : a) : a -> Type` левая сторона - параметр, правая -
+-- индекс, и мотив разбора переписывает только индекс. `left Refl s = s`
+-- отвергался «ожидался `UInt8`, получен `Slot b`»: `b` стоит параметром и
+-- уточнения не получал. Компилятор клауз разбирает теперь симметричное
+-- доказательство, где `b` стоит индексом.
+
+data T where
+  A : T
+  B : T
+
+Slot : T -> Type
+Slot A = UInt8
+Slot B = Int32
+
+left : {0 b : T} -> Equal T b A -> Slot b -> UInt8
+left Refl s = s
+
+right : {0 b : T} -> Equal T A b -> Slot b -> UInt8
+right Refl s = s
+
+main : UInt8
+main = left Refl 7 + right Refl 5

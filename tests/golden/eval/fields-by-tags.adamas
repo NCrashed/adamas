@@ -7,9 +7,8 @@
 -- допустим, потому что у `Equal` один конструктор без полей. Факт у вызова
 -- находит поиск, рукописных доказательств нет ни одного.
 --
--- `flipped` - мост между сторонами равенства: факт пишется `b = True`, а
--- образец `Refl` уточняет переменную, только когда она стоит индексом.
-
+-- `cast` берёт факт в его же форме, `b = True`: образец `Refl` уточняет
+-- переменную и на месте параметра (§10 вопрос 247).
 data Tag where
   Position : Tag
   Velocity : Tag
@@ -34,14 +33,12 @@ Slot False = Unit
 data Rocks : Tags -> Type where
   MkRocks : (0 cs : Tags) -> Slot (has Position cs) -> Slot (has Velocity cs) -> Rocks cs
 
-flipped : {0 a : Type} -> {0 x : a} -> {0 y : a} -> (0 p : Equal a x y) -> Equal a y x
-flipped Refl = Refl
 
-cast : {0 b : Bool} -> (0 q : Equal Bool True b) -> Slot b -> Array 4 Int32
+cast : {0 b : Bool} -> (0 q : Equal Bool b True) -> Slot b -> Array 4 Int32
 cast Refl s = s
 
 present : {0 b : Bool} -> {0 p : Equal Bool b True} -> Slot b -> Array 4 Int32
-present s = cast (flipped p) s
+present s = cast p s
 
 velocities : {0 cs : Tags} -> Rocks cs -> Slot (has Velocity cs)
 velocities (MkRocks ds xs vs) = vs

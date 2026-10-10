@@ -35,6 +35,12 @@ thread_local! {
     /// Сколько ведущих неявных параметров у определения: столько аргументов
     /// его применения автор не писал, и печать их не показывает.
     static IMPLICITS: RefCell<HashMap<String, usize>> = RefCell::default();
+    /// Функторы и число их параметров: члены функтора подняты под ними
+    /// неявными, но снаружи эти аргументы различают типы (§10 вопрос 48).
+    static FUNCTORS: RefCell<HashMap<String, usize>> = RefCell::default();
+    /// Модули-применения функтора: `module Downs = Box Down` даёт
+    /// `("Box", [Down]) -> "Downs"`.
+    static APPLIED: RefCell<Vec<(String, Vec<Term>, String)>> = RefCell::default();
 }
 
 /// Исполняет `body` с человеческой печатью.
@@ -80,11 +86,63 @@ pub fn note_implicits<'a>(arities: impl IntoIterator<Item = (&'a str, usize)>) {
     IMPLICITS.with(|it| *it.borrow_mut() = arities);
 }
 
+/// Записывает функторы программы с числом параметров и модули, написанные
+/// их применением (§10 вопрос 48): `Box.Set Down` печатается `Downs.Set`, если
+/// `module Downs = Box Down` есть, и с аргументом - если нет.
+pub fn note_functors<'a>(
+    functors: impl IntoIterator<Item = (&'a str, usize)>,
+    applied: impl IntoIterator<Item = (&'a str, &'a str, Vec<Term>)>,
+) {
+    let functors = functors
+        .into_iter()
+        .map(|(name, count)| (name.to_owned(), count))
+        .collect();
+    FUNCTORS.with(|it| *it.borrow_mut() = functors);
+    let applied = applied
+        .into_iter()
+        .map(|(module, functor, arguments)| (functor.to_owned(), arguments, module.to_owned()))
+        .collect();
+    APPLIED.with(|it| *it.borrow_mut() = applied);
+}
+
 /// Забывает имена прошлой программы: пока новая не прочитана, имена
 /// печатаются полными.
 pub fn forget_names() {
     AMBIGUOUS.with(|it| *it.borrow_mut() = None);
     IMPLICITS.with(|it| it.borrow_mut().clear());
+    FUNCTORS.with(|it| it.borrow_mut().clear());
+    APPLIED.with(|it| it.borrow_mut().clear());
+}
+
+/// Член функтора, применённый к аргументам функтора снаружи: имя, под которым
+/// его напечатать, с какого аргумента печатать и сколько параметров у функтора.
+///
+/// `None` - голова не член функтора либо аргументы - его же параметры-
+/// переменные (печать внутри функтора, `Narrow.T`): тогда работает общее
+/// правило неявных.
+fn functor_member(name: &str, arguments: &[&Term]) -> Option<(Name, usize, usize)> {
+    let (functor, member) = name.rsplit_once('.')?;
+    let count = FUNCTORS.with(|it| it.borrow().get(functor).copied())?;
+    let given = arguments.get(..count)?;
+    if given.iter().all(|it| matches!(it, Term::Var(_))) {
+        return None;
+    }
+    let module = APPLIED.with(|it| {
+        it.borrow()
+            .iter()
+            .find(|(head, written, _)| {
+                head == functor && written.iter().zip(given).all(|(a, b)| a == *b)
+            })
+            .map(|(_, _, module)| module.clone())
+    });
+    Some(match module {
+        Some(module) => (
+            Name::from(format!("{module}.{member}").as_str()),
+            count,
+            count,
+        ),
+        None => (Name::from(crate::term::written_name(name)), 0, count),
+    })
 }
 
 /// Имя так, как его написал бы автор: без модуля, если короткое однозначно.
@@ -162,11 +220,30 @@ impl Humane {
             head = callee;
         }
         arguments.reverse();
-        let hidden = match head {
-            Term::Const(name, _, _) => IMPLICITS
-                .with(|it| it.borrow().get(&**name).copied())
+        let implicits = |name: &str| {
+            IMPLICITS
+                .with(|it| it.borrow().get(name).copied())
                 .filter(|count| *count <= arguments.len())
-                .unwrap_or(0),
+                .unwrap_or(0)
+        };
+        // Член функтора снаружи: аргументы функтора различают типы, и прятать
+        // их, как прочие неявные, значило бы печатать `Set` вместо `Downs.Set`.
+        if let Term::Const(name, _, _) = head {
+            if let Some((shown, folded, count)) = functor_member(name, &arguments) {
+                let head = Term::Const(shown, Rc::from([]), Args::none());
+                let own = implicits(name).saturating_sub(count);
+                let kept = arguments[folded..count]
+                    .iter()
+                    .chain(&arguments[count + own..])
+                    .copied()
+                    .collect::<Vec<_>>();
+                return kept.into_iter().fold(head, |callee, argument| {
+                    Term::App(Rc::new(callee), Rc::new(self.term(argument)))
+                });
+            }
+        }
+        let hidden = match head {
+            Term::Const(name, _, _) => implicits(name),
             _ => 0,
         };
         let head = self.term(head);

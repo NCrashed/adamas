@@ -1,0 +1,34 @@
+-- Тип члена функтора печатается модулем-применением (§10 вопрос 48,
+-- решение 2026-10-10).
+--
+-- `Ups` и `Downs` - один функтор `Box` над разными порядками, и `Set` у них
+-- разные типы. Член функтора поднят под его параметрами неявным, и печать,
+-- прятавшая неявные аргументы, писала «получен `Set`» - различие пропадало.
+-- Теперь тип сворачивается в модуль, написанный этим применением.
+
+module type Ord where
+  type T
+  less : T -> T -> Bool
+
+module Up :> Ord where
+  type T = UInt64
+  less : T -> T -> Bool
+  less a b = a < b
+
+module Down :> Ord where
+  type T = UInt64
+  less : T -> T -> Bool
+  less a b = b < a
+
+module Box (K : Ord) where
+  data Set where
+    Empty : Set
+    One : K.T -> Set
+  empty : Set
+  empty = Empty
+
+module Ups = Box Up
+module Downs = Box Down
+
+wrong : Ups.Set
+wrong = Downs.empty

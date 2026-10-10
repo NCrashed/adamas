@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: functor-type-applied.adamas:34:9: несовпадение типов: ожидался `Ups.Set`, получен `Downs.Set`
+  wrong = Downs.empty
+          ^^^^^^^^^^^

@@ -272,6 +272,57 @@ impl Program {
     }
 }
 
+/// Записывает для печати функторы и модули, написанные их применением (§10
+/// вопрос 48).
+///
+/// Функтор - определение, чей тип есть явные параметры над типом записи и
+/// чьи члены подняты под ними (`Box.Set : {K : Ord} -> Type`); применение -
+/// определение, чьё тело есть функтор, применённый ко всем параметрам
+/// (`Downs = Box Down`).
+fn note_functors(signature: &Signature, names: &[adamas_core::term::Name]) {
+    use adamas_core::term::Term;
+    use adamas_core::visibility::Visibility;
+
+    let functors: HashMap<&str, usize> = names
+        .iter()
+        .filter_map(|name| {
+            let mut ty = &signature.lookup(name)?.ty;
+            let mut count = 0;
+            while let Term::Pi(binder, _, _, _, codomain) = ty {
+                if binder.visibility != Visibility::Explicit {
+                    return None;
+                }
+                count += 1;
+                ty = codomain;
+            }
+            let member = format!("{name}.");
+            let has_members = names.iter().any(|it| it.starts_with(&member));
+            (count > 0 && matches!(ty, Term::Record(_)) && has_members).then_some((&**name, count))
+        })
+        .collect();
+    let applied: Vec<(&str, &str, Vec<Term>)> = names
+        .iter()
+        .filter_map(|name| {
+            let mut body = signature.lookup(name)?.body.as_ref()?;
+            let mut arguments = Vec::new();
+            while let Term::App(callee, argument) = body {
+                arguments.push((**argument).clone());
+                body = callee;
+            }
+            arguments.reverse();
+            let Term::Const(functor, _, _) = body else {
+                return None;
+            };
+            let (functor, count) = functors.get_key_value(&**functor)?;
+            (*count == arguments.len()).then_some((&**name, *functor, arguments))
+        })
+        .collect();
+    adamas_core::human::note_functors(
+        functors.iter().map(|(name, count)| (*name, *count)),
+        applied,
+    );
+}
+
 /// Разбор, элаборация и проверка типов программы целиком (§4.8).
 ///
 /// `entry` - входной файл: его члены квалификации не получают, потому что он и
@@ -367,6 +418,7 @@ pub fn analyze(entry: SourceFile, sources: &dyn Sources) -> Program {
         }
         Some((&**name, count))
     }));
+    note_functors(&signature, &names);
     let mut diagnostics = loader.blame;
     if let Err(error) = outcome {
         refusals.refused(error, Vec::new());

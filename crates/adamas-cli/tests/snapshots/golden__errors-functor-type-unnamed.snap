@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: functor-type-unnamed.adamas:27:9: несовпадение типов: ожидался `Box.Set Up`, получен `Box.Set Down`
+  wrong = Box.empty @Down
+          ^^^^^^^^^^^^^^^

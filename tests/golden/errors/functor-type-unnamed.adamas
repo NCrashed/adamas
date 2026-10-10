@@ -1,0 +1,27 @@
+-- Применение функтора без модуля-имени печатается с аргументом (§10 вопрос
+-- 48, решение 2026-10-10). Пара к `errors/functor-type-applied.adamas`:
+-- модуля `Box Up` в программе нет, и сворачивать не во что.
+
+module type Ord where
+  type T
+  less : T -> T -> Bool
+
+module Up :> Ord where
+  type T = UInt64
+  less : T -> T -> Bool
+  less a b = a < b
+
+module Down :> Ord where
+  type T = UInt64
+  less : T -> T -> Bool
+  less a b = b < a
+
+module Box (K : Ord) where
+  data Set where
+    Empty : Set
+    One : K.T -> Set
+  empty : Set
+  empty = Empty
+
+wrong : Box.Set @Up
+wrong = Box.empty @Down

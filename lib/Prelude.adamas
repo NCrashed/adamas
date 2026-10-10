@@ -94,8 +94,8 @@ data Inspected (b : Bool) where
 
 -- | Условие вместе с фактом о нём - для `if` (см. [`Inspected`]).
 inspect : (b : Bool) -> Inspected b
-inspect True = Then @True Refl
-inspect False = Else @False Refl
+inspect True = Then Refl
+inspect False = Else Refl
 
 -- # Леммы арифметики на слове (§10 вопрос 225)
 --

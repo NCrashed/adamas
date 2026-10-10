@@ -5424,6 +5424,25 @@ impl<'a> Elaborator<'a> {
         let mut ty = zeroed
             .or_else(|| self.synthesized(&term))
             .or_else(|| self.declared_of(&term));
+        // Конструктор берёт параметры семейства из ожидаемого типа **до**
+        // аргументов: `No Refl` при `Seen False` проверяло `Refl` против
+        // `Equal Bool (not ?b) True`, и `not ?b` застревало.
+        let mut callee = &term;
+        while let Term::App(inner, _) = callee {
+            callee = inner;
+        }
+        let constructor = matches!(callee, Term::Const(name, ..)
+        if self.signature.lookup(name).is_some_and(|it| {
+            matches!(it.kind, adamas_core::sig::DefinitionKind::Constructor { .. })
+        }));
+        let goal = awaited
+            .clone()
+            .filter(|goal| constructor && !arguments.is_empty() && !self.flexible(goal));
+        if let (Some(goal), Some(current)) = (goal, ty.clone()) {
+            let (inserted, rest) = self.targeted(term, current, arguments.len(), &goal);
+            term = inserted;
+            ty = Some(rest);
+        }
         let literal_ahead = literals_ahead(&arguments);
         // Отложенные аргументы: голый литерал в позиции, тип которой ещё дырка
         // (§10 вопрос 208, трек A волны 7). Считать его сейчас значило бы
@@ -5627,6 +5646,99 @@ impl<'a> Elaborator<'a> {
             ty = codomain.apply(self.ctx.eval(argument));
         }
         Some(ty)
+    }
+
+    /// Имплиситы конструктора, решённые ожидаемым типом до аргументов (§4.1,
+    /// находка сужения `if`, решение 2026-10-10).
+    ///
+    /// Ведущие имплиситы вставляются дырками, явные связывания проходятся
+    /// жёсткими переменными за краем контекста, и результат сводится с
+    /// ожидаемым. Результат, зависящий от явного поля, назвал бы такую
+    /// переменную - решатель её не примет, и сведение откатывается: решать
+    /// будет, как прежде, проверка.
+    fn targeted(
+        &mut self,
+        term: Term,
+        ty: Rc<Value>,
+        explicit: usize,
+        goal: &Rc<Value>,
+    ) -> (Term, Rc<Value>) {
+        let (term, rest) = self.inserted(term, ty);
+        // Имплиситы головы вставлены ещё разбором имени (`Else ?b`), поэтому
+        // берутся все аргументы спайна, оставшиеся дырками.
+        let implicits: Vec<Term> = spine_arguments(&term)
+            .into_iter()
+            .filter(|it| {
+                let value = whnf_solved(self.signature, self.metas, &self.ctx.eval(it));
+                matches!(&*value, Value::Neutral(Head::Meta(_), _))
+            })
+            .collect();
+        let size = self.ctx.size();
+        let mut result = Rc::clone(&rest);
+        for index in 0..explicit {
+            let forced = whnf_solved(self.signature, self.metas, &result);
+            let Value::Pi(_, _, _, _, codomain) = &*forced else {
+                return (term, rest);
+            };
+            let fresh = u32::try_from(index).map_or(u32::MAX, |it| size.saturating_add(it));
+            result = codomain.apply(Rc::new(Value::Neutral(Head::Local(Lvl(fresh)), Vec::new())));
+        }
+        let extended = u32::try_from(explicit).map_or(u32::MAX, |it| size.saturating_add(it));
+        // Сведение решает и уровни, и row - их решать здесь рано: уровень
+        // конструктора закрепился бы раньше аргументов (`MkPair Nat Nat` под
+        // `Pair` с параметром уровня), row поля открылся бы. Поэтому от него
+        // остаются только значения вставленных имплиситов - зонкнутыми, - а
+        // сведение откатывается целиком.
+        let mark = self.metas.mark();
+        let solved: Vec<(Term, Term)> =
+            if convertible(self.signature, self.metas, extended, &result, goal) {
+                implicits
+                    .iter()
+                    .filter_map(|implicit| {
+                        let value =
+                            whnf_solved(self.signature, self.metas, &self.ctx.eval(implicit));
+                        // Только данные - конструктор либо литерал: индекс семейства.
+                        // Тип и вселенную, решённые здесь, аргумент уже не
+                        // уточнил бы (`MkPair Nat Nat` под уровнем-параметром),
+                        // а переменная типа меняла бы правило исполнения поля.
+                        if !self.datum(&value) {
+                            return None;
+                        }
+                        let quoted = quote(size, &value);
+                        Some((
+                            implicit.clone(),
+                            adamas_core::meta::zonk_term(self.metas, &quoted),
+                        ))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        self.metas.rollback(mark);
+        for (implicit, value) in solved {
+            let (want, got) = (self.ctx.eval(&implicit), self.ctx.eval(&value));
+            let mark = self.metas.mark();
+            if !convertible(self.signature, self.metas, size, &want, &got) {
+                self.metas.rollback(mark);
+            }
+        }
+        (term, rest)
+    }
+
+    /// Значение - данные: конструктор, применённый к чему угодно, либо литерал.
+    fn datum(&self, value: &Value) -> bool {
+        match value {
+            Value::Prim(Prim::Lit(..)) => true,
+            Value::Neutral(Head::Global(name, ..), _) => {
+                self.signature.lookup(name).is_some_and(|it| {
+                    matches!(
+                        it.kind,
+                        adamas_core::sig::DefinitionKind::Constructor { .. }
+                    )
+                })
+            }
+            _ => false,
+        }
     }
 
     /// Тип применения к написанному аргументу - если он вычислим.
@@ -10119,4 +10231,16 @@ fn arity(binding: &Binding) -> usize {
         ExprKind::Lam { params, .. } => params.len(),
         _ => 1,
     }
+}
+
+/// Аргументы спайна применения по порядку.
+fn spine_arguments(term: &Term) -> Vec<Term> {
+    let mut found = Vec::new();
+    let mut current = term;
+    while let Term::App(callee, argument) = current {
+        found.push((**argument).clone());
+        current = callee;
+    }
+    found.reverse();
+    found
 }

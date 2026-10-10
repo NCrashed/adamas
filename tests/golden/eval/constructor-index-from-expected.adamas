@@ -1,0 +1,21 @@
+-- Конструктор берёт параметр семейства из ожидаемого типа до аргументов
+-- (находка сужения `if`, 2026-10-08; закрыта 2026-10-10).
+--
+-- `No Refl` при `Seen False` проверяло `Refl` против `Equal Bool (not ?b)
+-- True`: имплисит `b` был дыркой, `not ?b` не сводилось, и писалось
+-- `No @False Refl`. Теперь результат конструктора сводится с ожидаемым
+-- раньше полей - если от полей он не зависит. Прелюдийный `inspect` пишется
+-- без `@`.
+
+data Seen (b : Bool) where
+  Yes : (0 p : Equal Bool b True) -> Seen b
+  No : (0 p : Equal Bool (not b) True) -> Seen b
+
+see : (b : Bool) -> Seen b
+see True = Yes Refl
+see False = No Refl
+
+main : Bool
+main = case see True of
+  Yes _p -> True
+  No _p -> False

@@ -480,6 +480,19 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Тело решило поднятый хвост своей сигнатуры эффектами (§4.1, §10 вопрос
+    /// 246): написанная сигнатура - договор, и тело вправе ему не
+    /// соответствовать, но не вправе его переписать.
+    #[error("{}", adamas_l10n::tr!("elab-widened-signature", name = .name, effects = .effects))]
+    WidenedSignature {
+        /// Определение.
+        name: Symbol,
+        /// Эффекты, которыми тело расширило тип, через запятую.
+        effects: String,
+        /// Определение целиком.
+        span: Span,
+    },
+
     /// Цепочка контекстов инстансов не кончилась в пределах глубины.
     ///
     /// Разрешение рекурсивно по построению: словарь контекста кандидата
@@ -1637,6 +1650,7 @@ impl ElabError {
             | Self::NoInstance { span, .. }
             | Self::RigidInstance { span, .. }
             | Self::PartialInstance { span, .. }
+            | Self::WidenedSignature { span, .. }
             | Self::InstanceDepth { span, .. }
             | Self::DeclaringInstance { span, .. }
             | Self::ProjectingHead { span, .. }

@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+assertion_line: 132
+expression: text
+---
+Ошибка: signature-widened.adamas:21:1: тело `wrapped` расширяет объявленный тип эффектами `Outer`, которых в сигнатуре нет: вычисление, переданное значением, сводит свою row с параметром вызываемого. Примените его под окружающей row (`\_x -> k MkUnit`) либо напишите эффекты в сигнатуре
+  wrapped k = handle @Outer (\_u -> inner k) with
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

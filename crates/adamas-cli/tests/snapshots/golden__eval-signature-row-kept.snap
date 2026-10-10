@@ -1,0 +1,6 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+assertion_line: 117
+expression: text
+---
+1

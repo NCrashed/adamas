@@ -1,0 +1,27 @@
+-- Вычисление, применённое под окружающей row (§4.1, §10 вопрос 246).
+--
+-- `inner (\_x -> k MkUnit)` вместо `inner k`: применение `k` стоит под row
+-- лямбды, и правило погашения расширяет её справа, не трогая подъём
+-- сигнатуры `wrapped`. Пара к `errors/signature-widened.adamas`.
+
+effect Inner where
+  ping : UInt64
+
+effect Outer where
+  pong : UInt64
+
+inner : {a : Type} -> ({Inner, Outer} a) -> {Outer} a
+inner k = handle k with
+  return v -> v
+  ping -> resume 1
+
+wrapped : {a : Type} -> ({Inner} a) -> a
+wrapped k = handle @Outer (\_u -> inner (\_x -> k MkUnit)) with
+  return v -> v
+  pong -> resume 2
+
+prog : {Inner} UInt64
+prog = ping
+
+main : UInt64
+main = wrapped prog

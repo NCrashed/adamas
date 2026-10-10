@@ -1,0 +1,29 @@
+-- Тело расширяет свою сигнатуру (§4.1, §10 вопрос 246, решение 2026-10-10).
+--
+-- `wrapped : ({Inner} a) -> a` передаёт вычисление `k` в `inner` значением, и
+-- проверка тела сводит row `k` с параметром `inner`: поднятый хвост сигнатуры
+-- решался `{Outer | …}`, объявленный тип молча расширялся, и отказ приходил
+-- чужому `main` «`{Outer}` не погашены». Сигнатура - договор: теперь отказ
+-- стоит у объявления и называет форму, которая договор не трогает.
+
+effect Inner where
+  ping : UInt64
+
+effect Outer where
+  pong : UInt64
+
+inner : {a : Type} -> ({Inner, Outer} a) -> {Outer} a
+inner k = handle k with
+  return v -> v
+  ping -> resume 1
+
+wrapped : {a : Type} -> ({Inner} a) -> a
+wrapped k = handle @Outer (\_u -> inner k) with
+  return v -> v
+  pong -> resume 2
+
+prog : {Inner} UInt64
+prog = ping
+
+main : UInt64
+main = wrapped prog

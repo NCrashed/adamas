@@ -67,6 +67,9 @@ struct Pending<'a> {
     grades: u32,
     source: &'a ast::Expr,
     span: Span,
+    /// Подъём хвоста сигнатуры (§4.1): тело не вправе решить его метками
+    /// (§10 вопрос 246). У деструктора, которого пишет компилятор, - `None`.
+    lift: Option<Row<Term>>,
 }
 
 /// Шесть изменяемых частей прохода, сложенные вместе.
@@ -578,6 +581,7 @@ fn declared_signature<'a>(
     // Row-параметр функтора и подъём члена - одна переменная (§10 вопрос 107).
     // Порознь обобщение заводит две, а тело требует их равенства.
     let lift = elaborator.shared_lift(&params);
+    let kept = lift.clone();
     let elaborated = elaborator.wrapped(&params, true, |it| {
         it.declaration_lifted(ty, Mult::Many, lift)
     })?;
@@ -589,6 +593,7 @@ fn declared_signature<'a>(
         grades,
         source: ty,
         span,
+        lift: Some(kept),
     })
 }
 
@@ -3221,6 +3226,7 @@ fn declare_mutual(
     // честный `UnknownConstant`; здесь выравнивается строчное.
     unnamed_siblings(&planned)?;
     let mut types = Vec::with_capacity(planned.len());
+    let mut lifts = Vec::with_capacity(planned.len());
     for member in &planned {
         // Владение верхнего уровня не выражается и внутри группы (§3.3). Путь
         // сюда идёт мимо `definition`, где этот отказ и стоит, поэтому его
@@ -3234,10 +3240,10 @@ fn declare_mutual(
                 span: member.ty.span,
             });
         }
-        types.push(
-            Elaborator::new(signature, metas, owned, fixities, warnings)
-                .declaration(member.ty, Mult::Many)?,
-        );
+        let lift = metas.fresh_row();
+        let mut elaborator = Elaborator::new(signature, metas, owned, fixities, warnings);
+        types.push(elaborator.declaration_lifted(member.ty, Mult::Many, lift.clone())?);
+        lifts.push(lift);
     }
     // Арность считается здесь и никуда не объявляется: столько аргументов
     // получат внутригрупповые ссылки, которые элаборация строит сейчас. К
@@ -3284,8 +3290,7 @@ fn declare_mutual(
             (compiled, elaborator.deferred(), elaborator.cases())
         };
         let (compiled, postponed, cases) = compiled;
-        // Словари сигнатуры - до сборки, как у одиночного определения
-        // (`define`): иначе дырка в типе факта «называет» разбираемое.
+        // Словари сигнатуры - до сборки: [`ready`].
         let zonked = ready(
             signature,
             metas,
@@ -3316,6 +3321,7 @@ fn declare_mutual(
             &written[at],
             member.span,
         )?;
+        widened(metas, &lifts[at], &member.name.text, member.span)?;
         trees.push(tree);
     }
 
@@ -5749,21 +5755,9 @@ fn define(
     // Тип идёт в сборку тем же, каким пойдёт в сигнатуру, - с дырками уровня.
     // Одно хранилище на прогон это и позволяет: решение, найденное сборкой,
     // доживает до объявления.
-    //
-    // Перед сборкой словари сигнатуры решаются, а тип зонкается: компилятор
-    // клауз решает, какие соседние колонки нести в мотив, **синтаксически**, а
-    // дырка, применённая ко всем связываниям, «называет» и разбираемое.
-    // `{j < rocks}` после `Rocks whole` уезжал так в мотив, где тип
-    // разбираемого уже `Rocks #1`, и клауза отвергалась (находка перевода
-    // Asteroids).
-    let zonked = ready(
-        signature,
-        metas,
-        known.instances,
-        known.owned,
-        &declared.ty,
-        span,
-    );
+    // Словари сигнатуры решаются до сборки: [`ready`].
+    let (instances, owned) = (known.instances, known.owned);
+    let zonked = ready(signature, metas, instances, owned, &declared.ty, span);
     let mut tree = compile_traced(signature, metas, &zonked, &compiled).map_err(|error| {
         ElabError::Clauses {
             span: clause_span(&error, declared, clauses, span),
@@ -5781,6 +5775,9 @@ fn define(
         &declared.ty,
         span,
     )?;
+    if let Some(lift) = &declared.lift {
+        widened(metas, lift, &declared.name, span)?;
+    }
 
     signature
         .define_graded(
@@ -6193,6 +6190,7 @@ fn declare_resource(
         grades: 0,
         source: drop_ty,
         span: drop_span,
+        lift: None,
     };
     define(
         signature,
@@ -7788,4 +7786,30 @@ fn ready(
 ) -> Term {
     class::resolve_ground_type(signature, metas, instances, owned, ty, span);
     zonk_term(metas, ty)
+}
+
+/// Тело не расширило свою сигнатуру (§4.1, §10 вопрос 246, решение
+/// 2026-10-10).
+///
+/// Поднятый хвост - дырка, и тело, передавшее вычисление значением, сводит
+/// её row с параметром вызываемого: `wrapped k = … inner k` решало хвост
+/// `{Outer | …}`, объявленный тип молча расширялся, и отказ приходил чужим
+/// местам вызова. Написанная сигнатура - договор: тело вправе ему не
+/// соответствовать, но не вправе его переписать.
+fn widened(metas: &Metas, lift: &Row<Term>, name: &str, span: Span) -> Result<(), ElabError> {
+    let zonked = metas.zonk_row(lift);
+    if zonked.labels().is_empty() {
+        return Ok(());
+    }
+    let effects = zonked
+        .labels()
+        .iter()
+        .map(|label| label.name.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(ElabError::WidenedSignature {
+        name: Symbol::from(name),
+        effects,
+        span,
+    })
 }

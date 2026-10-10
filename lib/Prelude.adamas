@@ -972,11 +972,8 @@ lookup key (Cons (k, v) rest) = if key == k then Some v else lookup key rest
 
 -- | Пары соседних элементов; длина - меньшая из двух.
 zip : List a -> List b -> List (a, b)
--- Клаузы раздельные, а не ловушка `zip _xs _ys = Nil`: с элементом-кортежем
--- имплисит `Nil` в ловушке сегодня не выводится (§10 вопрос 244).
-zip Nil _ys = Nil
-zip (Cons _x _xs) Nil = Nil
 zip (Cons x xs) (Cons y ys) = Cons (x, y) (zip xs ys)
+zip _xs _ys = Nil
 
 -- | Непустой список: голова есть всегда, и `head` тотальна.
 type NonEmpty (a : Type) = { head : a, tail : List a }

@@ -3699,10 +3699,12 @@ impl<'a> Elaborator<'a> {
         if let Some(ty) = awaited.and_then(|ty| self.primitive_type(ty)) {
             return Self::primitive_literal(lit, ty);
         }
-        if awaited.is_none()
-            && let Some(hole) = self.unexpected_literal(lit)
-        {
-            return Ok(hole);
+        // Цепочкой `&&` с `let` это не пишется: та требует Rust 2024, а MSRV
+        // проекта 1.85.
+        if awaited.is_none() {
+            if let Some(hole) = self.unexpected_literal(lit) {
+                return Ok(hole);
+            }
         }
         if let Some(hole) = self.deferring_literal(lit, awaited) {
             return Ok(hole);

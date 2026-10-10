@@ -1,0 +1,32 @@
+-- `let`, связанный с вызовом и стоящий потом в типе (§4.1, §10 вопрос 241,
+-- закрыт 2026-10-10).
+--
+-- Поднятый хвост row чистой `counted` в вызове инстанцировался хвостом
+-- объемлющей функции, и подстановка `n` в тип (`Array n UInt8`, `atMostSelf
+-- n`) уносила вызов туда, где хвоста нет: «`{| e0}` не погашены». Насыщенный
+-- вызов, чей хвост не стоит ни в одном домене типа, берёт пустую row -
+-- окружающую расширит правило погашения.
+
+data Bytes where
+  Done : Bytes
+  More : UInt8 -> Bytes -> Bytes
+
+counted : Bytes -> UInt64
+counted Done = 0
+counted (More _b rest) = addUInt64 1 (counted rest)
+
+filled : (ω n : UInt64) -> Array n UInt8 -> (i : UInt64) -> (0 p : Equal Bool (leUInt64 i n) True) -> Bytes -> Array n UInt8
+filled n bytes i p rest = if eqUInt64 i 0 then bytes else case rest of
+  Done -> bytes
+  More b tail ->
+    let j : UInt64 = subUInt64 i 1
+    filled n (arraySet bytes j b @(belowPred i n)) j (belowAtMost j n @(belowPred i n)) tail
+
+gathered : Bytes -> String
+gathered rest =
+  let n : UInt64 = counted rest
+  let zero : UInt8 = 0
+  MkString n (filled n (arrayNew n zero) n (atMostSelf n) rest)
+
+main : Bool
+main = gathered (More 104 (More 105 Done)) == "ih"

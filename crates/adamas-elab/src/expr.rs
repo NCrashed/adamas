@@ -5379,6 +5379,30 @@ impl<'a> Elaborator<'a> {
         // поэтому спрошенный после спайна он всегда пуст.
         let awaited = self.result.clone();
         let mut term = self.placed(Position::Inner, |it| it.expr(head, Mult::Many))?;
+        // Поднятый хвост насыщенного вызова (§10 вопрос 241): [`Self::pure_rows`].
+        {
+            let mut callee = &term;
+            while let Term::App(inner, _) = callee {
+                callee = inner;
+            }
+            if let Term::Const(name, ..) = callee {
+                let explicit = self.signature.lookup(name).map_or(usize::MAX, |it| {
+                    let mut count = 0;
+                    let mut current = &it.ty;
+                    while let Term::Pi(binder, _, _, _, codomain) = current {
+                        if !binder.visibility.is_implicit() {
+                            count += 1;
+                        }
+                        current = codomain;
+                    }
+                    count
+                });
+                if arguments.len() >= explicit {
+                    let (name, constant) = (Rc::clone(name), callee.clone());
+                    self.pure_rows(&name, &constant);
+                }
+            }
+        }
         // Привязанность головы к scope: её переживает **частичное** применение,
         // потому что недоприменённое и есть замыкание над ней.
         let captured = self.produced.take();
@@ -5646,6 +5670,63 @@ impl<'a> Elaborator<'a> {
             ty = codomain.apply(self.ctx.eval(argument));
         }
         Some(ty)
+    }
+
+    /// Поднятый хвост row у насыщенного вызова - пустой, если он не стоит ни в
+    /// одном домене типа вызываемого (§4.1, §10 вопрос 241, решение
+    /// 2026-10-10).
+    ///
+    /// Такой хвост в вызове инстанцируется чем угодно, и решатель выбирал хвост
+    /// объемлющей функции: `counted rest` в `let n : UInt64` получал `{| e}`,
+    /// и подстановка `n` в тип уносила вызов туда, где хвоста нет. Пустая row -
+    /// самая общая инстанциация: окружающую расширит правило погашения, а
+    /// значение годно и в типе. Хвост в домене - колбэк, чьи эффекты
+    /// пробрасываются, - не трогается. Только вызов и только насыщенный:
+    /// значение-функцию сравнивают равенством, без погашения.
+    fn pure_rows(&mut self, name: &str, term: &Term) {
+        let Term::Const(_, _, args) = term else {
+            return;
+        };
+        let Some(definition) = self.signature.lookup(name) else {
+            return;
+        };
+        let rows = args.row_args();
+        let arity = rows.len();
+        let var = |index: usize| {
+            adamas_core::row::Row::closing(
+                [],
+                Some(adamas_core::row::Tail::Var(adamas_core::row::RowVar(
+                    u32::try_from(index).unwrap_or(u32::MAX),
+                ))),
+            )
+        };
+        for (index, row) in rows.iter().enumerate() {
+            // Две разные подстановки на место параметра: домен, его не
+            // называющий, от них не меняется.
+            let mut empty: Vec<_> = (0..arity).map(var).collect();
+            let mut other = empty.clone();
+            empty[index] = adamas_core::row::Row::empty();
+            other[index] = adamas_core::row::Row::closing(
+                [],
+                Some(adamas_core::row::Tail::Meta(adamas_core::row::RowMeta(
+                    u32::MAX,
+                ))),
+            );
+            let mut carried = false;
+            let mut current = &definition.ty;
+            while let Term::Pi(_, _, domain, _, codomain) = current {
+                carried |= domain.substitute_rows(&empty) != domain.substitute_rows(&other);
+                current = codomain;
+            }
+            if carried {
+                continue;
+            }
+            if let Some(adamas_core::row::Tail::Meta(meta)) = row.tail() {
+                if row.labels().is_empty() && self.metas.row_solution(meta).is_none() {
+                    self.metas.solve_row(meta, adamas_core::row::Row::empty());
+                }
+            }
+        }
     }
 
     /// Имплиситы конструктора, решённые ожидаемым типом до аргументов (§4.1,

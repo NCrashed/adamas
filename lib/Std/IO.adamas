@@ -151,19 +151,12 @@ filled n bytes i p rest = if eqUInt64 i 0 then bytes else case rest of
     let j : UInt64 = subUInt64 i 1
     filled n (arraySet bytes j b @(belowPred i n)) j (belowAtMost j n @(belowPred i n)) tail
 
--- | Строка из `n` байт, собранных в обратном порядке.
---
--- Длина - параметром, а не `let n = counted rest` в теле: `let`, связанный с
--- вызовом и стоящий потом в типе (`Array n UInt8`), сегодня отвергается
--- непогашенной row вызова (§10 вопрос 241).
-sized : (ω n : UInt64) -> Bytes -> String
-sized n rest =
-  let zero : UInt8 = 0
-  MkString n (filled n (arrayNew n zero) n (atMostSelf n) rest)
-
 -- | Строка из байт, собранных в обратном порядке.
 gathered : Bytes -> String
-gathered rest = sized (counted rest) rest
+gathered rest =
+  let n : UInt64 = counted rest
+  let zero : UInt8 = 0
+  MkString n (filled n (arrayNew n zero) n (atMostSelf n) rest)
 
 -- | Строка дескриптора `fd` до перевода строки, байт за байтом. `None` - ввод
 -- кончился, не дав ни байта; отказ чтения - тоже конец.

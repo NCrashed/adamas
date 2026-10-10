@@ -3064,8 +3064,10 @@ fn declare_members(
                     .collect::<Result<Vec<_>, _>>()?;
                 (compiled, elaborator.deferred(), elaborator.cases())
             };
+            // Словари сигнатуры - до сборки, как у `define`.
+            let zonked = ready(signature, metas, instances, owned, &types[at], *at_span);
             let mut tree =
-                compile_traced(signature, metas, &types[at], &compiled).map_err(|error| {
+                compile_traced(signature, metas, &zonked, &compiled).map_err(|error| {
                     ElabError::Clauses {
                         span: *at_span,
                         error: Box::new(error),
@@ -3282,13 +3284,22 @@ fn declare_mutual(
             (compiled, elaborator.deferred(), elaborator.cases())
         };
         let (compiled, postponed, cases) = compiled;
-        let mut tree =
-            compile_traced(signature, metas, &written[at], &compiled).map_err(|error| {
-                ElabError::Clauses {
-                    span: member.span,
-                    error: Box::new(error),
-                }
-            })?;
+        // Словари сигнатуры - до сборки, как у одиночного определения
+        // (`define`): иначе дырка в типе факта «называет» разбираемое.
+        let zonked = ready(
+            signature,
+            metas,
+            instances,
+            owned,
+            &written[at],
+            member.span,
+        );
+        let mut tree = compile_traced(signature, metas, &zonked, &compiled).map_err(|error| {
+            ElabError::Clauses {
+                span: member.span,
+                error: Box::new(error),
+            }
+        })?;
         tree.nested = cases;
         let known = Known {
             owned,
@@ -5738,7 +5749,22 @@ fn define(
     // Тип идёт в сборку тем же, каким пойдёт в сигнатуру, - с дырками уровня.
     // Одно хранилище на прогон это и позволяет: решение, найденное сборкой,
     // доживает до объявления.
-    let mut tree = compile_traced(signature, metas, &declared.ty, &compiled).map_err(|error| {
+    //
+    // Перед сборкой словари сигнатуры решаются, а тип зонкается: компилятор
+    // клауз решает, какие соседние колонки нести в мотив, **синтаксически**, а
+    // дырка, применённая ко всем связываниям, «называет» и разбираемое.
+    // `{j < rocks}` после `Rocks whole` уезжал так в мотив, где тип
+    // разбираемого уже `Rocks #1`, и клауза отвергалась (находка перевода
+    // Asteroids).
+    let zonked = ready(
+        signature,
+        metas,
+        known.instances,
+        known.owned,
+        &declared.ty,
+        span,
+    );
+    let mut tree = compile_traced(signature, metas, &zonked, &compiled).map_err(|error| {
         ElabError::Clauses {
             span: clause_span(&error, declared, clauses, span),
             error: Box::new(error),
@@ -7743,4 +7769,23 @@ fn sorted(ty: &Term) -> bool {
         current,
         Term::Universe(_) | Term::RowKind(_) | Term::EffectKind
     )
+}
+
+/// Тип объявления, готовый к сборке дерева клауз: словари сигнатуры решены,
+/// дырки зонкнуты (находка перевода Asteroids, 2026-10-10).
+///
+/// Компилятор клауз решает, какие соседние колонки нести в мотив,
+/// синтаксически, а дырка элаборации применена ко всем объемлющим
+/// связываниям и «называет» разбираемое: `{j < rocks}` после `Rocks 7` уезжал
+/// в мотив, где тип разбираемого уже `Rocks #1`.
+fn ready(
+    signature: &Signature,
+    metas: &mut Metas,
+    instances: &Instances,
+    owned: &Owned,
+    ty: &Term,
+    span: Span,
+) -> Term {
+    class::resolve_ground_type(signature, metas, instances, owned, ty, span);
+    zonk_term(metas, ty)
 }

@@ -1,0 +1,28 @@
+-- Индексированное семейство в образце, за которым стоят факты (находка
+-- перевода Asteroids, 2026-10-08; закрыта 2026-10-10).
+--
+-- `{j < rocks}` после `Rocks 7` отвергался «ожидался `Rocks 7`, получен
+-- `Rocks #1`»: в типе факта стояли дырки - словарь `Ord` у `<`, - применённые
+-- ко всем связываниям, и компилятор клауз, решающий синтаксически, какие
+-- соседние колонки нести в мотив, видел в них разбираемое. Словари сигнатуры
+-- теперь решаются, а тип зонкается до сборки дерева - у одиночного
+-- определения и у группы `mutual`.
+
+rocks : UInt64
+rocks = 3
+
+data Rocks : UInt64 -> Type where
+  MkRocks : (0 cs : UInt64) -> Array 3 Int32 -> Rocks cs
+
+hitting : Rocks 7 -> (j : UInt64) -> {j < rocks} => Int32
+hitting (MkRocks cs xs) j = arrayIndex xs j
+
+mutual
+  first : Rocks 7 -> {0 < rocks} => Int32
+  first (MkRocks cs xs) = arrayIndex xs 0
+
+  unused : Int32
+  unused = 0
+
+main : Int32
+main = hitting (MkRocks 7 (arrayNew 3 5)) 1 + first (MkRocks 7 (arrayNew 3 4))

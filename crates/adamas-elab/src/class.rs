@@ -483,6 +483,36 @@ pub(crate) fn resolve_ground_term(
     }
 }
 
+/// То же для типа объявления: позиция стёртая (§4.7), и нетотальный
+/// инстанс сюда не встаёт - отказ назовёт его своим путём, у разрешения тела.
+pub(crate) fn resolve_ground_type(
+    signature: &Signature,
+    metas: &mut Metas,
+    instances: &Instances,
+    owned: &Owned,
+    ty: &Term,
+    span: Span,
+) {
+    if unsolved_term_meta(metas, ty).is_none() {
+        return;
+    }
+    let mark = metas.mark();
+    let outcome = settle(
+        signature,
+        metas,
+        instances,
+        owned,
+        None,
+        ty,
+        Mult::Zero,
+        span,
+        true,
+    );
+    if outcome.is_err() {
+        metas.rollback(mark);
+    }
+}
+
 /// [`settle_collecting`] без остатка: цели с неопределившейся головой,
 /// дожившие до конца прохода, этому вызывающему не нужны.
 #[allow(

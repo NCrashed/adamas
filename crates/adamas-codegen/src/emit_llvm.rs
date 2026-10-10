@@ -1949,6 +1949,7 @@ impl Module {
             "; Рантайм: те же точки входа, что зовёт C-бэкенд. Куча целиком за\n",
             "; ним; слот объекта читает и пишет сам IR (`emit_llvm.rs`).\n",
             "declare ptr @adamas_con0(i16)\n",
+            "declare void @adamas_fpu_check()\n",
             "declare ptr @adamas_alloc(i16, i64)\n",
             "declare ptr @adamas_reuse(ptr, i16, i64)\n",
             "declare void @adamas_free(ptr)\n",
@@ -4895,6 +4896,8 @@ impl<'a> Builder<'a> {
             Some(_) => format!("({}) ", variadic_list(&described)),
             None => String::new(),
         };
+        // Чужая сторона вправе сменить режим плавающей арифметики и не вернуть
+        // (§4.3, §10 вопрос 68): сверка после каждого вызова.
         match described.result {
             ForeignResult::Flat(ty) => {
                 let name = self.temp();
@@ -4905,6 +4908,7 @@ impl<'a> Builder<'a> {
                     ),
                     self.here(),
                 );
+                self.instruction("call void @adamas_fpu_check()", self.here());
                 Ok(name)
             }
             // `void`-символ значения не отдаёт; узел отвечает единицей, и она
@@ -4914,6 +4918,7 @@ impl<'a> Builder<'a> {
                     &format!("call void {signature}@{symbol}({arguments})"),
                     self.here(),
                 );
+                self.instruction("call void @adamas_fpu_check()", self.here());
                 let name = self.temp();
                 self.instruction(
                     &format!("{name} = call ptr @adamas_con0(i16 {})", unit.0),

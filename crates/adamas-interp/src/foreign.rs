@@ -340,6 +340,7 @@ impl Foreign {
             reason = "вызов по нетипизированному адресу: содержание уровня 1 FFI (§5.3)"
         )]
         let answer = unsafe { invoke(address, &shape, self.variadic, result, args) };
+        crate::fpu::restore();
         match answer.ok_or_else(|| self.outside())? {
             Answer::Word(word) => Ok(Some(word)),
             // Биты литерала ядра нормализованы шириной типа

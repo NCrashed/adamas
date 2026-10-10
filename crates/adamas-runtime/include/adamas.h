@@ -415,6 +415,14 @@ _Noreturn void adamas_fail(const char *message);
  */
 void adamas_stack_guard(void);
 
+/** Режим плавающей арифметики по умолчанию (§4.3, §10 вопрос 68): зовёт
+ * `main` при старте. */
+void adamas_fpu_default(void);
+
+/** Возвращает режим по умолчанию, если чужой вызов его сменил: зовётся после
+ * каждого. См. шапку `c/fpu.c`. */
+void adamas_fpu_check(void);
+
 /** Блок сырой памяти. Здесь же будет развилка `AllocStrategy` (§3.6). */
 void *adamas_block_alloc(size_t size);
 

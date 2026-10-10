@@ -26,6 +26,7 @@ mod callback;
 mod effect;
 mod fiber;
 pub mod foreign;
+mod fpu;
 mod frame;
 mod machine;
 mod read;

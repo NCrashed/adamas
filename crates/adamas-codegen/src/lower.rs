@@ -5769,10 +5769,17 @@ impl<'a> Lowerer<'a> {
             .map(|it| it.fact)
             .collect();
         let result = self.functions[function.0].result;
+        // Недобранный хвост из одних стёртых связываний - вызов, но не у второй
+        // формы: её эффект висит на стрелке, и упоминание - `withRegion
+        // program` при `program : (0 r : Region) -> {Alloc r} Int64` - ещё не
+        // исполнение. Вызов тогда стоял бы в чистой функции без скрытых
+        // аргументов (находка переписывания примеров, 2026-10-07).
+        let detached = self.functions[function.0].form == Form::Detached;
         let complete = arguments.len() >= parameters.len()
-            || parameters[arguments.len()..]
-                .iter()
-                .all(|fact| !fact.present);
+            || (!detached
+                && parameters[arguments.len()..]
+                    .iter()
+                    .all(|fact| !fact.present));
         if !complete {
             // Недобранный вызов уходит замыканием, а трамплин говорит
             // указателями: плоский примитив он распаковывает и упаковывает сам

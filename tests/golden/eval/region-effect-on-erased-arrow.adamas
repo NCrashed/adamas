@@ -1,0 +1,50 @@
+-- Регион с меткой на стрелке региона (находка переписывания примеров,
+-- 2026-10-07; закрыта 2026-10-10).
+--
+-- `withRegion : ((0 r : Region) -> {Alloc r} a) -> a` - без единичной
+-- стрелки. После стирания `r` у `program` нет параметров времени
+-- исполнения, а эффект висит на той же стрелке: упоминание `withRegion
+-- program` в чистом `main` есть передача вычисления, а не его исполнение.
+-- Понижение считало его насыщенным вызовом - C собирался с `ev` и `kont`,
+-- которых нет, LLVM отказывал. Теперь это замыкание, как у ссылки на
+-- функцию с живым параметром, и ответ у трёх вычислителей один.
+
+
+data Region where
+  Home : Region
+
+data Ref (0 r : Region) (a : Type) where
+  MkRef : Ptr -> Ref r a
+
+placed : Block -> Int64 -> (Ptr, Block)
+placed area x =
+  let next : Block = regionAlloc area x
+  (regionLast next, next)
+
+module type Regions where
+  effect Alloc (0 r : Region)
+  withRegion : {a : Type} -> ((0 r : Region) -> {Alloc r} a) -> a
+
+module Arena :> Regions where
+  effect Alloc (0 r : Region) where
+    allocIn : Int64 -> Ref r Int64
+    readRef : Ref r Int64 -> Int64
+  withRegion : {a : Type} -> ((0 r : Region) -> {Alloc r} a) -> a
+  withRegion body =
+    let c : {Alloc Home} a = \_u -> body Home
+    handle c with
+      state regionNew
+      return v -> v
+      allocIn x -> case placed state x of
+        (at, next) -> resume (MkRef at) next
+      readRef p -> case p of
+        MkRef at -> resume (regionRead state at) state
+
+program : (0 r : Region) -> {Arena.Alloc r} Int64
+program r =
+  let p : Ref r Int64 = Arena.allocIn 20
+  let q : Ref r Int64 = Arena.allocIn 22
+  Arena.readRef p + Arena.readRef q
+
+main : Int64
+main = Arena.withRegion program

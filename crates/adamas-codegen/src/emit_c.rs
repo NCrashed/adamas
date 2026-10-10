@@ -384,12 +384,20 @@ fn scoped(program: &Program) -> bool {
 /// Первый прямой вызов второй формы, которому скрытые аргументы взять неоткуда.
 fn stranded(program: &Program, expr: &Expr, hidden: bool) -> Option<String> {
     match expr {
-        Expr::Call { function, .. } if !hidden => {
+        // Аргументы вызова проверяются тоже: `withRegion(program@())` прятал
+        // вызов второй формы в аргументе первой, и C собирался с `ev` и `kont`,
+        // которых нет (находка переписывания примеров, 2026-10-07).
+        Expr::Call {
+            function,
+            arguments,
+        } if !hidden => {
             let called = &program.functions[function.0];
             if called.form == Form::Detached {
                 return Some(called.name.clone());
             }
-            None
+            arguments
+                .iter()
+                .find_map(|argument| stranded(program, argument, hidden))
         }
         // Под хендлером вектор и ручка есть всегда: их заводит сам `handle`.
         Expr::Handle {

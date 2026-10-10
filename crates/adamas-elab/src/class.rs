@@ -633,7 +633,10 @@ fn settle_collecting(
                     &proof,
                 ))
             } else {
-                from_context(signature, metas, instances, &ty)
+                from_context(signature, metas, instances, &ty).or_else(|| {
+                    let zonked = zonk_term(metas, term);
+                    from_occurrences(signature, metas, &ty, meta, &zonked)
+                })
             };
             let Some(solution) = solution else {
                 return Err(unproven(&ty, claim.unwrap_or(&goal), span));
@@ -887,6 +890,152 @@ fn from_context(
     ))
 }
 
+/// Факт, доказанный гипотезой **после уточнения ветви** (§10 вопрос 248).
+///
+/// Телескоп дырки - контекст клаузы до разбора: `{has Velocity cs}` в нём
+/// рядом с полем `ds`, и `has Velocity ds` гипотезой не находится, хотя в
+/// ветви `MkRocks ds …` разбор уточнил `cs ↦ ds`. Уточнение знает дерево
+/// разбора: дырка стоит в нём применённой к спайну ветви, и `cs` с `ds`
+/// получают там один аргумент. Поэтому на каждом вхождении спайн
+/// подставляется и в гипотезы, и в цель, и берётся гипотеза, сошедшаяся на
+/// всех вхождениях.
+///
+/// Решение - та же проекция гипотезы, что у [`from_context`], и в телескопе
+/// дырки оно может не типизироваться (`cs` и `ds` там независимы). Это
+/// законно тем же доводом, что у вопроса 216: решение подставляется в дерево,
+/// и ядро проверяет его на каждом вхождении, где уточнение есть.
+fn from_occurrences(
+    signature: &Signature,
+    metas: &mut Metas,
+    ty: &Term,
+    meta: adamas_core::term::TermMeta,
+    term: &Term,
+) -> Option<Rc<Value>> {
+    let mut occurrences = Vec::new();
+    occurrences_of(term, meta, 0, &mut occurrences);
+    if occurrences.is_empty() {
+        return None;
+    }
+    let mut binders = Vec::new();
+    let mut current = ty;
+    while let Term::Pi(binder, name, domain, _, codomain) = current {
+        binders.push((binder.mult, Rc::clone(name), Rc::clone(domain)));
+        current = codomain;
+    }
+    let goal = current;
+    let arity = binders.len();
+    let found = (0..arity).find(|at| {
+        occurrences.iter().all(|(depth, arguments)| {
+            arguments.len() == arity && {
+                // Окружение вхождения: связывание `k` телескопа - его аргумент,
+                // вычисленный на глубине вхождения.
+                let outer = (0..*depth).fold(adamas_core::value::Env::default(), |env, level| {
+                    env.extend(Value::var(adamas_core::value::Lvl(level)))
+                });
+                let values: Vec<Rc<Value>> = arguments
+                    .iter()
+                    .map(|argument| adamas_core::eval::eval(&outer, argument))
+                    .collect();
+                let env = values[..*at]
+                    .iter()
+                    .fold(adamas_core::value::Env::default(), |env, value| {
+                        env.extend(Rc::clone(value))
+                    });
+                let domain = adamas_core::eval::eval(&env, &binders[*at].2);
+                let env = values
+                    .iter()
+                    .fold(adamas_core::value::Env::default(), |env, value| {
+                        env.extend(Rc::clone(value))
+                    });
+                let wanted = adamas_core::eval::eval(&env, goal);
+                adamas_core::conv::convertible(signature, metas, *depth, &domain, &wanted)
+            }
+        })
+    })?;
+    let index = u32::try_from(arity - 1 - found).ok()?;
+    let solution = binders
+        .iter()
+        .rev()
+        .fold(Term::var(index), |body, (mult, name, _)| {
+            Term::Lam(*mult, Rc::clone(name), Rc::new(body))
+        });
+    Some(adamas_core::eval::eval(
+        &adamas_core::value::Env::default(),
+        &solution,
+    ))
+}
+
+/// Вхождения дырки в терме: глубина и аргументы спайна.
+fn occurrences_of(
+    term: &Term,
+    meta: adamas_core::term::TermMeta,
+    depth: u32,
+    into: &mut Vec<(u32, Vec<Term>)>,
+) {
+    let mut arguments = Vec::new();
+    let mut head = term;
+    while let Term::App(callee, argument) = head {
+        arguments.push((**argument).clone());
+        head = callee;
+    }
+    if matches!(head, Term::Meta(found) if *found == meta) {
+        arguments.reverse();
+        into.push((depth, arguments));
+        return;
+    }
+    let mut recur = |inner: &Term, depth: u32| occurrences_of(inner, meta, depth, into);
+    match term {
+        Term::App(callee, argument) => {
+            recur(callee, depth);
+            recur(argument, depth);
+        }
+        Term::Lam(_, _, body) => recur(body, depth + 1),
+        Term::Pi(_, _, domain, _, codomain) => {
+            recur(domain, depth);
+            recur(codomain, depth + 1);
+        }
+        Term::Let(_, _, ty, value, body) => {
+            recur(ty, depth);
+            recur(value, depth);
+            recur(body, depth + 1);
+        }
+        Term::Case(case) => {
+            recur(&case.scrutinee, depth);
+            recur(&case.motive, depth);
+            for branch in &case.branches {
+                recur(&branch.body, depth);
+            }
+        }
+        Term::Split(split) => {
+            recur(&split.scrutinee, depth);
+            recur(&split.motive, depth);
+            recur(&split.body, depth);
+        }
+        Term::Object(fields) => {
+            for (_, value) in fields.iter() {
+                recur(value, depth);
+            }
+        }
+        Term::With(base, fields) => {
+            recur(base, depth);
+            for (_, value) in fields.iter() {
+                recur(value, depth);
+            }
+        }
+        Term::Project(record, _) => recur(record, depth),
+        // Типы записей и row дырок факта не несут: ограничение - связывание,
+        // а не поле.
+        Term::Var(_)
+        | Term::Universe(_)
+        | Term::Const(..)
+        | Term::Record(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Row(_)
+        | Term::Meta(_)
+        | Term::Prim(_) => {}
+    }
+}
 /// Имя класса и голова его первого аргумента: `Eqv Nat` даёт `(Eqv, Some(Nat))`.
 ///
 /// Внешний `None` - тип не применение определения, то есть словарём он не

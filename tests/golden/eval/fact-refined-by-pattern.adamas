@@ -1,0 +1,52 @@
+-- Факт-ограничение уточняется разбором клауз (§10 вопрос 248, решение
+-- 2026-10-11).
+--
+-- `speed (MkRocks ds xs vs)` под `{has Velocity cs}`: поле получает индекс
+-- `ds`, и поиск факта искал `has Velocity ds` среди гипотез контекста клаузы,
+-- где есть только `has Velocity cs`. Разбор уточняет `cs ↦ ds`, но в контексте
+-- клаузы уточнения ещё нет, и отказ был «факт не доказан». Теперь поиск читает
+-- уточнение там, где дырка стоит в дереве разбора: `cs` и `ds` получают в
+-- ветви один аргумент.
+--
+-- Обе позиции ограничения - до разбираемого и после.
+
+data Tag where
+  Position : Tag
+  Velocity : Tag
+
+same : Tag -> Tag -> Bool
+same Position Position = True
+same Velocity Velocity = True
+same _ _ = False
+
+data Tags where
+  None : Tags
+  With : Tag -> Tags -> Tags
+
+has : Tag -> Tags -> Bool
+has t None = False
+has t (With u us) = if same t u then True else has t us
+
+Slot : Bool -> Type
+Slot True = Array 4 Int32
+Slot False = Unit
+
+data Rocks : Tags -> Type where
+  MkRocks : (0 cs : Tags) -> Slot (has Position cs) -> Slot (has Velocity cs) -> Rocks cs
+
+
+cast : {0 b : Bool} -> (0 q : Equal Bool b True) -> Slot b -> Array 4 Int32
+cast Refl s = s
+
+present : {0 b : Bool} -> {0 p : Equal Bool b True} -> Slot b -> Array 4 Int32
+present s = cast p s
+
+speed : {0 cs : Tags} -> {has Velocity cs} => Rocks cs -> Int32
+speed (MkRocks ds xs vs) = arrayIndex (present vs) 0
+
+first : {0 cs : Tags} -> Rocks cs -> {has Position cs} => Int32
+first (MkRocks ds xs vs) = arrayIndex (present xs) 0
+
+main : Int32
+main = speed (MkRocks (With Position (With Velocity None)) (arrayNew 4 1) (arrayNew 4 2))
+  + first (MkRocks (With Position None) (arrayNew 4 3) MkUnit)

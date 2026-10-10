@@ -1,0 +1,14 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: fact-unrelated-index.adamas:38:1: факт `has Velocity es` не доказан: вычислением к `True` он не сводится, и гипотезы с ним в контексте нет. Дайте его проверкой (`if has Velocity es then … else …`), ограничением объемлющей функции (`{has Velocity es} =>`) или явным аргументом (`@доказательство`)
+  other (MkRocks es xs vs) = arrayIndex (present vs) 0
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  в контексте:
+    (cs : Tags)
+    (ds : Tags)
+    {has Velocity cs}
+    (es : Tags)
+    (xs : Slot (has Position es))
+    (vs : Slot (has Velocity es))

@@ -1,0 +1,38 @@
+-- Уточнение разбора не связывает независимые индексы (§10 вопрос 248,
+-- решение 2026-10-11). Пара к `eval/fact-refined-by-pattern.adamas`: факт о
+-- `cs`, а разбирается `Rocks ds` - разбор уточняет `ds ↦ es`, и `cs` с `es`
+-- остаются разными. Поиск по вхождению гипотезы не находит.
+
+data Tag where
+  Position : Tag
+  Velocity : Tag
+
+same : Tag -> Tag -> Bool
+same Position Position = True
+same Velocity Velocity = True
+same _ _ = False
+
+data Tags where
+  None : Tags
+  With : Tag -> Tags -> Tags
+
+has : Tag -> Tags -> Bool
+has t None = False
+has t (With u us) = if same t u then True else has t us
+
+Slot : Bool -> Type
+Slot True = Array 4 Int32
+Slot False = Unit
+
+data Rocks : Tags -> Type where
+  MkRocks : (0 cs : Tags) -> Slot (has Position cs) -> Slot (has Velocity cs) -> Rocks cs
+
+
+cast : {0 b : Bool} -> (0 q : Equal Bool b True) -> Slot b -> Array 4 Int32
+cast Refl s = s
+
+present : {0 b : Bool} -> {0 p : Equal Bool b True} -> Slot b -> Array 4 Int32
+present s = cast p s
+
+other : {0 cs : Tags} -> {0 ds : Tags} -> {has Velocity cs} => Rocks ds -> Int32
+other (MkRocks es xs vs) = arrayIndex (present vs) 0

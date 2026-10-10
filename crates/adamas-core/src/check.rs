@@ -3891,8 +3891,12 @@ fn infer_case(
 
     // Разбор смотрит на значение, то есть тратит его хотя бы однажды. `0`
     // означала бы, что разбираемое стёрто, а ветвь при этом выбирается по
-    // нему в рантайме, - стирание перестало бы быть стиранием.
-    if case.consumed == Mult::Zero {
+    // нему в рантайме, - стирание перестало бы быть стиранием. Исключение -
+    // семейство, у которого выбирать нечего и читать нечего: один
+    // конструктор, все поля стёрты (`Refl`). Такой разбор уточняет индексы и
+    // только; стёртое значение тотально (§4.7), и ветвь у него та самая
+    // (§10 вопрос 206).
+    if case.consumed == Mult::Zero && !erasable(signature, constructors, params) {
         return Err(refuse(
             ctx,
             metas,
@@ -3958,6 +3962,21 @@ fn infer_case(
         result,
         scrutinee_usage.scale(case.consumed) + &motive_usage + &branches,
     ))
+}
+
+/// Разбор семейства не требует значения: конструктор один, и все его поля
+/// после параметров стёрты.
+pub(crate) fn erasable(signature: &Signature, constructors: &[Name], params: u32) -> bool {
+    let [constructor] = constructors else {
+        return false;
+    };
+    signature.lookup(constructor).is_some_and(|declaration| {
+        peel_pis(&declaration.ty)
+            .0
+            .iter()
+            .skip(params as usize)
+            .all(|field| field.binder.mult == Mult::Zero)
+    })
 }
 
 /// Аргументы, к которым применено индуктивное семейство в типе значения.

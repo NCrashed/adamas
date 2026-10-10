@@ -1219,6 +1219,51 @@ fn a_case_consuming_nothing_is_refused() {
 }
 
 #[test]
+fn a_case_consuming_nothing_is_taken_where_there_is_nothing_to_choose() {
+    // Один конструктор без полей (`Refl`): ветвь известна без значения, и
+    // стёртое разбирать можно (§10 вопрос 206). Два конструктора - нельзя.
+    use adamas_core::meta::Metas;
+
+    let mut signature = base();
+    declared(
+        "Unit",
+        &signature.declare_data(
+            &mut Metas::default(),
+            "Unit",
+            0,
+            Term::universe(0),
+            &[("unit", c("Unit"))],
+        ),
+    );
+    let erased = |data: &str, branches: Vec<(&str, Term)>| {
+        lam(
+            Mult::Zero,
+            "p",
+            consuming(
+                Mult::Zero,
+                data,
+                Term::var(0),
+                constantly(c("Bool")),
+                branches,
+            ),
+        )
+    };
+    let taken = erased("Unit", vec![("unit", c("true"))]);
+    let ty = pi(Mult::Zero, "p", c("Unit"), c("Bool"));
+    assert!(check_closed(&signature, &taken, &ty).is_ok());
+
+    let refused = erased("Bool", vec![("true", c("true")), ("false", c("false"))]);
+    let ty = pi(Mult::Zero, "p", c("Bool"), c("Bool"));
+    assert!(matches!(
+        check_closed(&signature, &refused, &ty),
+        Err(TypeError {
+            kind: ErrorKind::ErasedScrutinee { .. },
+            ..
+        })
+    ));
+}
+
+#[test]
 fn the_branch_lambda_must_match_the_scaled_telescope() {
     // Масштабирование видно и с другой стороны: тип ветви строится при `q · r`,
     // и лямбда, написанная с исходной кратностью поля, ему не подходит.

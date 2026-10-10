@@ -441,7 +441,7 @@ fn performing(ty: &Term) -> Option<usize> {
 }
 
 /// Сколько связываний у типа подряд.
-fn binders(ty: &Term) -> usize {
+pub(crate) fn binders(ty: &Term) -> usize {
     let mut current = ty;
     let mut count = 0;
     while let Term::Pi(_, _, _, _, codomain) = current {

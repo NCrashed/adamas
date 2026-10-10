@@ -1,0 +1,54 @@
+-- Поля, вычисленные по меткам (§10 вопрос 206, решение 2026-10-10).
+--
+-- Индекс семейства определяет данные, а не сопровождает их: поле скоростей
+-- имеет тип `Slot (has Velocity cs)`, и у набора без `Velocity` это `Unit`, а не
+-- массив. Прочесть поле можно под фактом `{has Velocity cs}`: доказательство
+-- стёрто, и `cast` разбирает его `Refl` без значения - разбор стёртого
+-- допустим, потому что у `Equal` один конструктор без полей. Факт у вызова
+-- находит поиск, рукописных доказательств нет ни одного.
+--
+-- `flipped` - мост между сторонами равенства: факт пишется `b = True`, а
+-- образец `Refl` уточняет переменную, только когда она стоит индексом.
+
+data Tag where
+  Position : Tag
+  Velocity : Tag
+
+same : Tag -> Tag -> Bool
+same Position Position = True
+same Velocity Velocity = True
+same _ _ = False
+
+data Tags where
+  None : Tags
+  With : Tag -> Tags -> Tags
+
+has : Tag -> Tags -> Bool
+has t None = False
+has t (With u us) = if same t u then True else has t us
+
+Slot : Bool -> Type
+Slot True = Array 4 Int32
+Slot False = Unit
+
+data Rocks : Tags -> Type where
+  MkRocks : (0 cs : Tags) -> Slot (has Position cs) -> Slot (has Velocity cs) -> Rocks cs
+
+flipped : {0 a : Type} -> {0 x : a} -> {0 y : a} -> (0 p : Equal a x y) -> Equal a y x
+flipped Refl = Refl
+
+cast : {0 b : Bool} -> (0 q : Equal Bool True b) -> Slot b -> Array 4 Int32
+cast Refl s = s
+
+present : {0 b : Bool} -> {0 p : Equal Bool b True} -> Slot b -> Array 4 Int32
+present s = cast (flipped p) s
+
+velocities : {0 cs : Tags} -> Rocks cs -> Slot (has Velocity cs)
+velocities (MkRocks ds xs vs) = vs
+
+speed : {0 cs : Tags} -> {has Velocity cs} => Rocks cs -> Int32
+speed r = arrayIndex (present (velocities r)) 0
+
+main : Int32
+main = speed (MkRocks (With Position (With Velocity None)) (arrayNew 4 1) (arrayNew 4 2))
+  + speed (MkRocks (With Velocity None) MkUnit (arrayNew 4 3))

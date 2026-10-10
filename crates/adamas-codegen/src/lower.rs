@@ -5956,6 +5956,9 @@ impl<'a> Lowerer<'a> {
         case: &Case,
         applied: &[Index],
     ) -> Result<(Expr, Repr), LowerError> {
+        if case.consumed == Mult::Zero {
+            return self.erased_analysis(scope, case, applied);
+        }
         self.family(&case.data)?;
         let (scrutinee, packed) = self.scrutinised(scope, &case.scrutinee)?;
         let scrutinee = match packed {
@@ -6051,6 +6054,39 @@ impl<'a> Lowerer<'a> {
             },
             answer,
         ))
+    }
+
+    /// Понижает разбор стёртого значения (§10 вопрос 206).
+    ///
+    /// Ядро пускает его только у семейства с одним конструктором и стёртыми
+    /// полями (`Refl`): выбирать нечего, и разбор есть его единственная
+    /// ветвь. Значения в рантайме нет, поэтому полям ветви достаётся само
+    /// разбираемое - стёртый аргумент понижение не вычисляет, - а за ними
+    /// идут соседи convoy.
+    fn erased_analysis(
+        &mut self,
+        scope: &mut Scope,
+        case: &Case,
+        applied: &[Index],
+    ) -> Result<(Expr, Repr), LowerError> {
+        let [branch] = case.branches.as_slice() else {
+            unreachable!("`case⁰` с несколькими ветвями ядро не пропускает")
+        };
+        let mut arity = 0;
+        let mut current = self.declared(&branch.constructor)?;
+        while let Term::Pi(_, _, _, _, codomain) = current {
+            arity += 1;
+            current = codomain;
+        }
+        let fields = arity - case.params as usize;
+        let mut body = (*branch.body).clone();
+        for _ in 0..fields {
+            body = Term::App(Rc::new(body), Rc::clone(&case.scrutinee));
+        }
+        for index in applied {
+            body = Term::App(Rc::new(body), Rc::new(Term::Var(*index)));
+        }
+        self.expr(scope, &body)
     }
 
     /// Применение с головой-лямбдой или головой-разбором: сводится, если

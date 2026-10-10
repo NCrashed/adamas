@@ -26,6 +26,7 @@ use adamas_core::term::{Case, Mults, Name, Split, Term};
 use adamas_core::value::{Elim, Env, Head, StuckBranch, StuckCase, StuckSplit, Value};
 
 use crate::RunError;
+use crate::effect::binders;
 use crate::foreign::{Foreign, Linkage};
 use crate::frame::{Frame, Kont, Segment};
 
@@ -339,6 +340,13 @@ impl<'a> Machine<'a> {
             Term::Let(_, _, _, value, body) => {
                 kont.push(Frame::Bind(env.clone(), Rc::clone(body)));
                 Step::Eval(env.clone(), Rc::clone(value))
+            }
+            // Разбор стёртого значения (§10 вопрос 206): значения в рантайме
+            // нет, и разбираемое не вычисляется - ветвь выбирает
+            // [`Machine::eliminating`].
+            Term::Case(case) if case.consumed == Mult::Zero => {
+                kont.push(Frame::Scrutinee(env.clone(), Rc::clone(case)));
+                Step::Return(Rc::new(Value::Erased))
             }
             Term::Case(case) => {
                 kont.push(Frame::Scrutinee(env.clone(), Rc::clone(case)));
@@ -898,6 +906,23 @@ impl<'a> Machine<'a> {
         case: &Rc<Case>,
         kont: &mut Kont,
     ) -> Step {
+        // Разбор стёртого значения: ядро пускает его только у семейства с
+        // одним конструктором и стёртыми полями, и ветвь у него одна. Поля
+        // получают `Erased`, как всякий стёртый аргумент.
+        if case.consumed == Mult::Zero {
+            let [branch] = case.branches.as_slice() else {
+                unreachable!("`case⁰` с несколькими ветвями ядро не пропускает")
+            };
+            let count = self
+                .signature
+                .lookup(&branch.constructor)
+                .map_or(0, |constructor| {
+                    binders(&constructor.ty).saturating_sub(case.params as usize)
+                });
+            let fields: Rc<[Rc<Value>]> = (0..count).map(|_| Rc::new(Value::Erased)).collect();
+            kont.push(Frame::Fields(fields, 0));
+            return Step::Eval(env.clone(), Rc::clone(&branch.body));
+        }
         if let Some(step) = self.unfolding(scrutinee, kont) {
             kont.tuck(Frame::Scrutinee(env.clone(), Rc::clone(case)));
             return step;

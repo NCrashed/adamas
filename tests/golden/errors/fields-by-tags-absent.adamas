@@ -1,0 +1,36 @@
+-- Набор без метки не несёт её поля (§10 вопрос 206, решение 2026-10-10).
+--
+-- Пара к `eval/fields-by-tags.adamas`. Поле скоростей - `Slot (has Velocity
+-- cs)`, и у `With Position None` это `Unit`: массив скоростей туда не
+-- кладётся. Прежде поля были одни при любом индексе, и `MkRocks None xs vs`
+-- типизировался.
+
+data Tag where
+  Position : Tag
+  Velocity : Tag
+
+same : Tag -> Tag -> Bool
+same Position Position = True
+same Velocity Velocity = True
+same _ _ = False
+
+data Tags where
+  None : Tags
+  With : Tag -> Tags -> Tags
+
+has : Tag -> Tags -> Bool
+has t None = False
+has t (With u us) = if same t u then True else has t us
+
+Slot : Bool -> Type
+Slot True = Array 4 Int32
+Slot False = Unit
+
+data Rocks : Tags -> Type where
+  MkRocks : (0 cs : Tags) -> Slot (has Position cs) -> Slot (has Velocity cs) -> Rocks cs
+
+speeds : Array 4 Int32
+speeds = arrayNew 4 2
+
+still : Rocks (With Position None)
+still = MkRocks (With Position None) speeds speeds

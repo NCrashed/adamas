@@ -880,6 +880,15 @@ fn member<'a>(
                 let Some(declared) = pending.take().filter(|it| it.name == qualified) else {
                     return Err(detached(&name.text, postulated, &qualified, decl.span));
                 };
+                // Имя, которое стоит в теле, связыванием и задумано: записью
+                // его в теле не назовёшь (`{0 p : Equal …}` с `case p of`).
+                warnings.retain(|warning| {
+                    !matches!(warning, Warning::UnusedImplicit { name, span }
+                    if declared.source.span.contains(span.start())
+                        && clauses.iter().any(|clause| {
+                            crate::expr::names_any(&clause.body, &[name])
+                        }))
+                });
                 define(
                     signature,
                     metas,

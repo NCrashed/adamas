@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: fields-by-tags-absent.adamas:36:45: несовпадение типов: ожидался `Slot (has Velocity (With Position None))`, получен `Array 4 Int32`
+  still = MkRocks (With Position None) speeds speeds
+                                              ^^^^^^

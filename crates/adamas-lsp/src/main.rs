@@ -4,7 +4,8 @@
 //! позвать его иначе как процессом, а проверять надо и то и другое.
 
 fn main() -> std::process::ExitCode {
-    match adamas_lsp::run() {
+    // Сервер - в потоке со своим стеком, как и драйвер (§10 вопрос 187).
+    match adamas_elab::with_stack(adamas_lsp::run) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             // stderr, а не stdout: по stdout идёт протокол, и посторонний

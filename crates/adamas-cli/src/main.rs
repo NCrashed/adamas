@@ -125,13 +125,15 @@ fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(error) => error.exit(),
     };
-    match dispatch(cli.command) {
+    // Работа - в потоке со своим стеком: сумма пределов языка помещается в
+    // него по построению (§10 вопрос 187, `adamas_elab::STACK`).
+    adamas_elab::with_stack(move || match dispatch(cli.command) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("{}", reported(&error));
             ExitCode::FAILURE
         }
-    }
+    })
 }
 
 /// Отказ драйвера на языке пользователя (§7.6): слово перед ним и заголовок

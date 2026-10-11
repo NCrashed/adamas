@@ -300,7 +300,7 @@ fn note_functors(signature: &Signature, names: &[adamas_core::term::Name]) {
             (count > 0 && matches!(ty, Term::Record(_)) && has_members).then_some((&**name, count))
         })
         .collect();
-    let applied: Vec<(&str, &str, Vec<Term>)> = names
+    let mut applied: Vec<(&str, &str, Vec<Term>)> = names
         .iter()
         .filter_map(|name| {
             let mut body = signature.lookup(name)?.body.as_ref()?;
@@ -317,6 +317,11 @@ fn note_functors(signature: &Signature, names: &[adamas_core::term::Name]) {
             (*count == arguments.len()).then_some((&**name, *functor, arguments))
         })
         .collect();
+    // Модулей одного применения бывает несколько (`module Again = Twice NatEq`
+    // рядом с `NatTwice`), и печать берёт первый найденный: порядок обязан не
+    // зависеть от обхода таблицы имён. Порядок - по имени: места объявления
+    // модуль-выражение не записывает.
+    applied.sort_by_key(|(name, _, _)| *name);
     adamas_core::human::note_functors(
         functors.iter().map(|(name, count)| (*name, *count)),
         applied,

@@ -2443,6 +2443,59 @@ impl<'a> Elaborator<'a> {
         (self.signature.writable(&full) && self.signature.lookup(&full).is_some()).then_some(full)
     }
 
+    /// Конструктор функтора за путём модуля-применения (§4.8): `Ups.Empty` при
+    /// `module Ups = Box Up` - конструктор `Box.Empty` и аргументы функтора
+    /// `[Up]`.
+    ///
+    /// Модуль-выражение членов на верхнем уровне не заводит (граница
+    /// 2026-08-31), и его функции с типами пишутся проекцией записи. У
+    /// конструктора поля нет, и путь разрешается через применение. Аргументы
+    /// берутся только именами: модуль-применение называет модули.
+    fn through_application(&self, path: &str, member: &str) -> Option<(Symbol, Vec<Symbol>)> {
+        let module = self.qualified(path).unwrap_or_else(|| Rc::from(path));
+        let mut body = self.signature.lookup(&module)?.body.as_ref()?;
+        let mut arguments = Vec::new();
+        while let Term::App(callee, argument) = body {
+            let Term::Const(name, _, _) = &**argument else {
+                return None;
+            };
+            arguments.push(Rc::clone(name));
+            body = callee;
+        }
+        arguments.reverse();
+        let Term::Const(functor, _, _) = body else {
+            return None;
+        };
+        let constructor: Symbol = Rc::from(format!("{functor}.{member}").as_str());
+        matches!(
+            self.signature.lookup(&constructor).map(|it| &it.kind),
+            Some(DefinitionKind::Constructor { .. })
+        )
+        .then_some((constructor, arguments))
+    }
+
+    /// Путь `Ups.K` к конструктору модуля-применения, переписанный в
+    /// `Box.K @Up` ([`Self::through_application`]).
+    fn constructor_path(&self, record: &Expr, name: &ast::Name, span: Span) -> Option<Expr> {
+        let path = self.dotted(record)?;
+        let (constructor, arguments) = self.through_application(&path, &name.text)?;
+        let named = |text: Symbol| Expr {
+            kind: ExprKind::Name(ast::Name {
+                text,
+                span: name.span,
+            }),
+            span,
+        };
+        Some(
+            arguments
+                .into_iter()
+                .fold(named(constructor), |callee, argument| Expr {
+                    kind: ExprKind::TypeApp(Box::new(callee), Box::new(named(argument))),
+                    span,
+                }),
+        )
+    }
+
     /// Скрыт ли член запечатыванием: `:>`-модуль не назвал его в сигнатуре
     /// (§4.8, вопрос 166).
     ///
@@ -2665,6 +2718,12 @@ impl<'a> Elaborator<'a> {
                         text: full,
                         span: name.span,
                     });
+                }
+                // Конструктор модуля-применения: `Ups.Empty` при `module Ups =
+                // Box Up` есть `Box.Empty @Up`. Полем записи модуля конструктор
+                // не является, и проекция его не находила (§4.8).
+                if let Some(rewritten) = self.constructor_path(record, name, expr.span) {
+                    return self.form(&rewritten, default, expected, position, awaited);
                 }
                 let inner = self.placed(Position::Inner, |it| it.expr(record, Mult::Many))?;
                 Ok(Term::Project(Rc::new(inner), CoreName::from(&*name.text)))
@@ -8541,6 +8600,17 @@ impl<'a> Elaborator<'a> {
         let found = self
             .qualified(&name.text)
             .unwrap_or_else(|| Rc::clone(&name.text));
+        // Путь модуля-применения (`Ups.Empty` при `module Ups = Box Up`): в
+        // паттерне аргументы функтора не пишутся - они параметры семейства и
+        // приходят из типа разбираемого.
+        let found = if self.signature.lookup(&found).is_none() {
+            name.text
+                .rsplit_once('.')
+                .and_then(|(path, member)| self.through_application(path, member))
+                .map_or(found, |(constructor, _)| constructor)
+        } else {
+            found
+        };
         // Конструктор скрытого семейства не разбирает (§4.8, вопрос 166): чей
         // тип не пишется, того и паттерном не взять. Раньше проверки
         // запечатанного: истинны оба флага, а «сигнатура не называет» точнее.

@@ -1,0 +1,45 @@
+-- Конструктор функтора по пути модуля-применения (§4.8, решение 2026-10-11).
+--
+-- `module Ups = Box Up` - одно определение-запись: членов на верхнем уровне
+-- оно не заводит, и `Ups.empty` есть проекция. У конструктора поля в записи
+-- нет, поэтому `Ups.Empty` не писался ни в выражении («нет поля `Empty`»), ни в
+-- образце («не конструктор»); писать приходилось `Box.Empty @Up`. Теперь путь
+-- разрешается через применение: в выражении `Ups.K` есть `Box.K @Up`, в
+-- образце - конструктор `Box.K`, чей параметр приходит из типа разбираемого.
+--
+-- Свидетельствуются три позиции: выражение, клауза и ветка `case`.
+
+module type Ord where
+  type T
+  less : T -> T -> Bool
+
+module Up : Ord where
+  type T = UInt64
+  less : T -> T -> Bool
+  less a b = a < b
+
+module Plain where
+  data Set where
+    Empty : Set
+    One : UInt64 -> Set
+
+module Box (K : Ord) where
+  data Set where
+    Empty : Set
+    One : K.T -> Set
+  empty : Set
+  empty = Empty
+
+module Ups = Box Up
+
+size : Ups.Set -> UInt64
+size Ups.Empty = 0
+size (Ups.One x) = 1
+
+swap : Ups.Set -> Ups.Set
+swap s = case s of
+  Ups.Empty -> Ups.One 1
+  Ups.One _y -> Ups.Empty
+
+main : UInt64
+main = size (Ups.One 4) + size Ups.empty + 10 * size (swap Ups.Empty)

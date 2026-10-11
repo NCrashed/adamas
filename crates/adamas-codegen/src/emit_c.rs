@@ -837,10 +837,14 @@ fn exported_bodies(out: &mut String, program: &Program) {
         let given: Vec<String> = (0..export.parameters.len())
             .map(|at| format!("a{at}"))
             .collect();
+        // Чужая сторона зовёт колбэк в своём режиме плавающей арифметики:
+        // внутри считается в нашем, на выходе ей возвращается её (§4.3).
         let _ = writeln!(
             out,
-            "{} {{\n    return fn_{}({});\n}}\n",
+            "{} {{\n    uint64_t mode = adamas_fpu_enter();\n    {} answer = fn_{}({});\n    \
+             adamas_fpu_leave(mode);\n    return answer;\n}}\n",
             exported_signature(export),
+            scalar(Repr::Flat(export.result)),
             export.function.0,
             given.join(", ")
         );
@@ -906,8 +910,10 @@ pub(crate) fn callbacks(out: &mut String, program: &Program, statics: bool) {
             "/* Трамплин колбэка уровня 2 (§5.3): `userdata` несёт замыкание и вектор evidence. */"
         );
         let _ = writeln!(out, "{} {{", trampoline_signature(id, described, statics));
+        // Режим вызвавшей стороны - как у обёртки экспорта (§4.3).
         out.push_str(
-            "    adamas_value pack = (adamas_value)userdata;\n\
+            "    uint64_t mode = adamas_fpu_enter();\n\
+             \x20   adamas_value pack = (adamas_value)userdata;\n\
              \x20   const adamas_evidence *ev = (const adamas_evidence *)adamas_field(pack, 1);\n\
              \x20   adamas_kont kont;\n\
              \x20   adamas_kont_init(&kont);\n\
@@ -948,7 +954,9 @@ pub(crate) fn callbacks(out: &mut String, program: &Program, statics: bool) {
             scalar(Repr::Flat(described.result.0)),
             described.result.0.name()
         );
-        out.push_str("    adamas_drop_value(answer);\n    return bits;\n}\n\n");
+        out.push_str(
+            "    adamas_drop_value(answer);\n    adamas_fpu_leave(mode);\n    return bits;\n}\n\n",
+        );
     }
 }
 

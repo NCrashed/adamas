@@ -1950,6 +1950,8 @@ impl Module {
             "; ним; слот объекта читает и пишет сам IR (`emit_llvm.rs`).\n",
             "declare ptr @adamas_con0(i16)\n",
             "declare void @adamas_fpu_check()\n",
+            "declare i64 @adamas_fpu_enter()\n",
+            "declare void @adamas_fpu_leave(i64)\n",
             "declare ptr @adamas_alloc(i16, i64)\n",
             "declare ptr @adamas_reuse(ptr, i16, i64)\n",
             "declare void @adamas_free(ptr)\n",
@@ -2185,12 +2187,16 @@ fn exported_bodies(out: &mut String, program: &Program) {
             taken.join(", ")
         );
         out.push_str("entry:\n");
+        // Чужая сторона зовёт колбэк в своём режиме плавающей арифметики:
+        // внутри считается в нашем, на выходе ей возвращается её (§4.3).
+        out.push_str("  %mode = call i64 @adamas_fpu_enter()\n");
         let _ = writeln!(
             out,
             "  %answer = call {CONVENTION} {result} @fn_{}({})",
             export.function.0,
             given.join(", ")
         );
+        out.push_str("  call void @adamas_fpu_leave(i64 %mode)\n");
         let _ = writeln!(out, "  ret {result} %answer");
         out.push_str("}\n\n");
     }

@@ -404,12 +404,17 @@ pub(crate) fn taken() -> Option<RunError> {
 /// отказа. Внутренний инвариант компилятора, сломавшийся под чужим кадром,
 /// обязан доехать до автора названным отказом, а не сигналом.
 fn guarded(slot: usize, args: &[u64], env: Option<u64>) -> Result<u64, RunError> {
-    std::panic::catch_unwind(|| answered(slot, args, env)).unwrap_or_else(|_| {
+    // Чужая сторона зовёт колбэк в своём режиме плавающей арифметики: машина
+    // считает в своём, а на выходе возвращает ей её (§4.3).
+    let mode = crate::fpu::enter();
+    let answer = std::panic::catch_unwind(|| answered(slot, args, env)).unwrap_or_else(|_| {
         Err(RunError::Callback {
             symbol: "?".to_owned(),
             why: adamas_l10n::tr!("interp-callback-2").to_owned(),
         })
-    })
+    });
+    crate::fpu::leave(mode);
+    answer
 }
 
 /// Ответ трамплина чужой стороне сишным `int`: число либо ноль при отказе.

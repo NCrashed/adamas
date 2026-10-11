@@ -234,3 +234,87 @@ fn a_name_without_an_export_is_refused() {
         "отказ обязан сказать, чего у имени нет: {said}"
     );
 }
+
+/// Чужая сторона, зовущая колбэк в **своём** режиме плавающей арифметики
+/// (§4.3, §10 вопрос 68).
+///
+/// Ставит округление к нулю, зовёт колбэк и отвечает тем, что он посчитал, -
+/// если её режим пережил колбэк; иначе `-1`. Пережил ли, проверяется
+/// сложением, а не `fegetround`: тот у glibc читает слово x87, а режим SSE,
+/// которым считают `double`, - другой регистр. Сумма пишется в `volatile`: без
+/// `-frounding-math` компилятор вправе счесть её после `fesetround`, и
+/// спутник LLVM-пути (`-O1`) так и делал. Ни одна функция libc так не
+/// делает, поэтому помощник свой: корпус его не возьмёт (машине его не
+/// загрузить), и свидетель стоит здесь, на двух понижениях.
+const TOWARDS_ZERO: &str = "\
+#include <fenv.h>
+typedef double (*binary)(double, double);
+double towards_zero(binary f, double a, double b) {
+    fesetround(FE_TOWARDZERO);
+    double r = f(a, b);
+    volatile double x = 0.1, y = 0.2;
+    volatile double sum = x + y;
+    int kept = sum != 0.30000000000000004;
+    fesetround(FE_TONEAREST);
+    return kept ? r : -1.0;
+}
+";
+
+/// Программа: `0.1 + 0.2` внутри колбэка, позванного в чужом режиме.
+///
+/// Слагаемые - через чужой `fabs`, иначе сумму свернул бы `gcc`.
+const IN_FOREIGN_MODE: &str = "\
+data Unit where
+  MkUnit : Unit
+
+effect Foreign
+
+extern \"C\" fn fabs : Float64 -> Float64
+
+extern \"C\" fn towards_zero : (Float64 -> Float64 -> {Foreign} Float64) -> Float64 -> Float64 -> Float64
+
+sum : Float64 -> Float64 -> {Foreign} Float64
+sum a b = addFloat64 a b
+
+export \"C\" fn sum
+
+runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign k = handle @Foreign k with
+  return v -> v
+
+body : (ω u : Unit) -> {Foreign} Float64
+body u =
+  let a : Float64 = fabs 0.1
+  let b : Float64 = fabs 0.2
+  towards_zero sum a b
+
+main : Float64
+main = runForeign body
+";
+
+/// Внутри колбэка считается в нашем режиме, а вызвавшей стороне на выходе
+/// возвращается её: `0.30000000000000004`, а не `0.29999999999999998`
+/// округления к нулю и не `-1` потерянного режима.
+#[test]
+fn a_callback_computes_in_our_mode_and_gives_the_caller_its_own() {
+    const ANSWER: &str = "0.30000000000000004";
+    let helper = harness::scratch().join("towards_zero.c");
+    std::fs::write(&helper, TOWARDS_ZERO).unwrap();
+    let text = harness::text(IN_FOREIGN_MODE).expect("понижение обязано взять колбэк");
+    let (stdout, _) = harness::built_with("fpu-callback", &text, &[helper.to_str().unwrap()]);
+    assert_eq!(stdout.trim_end(), ANSWER, "C");
+
+    let Some((current, _)) = harness::llvm_toolchains() else {
+        return;
+    };
+    let mut artefacts = harness::llvm_text("fpu-callback", IN_FOREIGN_MODE)
+        .expect("понижение обязано взять колбэк");
+    artefacts.support.push_str(TOWARDS_ZERO);
+    let (stdout, _) = harness::llvm_built(
+        "fpu-callback-ll",
+        &artefacts,
+        &current,
+        &Pipeline::optimised(),
+    );
+    assert_eq!(stdout.trim_end(), ANSWER, "LLVM");
+}

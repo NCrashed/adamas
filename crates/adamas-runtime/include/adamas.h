@@ -423,6 +423,12 @@ void adamas_fpu_default(void);
  * каждого. См. шапку `c/fpu.c`. */
 void adamas_fpu_check(void);
 
+/** Вход в колбэк: ставит наш режим и отдаёт режим вызвавшей стороны. */
+uint64_t adamas_fpu_enter(void);
+
+/** Выход из колбэка: возвращает вызвавшей стороне её режим. */
+void adamas_fpu_leave(uint64_t saved);
+
 /** Блок сырой памяти. Здесь же будет развилка `AllocStrategy` (§3.6). */
 void *adamas_block_alloc(size_t size);
 

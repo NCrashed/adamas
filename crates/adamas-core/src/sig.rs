@@ -239,6 +239,19 @@ impl Definition {
         eval(&Env::default(), &ty)
     }
 
+    /// Тот же тип термом: его вычисляет вызывающий **в своём окружении**.
+    ///
+    /// Аргументы row записаны в контексте места использования и бывают
+    /// открытыми (окружающая хендлера с `Yield b`, §10 вопрос 45): в пустом
+    /// окружении их переменным не на что указывать.
+    #[must_use]
+    pub fn instantiated_type(&self, levels: &[Level], rows: &[Row<Term>], mults: &[Mult]) -> Term {
+        self.ty
+            .substitute_levels(levels)
+            .substitute_rows(rows)
+            .substitute_mults(mults)
+    }
+
     /// Тело, инстанцированное аргументами уровня и row. `None` у постулата.
     ///
     /// Row подставляются **окружением**, а не по терму: метка несёт открытые

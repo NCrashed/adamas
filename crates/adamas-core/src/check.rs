@@ -160,7 +160,8 @@ fn constant(
             },
         ));
     }
-    let ty = definition.instantiate_type(levels, args.row_args(), args.mult_args());
+    // В окружении контекста, а не в пустом: аргументы row бывают открытыми.
+    let ty = ctx.eval(&definition.instantiated_type(levels, args.row_args(), args.mult_args()));
     Ok((ty, Usage::zero(ctx.size())))
 }
 

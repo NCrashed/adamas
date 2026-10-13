@@ -1,0 +1,32 @@
+-- Хендлер-трансформер над меткой с переменной в аргументе (§3.4, §10 вопрос
+-- 45, находка 2026-10-13).
+--
+-- `mapS` снимает `Yield a` и переизлучает в `Yield b`. Отвергалось «эффекты
+-- `{Yield b}` не погашены: вокруг разрешено `{Yield \v -> v}`»: окружающая
+-- ветки - аргумент row элиминатора хендлера, записанный в контексте места
+-- использования, - подставлялась под связывания типа элиминатора без сдвига,
+-- и переменная `b` указывала на ветку `return`. С закрытым аргументом
+-- (`Yield Nat`) дефект не виден - переменных нет, - поэтому корпус его не
+-- ловил.
+
+effect Yield a where
+  yield : a -> Unit
+
+each : List a -> {Yield a} Unit
+each Nil = MkUnit
+each (Cons x xs) =
+  let _done : Unit = yield x
+  each xs
+
+mapS : (a -> b) -> ({Yield a} Unit) -> {Yield b} Unit
+mapS f prod = handle prod with
+  yield x -> resume (yield (f x))
+  return v -> v
+
+collect : ({Yield a} Unit) -> List a
+collect prod = handle prod with
+  yield x -> Cons x (resume MkUnit)
+  return _v -> Nil
+
+main : List UInt64
+main = collect (mapS (\x -> x * 10) (each [1, 2, 3]))

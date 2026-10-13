@@ -304,12 +304,25 @@ pub enum Term {
 
 /// Поля с подставленными аргументами уровня.
 /// Row с подставленными аргументами-row: хвост-параметр заменяется целой row.
-fn instantiate_row(row: &Row<Term>, arguments: &[Row<Term>]) -> Row<Term> {
-    let mapped = row.map(|argument| argument.substitute_rows(arguments));
+///
+/// `depth` - сколько связываний терма стоит над этой row. Аргументы записаны в
+/// контексте **места использования** и бывают открытыми (окружающая
+/// хендлера с `Yield b`, §10 вопрос 45), поэтому под связываниями типа они
+/// сдвигаются - иначе переменная аргумента хватала бы чужое связывание.
+fn instantiate_row(row: &Row<Term>, arguments: &[Row<Term>], depth: u32) -> Row<Term> {
+    let mapped = row.map(|argument| argument.rows_at(arguments, depth));
     match row.tail() {
-        Some(Tail::Var(RowVar(index))) => arguments
-            .get(index as usize)
-            .map_or(mapped.clone(), |tail| mapped.substituted(tail)),
+        Some(Tail::Var(RowVar(index))) => {
+            arguments
+                .get(index as usize)
+                .map_or(mapped.clone(), |tail| {
+                    if depth == 0 {
+                        mapped.substituted(tail)
+                    } else {
+                        mapped.substituted(&tail.map(|it| crate::pattern::shift_free(it, depth)))
+                    }
+                })
+        }
         _ => mapped,
     }
 }
@@ -348,22 +361,28 @@ fn renamed_fields(fields: &Fields, renames: &[(Name, Name)]) -> Fields {
     }
 }
 
-/// Поля с подставленными аргументами-row.
-fn rowed_fields(fields: &Fields, arguments: &[Row<Term>]) -> Fields {
+/// Поля с подставленными аргументами-row. Поле `i` стоит под `i` связываниями
+/// телескопа; хвост - на исходной глубине (§4.2).
+fn rowed_fields(fields: &Fields, arguments: &[Row<Term>], depth: u32) -> Fields {
     Fields {
         fields: fields
             .iter()
-            .map(|field| Field {
+            .enumerate()
+            .map(|(at, field)| Field {
                 name: Rc::clone(&field.name),
                 mult: field.mult,
                 shape: field.shape,
-                ty: Rc::new(field.ty.substitute_rows(arguments)),
+                ty: Rc::new(
+                    field
+                        .ty
+                        .rows_at(arguments, depth + u32::try_from(at).unwrap_or(u32::MAX)),
+                ),
             })
             .collect(),
         tail: fields
             .tail
             .as_ref()
-            .map(|tail| Rc::new(tail.substitute_rows(arguments))),
+            .map(|tail| Rc::new(tail.rows_at(arguments, depth))),
     }
 }
 
@@ -787,7 +806,13 @@ impl Term {
         if arguments.is_empty() {
             return self.clone();
         }
-        let recur = |term: &Rc<Self>| Rc::new(term.substitute_rows(arguments));
+        self.rows_at(arguments, 0)
+    }
+
+    /// Та же подстановка на глубине `depth` связываний (см. `instantiate_row`).
+    fn rows_at(&self, arguments: &[Row<Self>], depth: u32) -> Self {
+        let recur = |term: &Rc<Self>| Rc::new(term.rows_at(arguments, depth));
+        let under = |term: &Rc<Self>| Rc::new(term.rows_at(arguments, depth + 1));
         match self {
             // Сорта и переменные row не носят.
             Self::Var(_)
@@ -796,17 +821,17 @@ impl Term {
             | Self::Universe(_)
             | Self::Prim(_)
             | Self::RowKind(_) => self.clone(),
-            Self::Lam(mult, name, body) => Self::Lam(*mult, Rc::clone(name), recur(body)),
+            Self::Lam(mult, name, body) => Self::Lam(*mult, Rc::clone(name), under(body)),
             Self::App(callee, argument) => Self::App(recur(callee), recur(argument)),
             Self::Pi(binder, name, domain, row, codomain) => Self::Pi(
                 *binder,
                 Rc::clone(name),
                 recur(domain),
-                instantiate_row(row, arguments),
-                recur(codomain),
+                instantiate_row(row, arguments, depth + 1),
+                under(codomain),
             ),
             Self::Let(mult, name, ty, value, body) => {
-                Self::Let(*mult, Rc::clone(name), recur(ty), recur(value), recur(body))
+                Self::Let(*mult, Rc::clone(name), recur(ty), recur(value), under(body))
             }
             Self::Const(name, levels, args) => Self::Const(
                 Rc::clone(name),
@@ -814,12 +839,12 @@ impl Term {
                 Args::new(
                     args.row_args()
                         .iter()
-                        .map(|row| instantiate_row(row, arguments)),
+                        .map(|row| instantiate_row(row, arguments, depth)),
                     args.mult_args().iter().copied(),
                 ),
             ),
-            Self::Record(fields) => Self::Record(rowed_fields(fields, arguments)),
-            Self::Row(fields) => Self::Row(rowed_fields(fields, arguments)),
+            Self::Record(fields) => Self::Record(rowed_fields(fields, arguments, depth)),
+            Self::Row(fields) => Self::Row(rowed_fields(fields, arguments, depth)),
             Self::Object(fields) => Self::Object(
                 fields
                     .iter()
@@ -835,7 +860,7 @@ impl Term {
             ),
             Self::Project(record, name) => Self::Project(recur(record), Rc::clone(name)),
             Self::Split(split) => {
-                Self::Split(Rc::new(split.map(|it| it.substitute_rows(arguments))))
+                Self::Split(Rc::new(split.map(|it| it.rows_at(arguments, depth))))
             }
             Self::Case(case) => Self::Case(Rc::new(Case {
                 data: Rc::clone(&case.data),
@@ -849,7 +874,7 @@ impl Term {
                     .iter()
                     .map(|branch| Branch {
                         constructor: Rc::clone(&branch.constructor),
-                        body: Rc::new(branch.body.substitute_rows(arguments)),
+                        body: Rc::new(branch.body.rows_at(arguments, depth)),
                     })
                     .collect(),
             })),

@@ -88,6 +88,18 @@ pub enum ErrorKind {
         found: Term,
     },
 
+    /// Сравнение типов исчерпало предел разворотов определений (§10 вопрос
+    /// 47): типы могут быть равны, цепочка просто длиннее предела.
+    #[error("{}", adamas_l10n::tr!("core-unfolding", expected = .expected, found = .found, limit = .limit))]
+    Unfolding {
+        /// Тип, которого требовал контекст.
+        expected: Term,
+        /// Тип, который получился.
+        found: Term,
+        /// Предел разворотов.
+        limit: u32,
+    },
+
     /// Кратность лямбды разошлась с кратностью `Pi`, под который её проверяют.
     #[error("{}", adamas_l10n::tr!("core-lambda-multiplicity", found = .found, expected = .expected))]
     LambdaMultiplicity {
@@ -580,7 +592,12 @@ impl ErrorKind {
         match self {
             Self::NotAType { term, ty } => terms.extend([term, ty]),
             Self::HoleMisfit { hole, wanted } => terms.extend([hole, wanted]),
-            Self::Mismatch { expected, found } => terms.extend([expected, found]),
+            Self::Mismatch { expected, found }
+            | Self::Unfolding {
+                expected, found, ..
+            } => {
+                terms.extend([expected, found]);
+            }
             Self::UnsettledTerm { left, right } => terms.extend([left, right]),
             Self::UnsettledLevel { left, right } => levels.extend([left, right]),
             Self::NotAFunction { ty }

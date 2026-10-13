@@ -722,7 +722,9 @@ fn comparing_two_recursive_families_refuses_instead_of_diverging() {
     // не заканчивается сам: `F x` против `G x` даёт застрявшие `case`, спуск
     // в ветви даёт `F k` против `G k`, и так далее. Тотальность здесь не
     // помогает - она про замкнутые аргументы. Останавливает предел развёртки,
-    // и остановка обязана быть отказом, а не переполнением стека.
+    // и остановка обязана быть отказом, а не переполнением стека, - причём
+    // отказом **по пределу**, а не «несовпадением»: равенства здесь никто не
+    // опроверг (§10 вопрос 47).
     let mut signature = base();
     define_recursive_family(&mut signature, "F");
     define_recursive_family(&mut signature, "G");
@@ -744,23 +746,24 @@ fn comparing_two_recursive_families_refuses_instead_of_diverging() {
         matches!(
             check_closed(&signature, &identity, &coercion),
             Err(TypeError {
-                kind: ErrorKind::Mismatch { .. },
+                kind: ErrorKind::Unfolding { .. },
                 ..
             })
         ),
-        "сравнение обязано закончиться отказом"
+        "сравнение обязано закончиться отказом по пределу"
     );
 }
 
 #[test]
 fn unfolding_still_reaches_far_enough_to_be_useful() {
     // Обратная сторона предела: он не должен резать обычную арифметику в
-    // типах. `F n` на замкнутом `n` стоит ровно `n` разворотов.
+    // типах. `F n` на замкнутом `n` стоит ровно `n` разворотов. 2000 - под
+    // пределом 2048, который стек компилятора держит с запасом (§10 вопрос 47).
     let mut signature = base();
     define_recursive_family(&mut signature, "F");
 
     let identity = lam(Mult::Many, "w", Term::var(0));
-    for length in [1u32, 16, 100] {
+    for length in [1u32, 16, 100, 2000] {
         let coercion = arrow(c("F").apply([number(length)]), c("Nat"));
         let outcome = check_closed(&signature, &identity, &coercion);
         assert!(outcome.is_ok(), "глубина {length}: {outcome:?}");

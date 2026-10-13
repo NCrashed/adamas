@@ -5,6 +5,7 @@
 core-not-a-type = expected a type, found `{ $term }` of type `{ $ty }`
 core-not-a-function = expected a function, found a value of type `{ $ty }`
 core-mismatch = type mismatch: expected `{ $expected }`, found `{ $found }`
+core-unfolding = could not compare `{ $expected }` with `{ $found }`: the comparison ran out of definition unfoldings ({ $limit }), and the types may well be equal - the chain of definitions between them is longer than the limit
 core-lambda-multiplicity = the lambda has multiplicity { $found }, but the type requires { $expected }
 core-usage-violation = `{ $name }` is declared with multiplicity { $declared }, but used { $actual }
 core-cannot-infer = the type of `{ $term }` cannot be inferred: an annotation is needed

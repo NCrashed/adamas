@@ -1142,6 +1142,15 @@ fn misfit(ctx: &Ctx<'_>, metas: &Metas, expected: &Rc<Value>, found: &Rc<Value>)
             wanted: read_back(ctx, metas, expected),
         };
     }
+    // Сравнение кончилось пределом, а не расхождением: «несовпадение» было бы
+    // неправдой (§10 вопрос 47).
+    if crate::conv::exhausted() {
+        return ErrorKind::Unfolding {
+            expected: read_back(ctx, metas, expected),
+            found: read_back(ctx, metas, found),
+            limit: crate::conv::UNFOLD_LIMIT,
+        };
+    }
     ErrorKind::Mismatch {
         expected: read_back(ctx, metas, expected),
         found: read_back(ctx, metas, found),

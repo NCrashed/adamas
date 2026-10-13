@@ -1,0 +1,79 @@
+-- Цепочка из пятидесяти применений функтора сравнивается (§10 вопрос 47,
+-- решение 2026-10-13).
+--
+-- `M50.T` есть `M0.T` через пятьдесят δ-шагов: каждое `Mk = F M(k-1)`
+-- разворачивается до `M(k-1).T`. При пределе разворотов 128 цепочка рвалась на
+-- сорок третьем звене, и рвалась ложным «несовпадением типов». Предел поднят
+-- под стек компилятора (2048, около 680 звеньев), а исчерпание его - свой отказ
+-- (`core-unfolding`), а не несовпадение.
+
+module type Ord where
+  type T
+  less : T -> T -> Bool
+
+module M0 : Ord where
+  type T = UInt64
+  less : T -> T -> Bool
+  less a b = a < b
+
+module F (K : Ord) : Ord where
+  type T = K.T
+  less : T -> T -> Bool
+  less a b = K.less a b
+
+module M1 = F M0
+module M2 = F M1
+module M3 = F M2
+module M4 = F M3
+module M5 = F M4
+module M6 = F M5
+module M7 = F M6
+module M8 = F M7
+module M9 = F M8
+module M10 = F M9
+module M11 = F M10
+module M12 = F M11
+module M13 = F M12
+module M14 = F M13
+module M15 = F M14
+module M16 = F M15
+module M17 = F M16
+module M18 = F M17
+module M19 = F M18
+module M20 = F M19
+module M21 = F M20
+module M22 = F M21
+module M23 = F M22
+module M24 = F M23
+module M25 = F M24
+module M26 = F M25
+module M27 = F M26
+module M28 = F M27
+module M29 = F M28
+module M30 = F M29
+module M31 = F M30
+module M32 = F M31
+module M33 = F M32
+module M34 = F M33
+module M35 = F M34
+module M36 = F M35
+module M37 = F M36
+module M38 = F M37
+module M39 = F M38
+module M40 = F M39
+module M41 = F M40
+module M42 = F M41
+module M43 = F M42
+module M44 = F M43
+module M45 = F M44
+module M46 = F M45
+module M47 = F M46
+module M48 = F M47
+module M49 = F M48
+module M50 = F M49
+
+lift : M0.T -> M50.T
+lift x = x
+
+main : UInt64
+main = lift 7

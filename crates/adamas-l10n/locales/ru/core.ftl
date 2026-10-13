@@ -5,6 +5,7 @@
 core-not-a-type = ожидался тип, получено `{ $term }` типа `{ $ty }`
 core-not-a-function = ожидалась функция, получено значение типа `{ $ty }`
 core-mismatch = несовпадение типов: ожидался `{ $expected }`, получен `{ $found }`
+core-unfolding = не удалось сравнить `{ $expected }` и `{ $found }`: сравнение исчерпало предел разворотов определений ({ $limit }), и типы могут быть равны - цепочка определений между ними длиннее предела
 core-lambda-multiplicity = кратность лямбды { $found }, а тип требует { $expected }
 core-usage-violation = `{ $name }` объявлена с кратностью { $declared }, а использована { $actual }
 core-cannot-infer = тип `{ $term }` невозможно синтезировать, нужна аннотация

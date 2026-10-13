@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+{_1 = {size = 24, align = 8}, _2 = {size = 16, align = 8}}

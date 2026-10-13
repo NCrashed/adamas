@@ -277,7 +277,12 @@ fn named(expr: &Expr, out: &mut BTreeSet<LocalId>) {
         | Expr::LayoutField {
             descriptor: local, ..
         }
-        | Expr::Dup { local, .. } => {
+        | Expr::Dup { local, .. }
+        // Среда колбэка уровня 2 (§5.3) записана локалом прямо в узле, а не
+        // дочерним `Local`, и упомянута она именно здесь. Не сочти её обход -
+        // и связывание, между которым и чужим вызовом стоит ещё `Bind` (ответ
+        // с записанными буферами, вопрос 186), дропнуло бы среду до вызова.
+        | Expr::Userdata(local) => {
             out.insert(*local);
         }
         // Схлопнутый дроп называет сверх разобранного его поля: `dup` по ним
@@ -338,6 +343,8 @@ enum Shape {
     Load(u32, PrimTy),
     /// Векторная запись окна (§4.9).
     Store(u32, PrimTy),
+    /// Уникальный массив перед займом на запись (§5.3, вопрос 186).
+    Unshared,
 }
 
 /// Состояние прохода: таблица конструкторов и счётчик свежих связываний.
@@ -434,7 +441,8 @@ impl Pass<'_> {
             | Expr::ArraySet { .. }
             | Expr::ArrayIndex { .. }
             | Expr::SimdLoad { .. }
-            | Expr::SimdStore { .. } => self.array(expr, owned),
+            | Expr::SimdStore { .. }
+            | Expr::Unshared { .. } => self.array(expr, owned),
             Expr::RegionAlloc { .. }
             | Expr::RegionLast { .. }
             | Expr::RegionRead { .. }
@@ -863,6 +871,7 @@ impl Pass<'_> {
             Expr::ArrayIndex {
                 stride, array, at, ..
             } => (Shape::Index, stride, vec![*array, *at]),
+            Expr::Unshared { array } => (Shape::Unshared, None, vec![*array]),
             Expr::SimdLoad {
                 stride,
                 lanes,
@@ -889,6 +898,7 @@ impl Pass<'_> {
         // Подвыражения снимаются с конца, поэтому и разбираются справа налево.
         let mut next = || Box::new(done.pop().unwrap_or(Expr::Erased));
         let node = match shape {
+            Shape::Unshared => Expr::Unshared { array: next() },
             Shape::New(bytes) => {
                 let initial = next();
                 Expr::ArrayNew {
@@ -1503,6 +1513,7 @@ impl Pass<'_> {
             | Expr::SimdStore {
                 array, at, value, ..
             } => self.plans(array, slots) || self.plans(at, slots) || self.plans(value, slots),
+            Expr::Unshared { array } => self.plans(array, slots),
             Expr::ArrayIndex { array, at, .. } | Expr::SimdLoad { array, at, .. } => {
                 self.plans(array, slots) || self.plans(at, slots)
             }
@@ -1642,6 +1653,7 @@ impl Pass<'_> {
                     || self.attach(at, slots, token)
                     || self.attach(value, slots, token)
             }
+            Expr::Unshared { array } => self.attach(array, slots, token),
             Expr::ArrayIndex { array, at, .. } | Expr::SimdLoad { array, at, .. } => {
                 self.attach(array, slots, token) || self.attach(at, slots, token)
             }

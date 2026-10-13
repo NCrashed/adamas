@@ -205,10 +205,14 @@ fn an_operation_under_recursion_stays_linear() {
         small > 0,
         "мелкая точка ушла в ноль: мерить нечего, ряд не показателен"
     );
-    let ratio = large / small;
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "микросекунды прогона в пределах точности f64 с большим запасом"
+    )]
+    let ratio = large as f64 / small as f64;
     assert!(
-        ratio < 24,
-        "восьмикратная работа стоила {ratio}-кратного времени: {small} мс против {large} - \
+        ratio < 24.0,
+        "восьмикратная работа стоила {ratio:.1}-кратного времени: {small} мкс против {large} - \
          это не линия (квадрат дал бы около шестидесяти четырёх)"
     );
 }
@@ -330,15 +334,24 @@ fn timed(name: &str, left: usize, right: usize) -> u128 {
         String::from_utf8_lossy(&compiled.stderr)
     );
 
-    let started = Instant::now();
-    let run = Command::new(&binary).output().unwrap();
-    let elapsed = started.elapsed().as_millis();
-    assert!(run.status.success(), "{name}: прогон оборвался");
-    // Ответ печатается, и печатать его есть чем: выброси компилятор C работу -
-    // печатать стало бы нечего, а ряд мерил бы пустоту.
-    assert!(
-        !run.stdout.is_empty(),
-        "{name}: ответа нет - мерился не счёт"
-    );
-    elapsed
+    // Минимум из трёх, а не один прогон: соседняя нагрузка время только
+    // прибавляет, и наименьшее из нескольких ближе всего к самому счёту.
+    // Микросекунды, а не миллисекунды: мелкая точка стоит пары миллисекунд, и
+    // целое деление их съедало.
+    (0..3)
+        .map(|_| {
+            let started = Instant::now();
+            let run = Command::new(&binary).output().unwrap();
+            let elapsed = started.elapsed().as_micros();
+            assert!(run.status.success(), "{name}: прогон оборвался");
+            // Ответ печатается, и печатать его есть чем: выброси компилятор C
+            // работу - печатать стало бы нечего, а ряд мерил бы пустоту.
+            assert!(
+                !run.stdout.is_empty(),
+                "{name}: ответа нет - мерился не счёт"
+            );
+            elapsed
+        })
+        .min()
+        .unwrap_or(0)
 }

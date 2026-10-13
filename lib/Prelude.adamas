@@ -918,6 +918,25 @@ infixr 5 ::
 (::) : a -> List a -> List a
 (::) x xs = Cons x xs
 
+-- | Поток значений - эффект, а не структура данных (§3.4): продюсер зовёт
+-- `yield`, консьюмер - хендлер. Промежуточного списка не бывает, ранний выход
+-- бесплатен - консьюмер просто не зовёт `resume`.
+effect Yield a where
+  yield : a -> Unit
+
+-- | Элементы списка потоком, по порядку.
+each : List a -> {Yield a} Unit
+each Nil = MkUnit
+each (Cons x xs) =
+  let _done : Unit = yield x
+  each xs
+
+-- | `f` для каждого элемента потока. Комбинаторы над потоком - `Std.Stream`.
+forEach : (a -> Unit) -> ({Yield a} Unit) -> Unit
+forEach f prod = handle prod with
+  yield x -> resume (f x)
+  return v -> v
+
 -- | Отображение содержимого: список, `Option`, `Result`.
 class Functor (f : Type -> Type) where
   map : (a -> b) -> f a -> f b

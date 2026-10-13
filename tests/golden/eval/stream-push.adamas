@@ -1,0 +1,24 @@
+-- Потоковый API (§3.4, §4.4, §10 вопрос 45, решение 2026-10-14).
+--
+-- `Yield`, `each` и `forEach` - прелюдия: итерация - базовая идиома и пишется
+-- без импорта. Комбинаторы - `Std.Stream`. Цепочка `mapS` - `filterS` -
+-- `take` - `toList` не строит промежуточных списков: продюсер ведёт, каждый
+-- хендлер отвечает следующему. `take` останавливает продюсер, не зовя
+-- резумпцию; `fold` идёт нитью состояния - результат резумпции в ω-позицию не
+-- отдать (§3.3). Последняя компонента - `forEach` с эффектной функцией: её
+-- `Yield` проходит через `forEach` общим хвостом auto-lift (§4.1).
+
+import Std.Stream (mapS, filterS, take, find, fold, toList)
+
+numbers : {Yield UInt64} Unit
+numbers = each [1, 2, 3, 4, 5, 6]
+
+shifted : UInt64 -> {Yield UInt64} Unit
+shifted x = yield (x + 100)
+
+main : (List UInt64, UInt64, Option UInt64, List UInt64)
+main =
+  ( toList (take 2 (filterS (\x -> x > 25) (mapS (\x -> x * 10) numbers)))
+  , fold (\acc x -> acc + x) 0 numbers
+  , find (\x -> x > 4) numbers
+  , toList (forEach shifted (each [1, 2])) )

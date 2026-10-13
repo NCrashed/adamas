@@ -1,0 +1,49 @@
+-- | Комбинаторы потока (§3.4, §10 вопрос 45).
+--
+-- Сам поток - эффект `Yield` прелюдии вместе с `each` и `forEach`: итерация -
+-- базовая идиома и пишется без импорта. Здесь - то, что строит поток из потока
+-- и сводит его к значению. Всё это push-форма: продюсер ведёт, хендлер
+-- отвечает. Pull-форма (`reify`, `Step`) - для `zip` и `merge`, где два
+-- продюсера приостановлены разом, - ждёт интринсика `unwind` (§10 вопрос 249).
+--
+-- Свёртка - параметризованный хендлер: состояние идёт нитью (`state`), потому
+-- что результат резумпции в ω-позицию не отдать - она линейна (§3.3).
+
+-- | Каждый элемент через `f`.
+mapS : (a -> b) -> ({Yield a} Unit) -> {Yield b} Unit
+mapS f prod = handle prod with
+  yield x -> resume (yield (f x))
+  return v -> v
+
+-- | Только элементы, на которых `p` истинно.
+filterS : (a -> Bool) -> ({Yield a} Unit) -> {Yield a} Unit
+filterS p prod = handle prod with
+  yield x -> if p x then resume (yield x) else resume MkUnit
+  return v -> v
+
+-- | Не больше `n` первых элементов. Остаток продюсера не считается вовсе:
+-- резумпцию не зовут, и его ресурсы закрывает раскрутка (§3.3).
+take : UInt64 -> ({Yield a} Unit) -> {Yield a} Unit
+take n prod = handle prod with
+  state n
+  return v -> v
+  yield x -> if state == 0 then MkUnit else resume (yield x) (state - 1)
+
+-- | Первый элемент, на котором `p` истинно; на нём поток и кончается.
+find : (a -> Bool) -> ({Yield a} Unit) -> Option a
+find p prod = handle prod with
+  yield x -> if p x then Some x else resume MkUnit
+  return _v -> None
+
+-- | Свёртка слева: `step` над накопленным и элементом.
+fold : (b -> a -> b) -> b -> ({Yield a} Unit) -> b
+fold step start prod = handle prod with
+  state start
+  return _v -> state
+  yield x -> resume MkUnit (step state x)
+
+-- | Поток списком, по порядку.
+toList : ({Yield a} Unit) -> List a
+toList prod = handle prod with
+  yield x -> Cons x (resume MkUnit)
+  return _v -> Nil

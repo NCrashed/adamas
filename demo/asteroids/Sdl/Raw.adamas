@@ -94,9 +94,10 @@ extern "C" fn SDL_RenderPresent : CPtr -> Unit
 
 -- `int SDL_PollEvent(SDL_Event *event)` - ноль, если очередь пуста.
 --
--- Чужая сторона пишет **в наш буфер на месте**, и читаем мы его обычным
--- `arrayIndex`: заём есть адрес нагрузки, а не копия.
-extern "C" fn SDL_PollEvent : Array n UInt32 -> Int32
+-- Чужая сторона пишет в наш буфер, поэтому он `1` и едет ответом рядом с
+-- числом (§5.3, вопрос 186): событие читается из ответа. Уникальный буфер
+-- пишется на месте, и цикл опроса копий не делает.
+extern "C" fn SDL_PollEvent : (1 event : Array n UInt32) -> (Int32, Array n UInt32)
 
 -- `Uint32 SDL_GetTicks(void)` - миллисекунды с запуска.
 extern "C" fn SDL_GetTicks : UInt32

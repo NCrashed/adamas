@@ -80,14 +80,16 @@ body : (ω u : Unit) -> {Foreign} UInt64
 body u =
   let packed : Array 128 UInt8 = arrayNew 128 blank
   let room : Array 1 UInt64 = arrayNew 1 packedRoom
-  let deflated : Int32 = deflate packed room source sourceLength zBest
-  let packedLength : UInt64 = roomLeft room
+  let squeezed : (Int32, Array 128 UInt8, Array 1 UInt64) = deflate packed room source sourceLength zBest
+  let deflated : Int32 = squeezed._1
+  let packedLength : UInt64 = roomLeft squeezed._3
   let restored : Array 64 UInt8 = arrayNew 64 blank
   let back : Array 1 UInt64 = arrayNew 1 restoredRoom
-  let inflated : Int32 = inflate restored back packed packedLength
-  let restoredLength : UInt64 = roomLeft back
+  let unpacked : (Int32, Array 64 UInt8, Array 1 UInt64) = inflate restored back squeezed._2 packedLength
+  let inflated : Int32 = unpacked._1
+  let restoredLength : UInt64 = roomLeft unpacked._3
   let sourceSum : UInt64 = checksum source sourceLength
-  let restoredSum : UInt64 = checksum restored restoredLength
+  let restoredSum : UInt64 = checksum unpacked._2 restoredLength
   addUInt64 (pick (eqInt32 deflated zOk) 1 0)
     (addUInt64 (mulUInt64 (pick (ltUInt64 packedLength sourceLength) 1 0) 10)
       (addUInt64 (mulUInt64 (pick (eqInt32 inflated zOk) 1 0) 100)

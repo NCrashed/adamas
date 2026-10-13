@@ -58,16 +58,17 @@ zBest : UInt64
 zBest = 9
 
 -- Сжать первые `count` байт `source` в `dest`. `room` до вызова несёт размер
--- места, после вызова - длину написанного.
+-- места; ответ - статус, сжатые байты и `room` с длиной написанного.
 deflate :
   (ω dest : Array n UInt8) -> (ω room : Array 1 UInt64) ->
-  (ω source : Array m UInt8) -> UInt64 -> UInt64 -> {Foreign} Int32
+  (ω source : Array m UInt8) -> UInt64 -> UInt64 ->
+  {Foreign} (Int32, Array n UInt8, Array 1 UInt64)
 deflate dest room source count level = compress2 dest room source count level
 
 -- Обратное тем же порядком: уровня у распаковки нет.
 inflate :
   (ω dest : Array n UInt8) -> (ω room : Array 1 UInt64) ->
-  (ω source : Array m UInt8) -> UInt64 -> {Foreign} Int32
+  (ω source : Array m UInt8) -> UInt64 -> {Foreign} (Int32, Array n UInt8, Array 1 UInt64)
 inflate dest room source count = uncompress dest room source count
 
 -- Контрольная сумма первых `count` байт. Начальное значение - соглашение

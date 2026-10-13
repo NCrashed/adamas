@@ -791,11 +791,13 @@ paintOver r score =
 listen : Array 14 UInt32 -> Keys -> UInt64 -> {Foreign} Keys
 listen event keys 0 = keys
 listen event keys n =
-  let got = SDL_PollEvent event
-  let kind = arrayIndex event 0
-  let code = arrayIndex event scanWord
+  let polled = SDL_PollEvent event
+  let got = polled._1
+  let filled = polled._2
+  let kind = arrayIndex filled 0
+  let code = arrayIndex filled scanWord
   let seen = if 0 < got then absorb keys kind code else keys
-  listen event seen (n - 1)
+  listen filled seen (n - 1)
 
 emptyRocks : Rocks whole
 emptyRocks = MkRocks whole (arrayNew rocks 0) (arrayNew rocks 0) (arrayNew rocks 0) (arrayNew rocks 0) (arrayNew rocks 0)

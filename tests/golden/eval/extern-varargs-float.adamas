@@ -41,7 +41,7 @@ effect Foreign
 -- вариадическим аргументом. `Float64`, а не `Float32`: продвижение аргументов
 -- по умолчанию расширяет `float` до `double`, и написать `Float32` здесь
 -- элаборация отвергает названной причиной - расширять его нам нечем.
-extern "C" fn snprintf : Array n UInt8 -> UInt64 -> Array m UInt8 -> ... -> Float64 -> Int32
+extern "C" fn snprintf : (1 buf : Array n UInt8) -> UInt64 -> Array m UInt8 -> ... -> Float64 -> (Int32, Array n UInt8)
 
 runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
 runForeign k = handle @Foreign k with
@@ -90,11 +90,13 @@ format =
 body : (ω u : Unit) -> {Foreign} UInt64
 body u =
   let text : Array 8 UInt8 = arrayNew 8 blank
-  let written : Int32 = snprintf text room format half
-  let head : UInt8 = arrayIndex text 0
-  let point : UInt8 = arrayIndex text 1
-  let tail : UInt8 = arrayIndex text 2
-  let stop : UInt8 = arrayIndex text 3
+  let printed : (Int32, Array 8 UInt8) = snprintf text room format half
+  let written : Int32 = printed._1
+  let filled : Array 8 UInt8 = printed._2
+  let head : UInt8 = arrayIndex filled 0
+  let point : UInt8 = arrayIndex filled 1
+  let tail : UInt8 = arrayIndex filled 2
+  let stop : UInt8 = arrayIndex filled 3
   let sized : UInt64 = pick (eqInt32 written wrote) 1 0
   let leading : UInt64 = pick (eqUInt8 head digitTwo) 1 0
   let dotted : UInt64 = pick (eqUInt8 point dot) 1 0

@@ -228,6 +228,9 @@ pub struct Foreign {
     /// невариадическим типом - вышло бы неопределённое поведение, а не
     /// «примерно то же».
     pub variadic: Option<usize>,
+    /// Буферы, которые чужая сторона пишет: позиции в [`Self::params`] (§5.3,
+    /// вопрос 186). Машина одалживает им копию и отдаёт её ответом.
+    pub written: Vec<usize>,
 }
 
 impl Foreign {
@@ -240,6 +243,7 @@ impl Foreign {
             params: params.iter().copied().map(Cross::Word).collect(),
             result: Some(result),
             variadic: None,
+            written: Vec::new(),
         }
     }
 
@@ -252,6 +256,7 @@ impl Foreign {
             params: it.params.clone(),
             result: it.result,
             variadic: it.variadic,
+            written: it.written.clone(),
         }
     }
 

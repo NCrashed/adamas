@@ -150,11 +150,14 @@ fn the_loan_is_an_address_and_not_a_copy() {
     // Пять займов: `fill`, `digest` (два - байты и out), `note`, `same`.
     let loans = text.matches("adamas_array_data(").count();
     assert_eq!(loans, 5, "займов напечатано {loans}, а не пять");
-    // Копии блока под заём нет: `adamas_array_writable` зовёт только запись
-    // ячейки, а её в фикстуре нет вовсе.
-    assert!(
-        !text.contains("adamas_array_writable("),
-        "заём скопировал блок: в тексте есть `adamas_array_writable`"
+    // `adamas_array_writable` стоит ровно перед займом на запись (§5.3, вопрос
+    // 186): по одному на `fill` и `digest`. Уникальный массив он отдаёт тем же
+    // блоком, и что копии нет, показывает прогоном `adamas_probe_same` -
+    // адрес второго займа тот же.
+    let unshared = text.matches("adamas_array_writable(").count();
+    assert_eq!(
+        unshared, 2,
+        "уникальность спрошена {unshared} раз, а не перед двумя займами на запись"
     );
 }
 

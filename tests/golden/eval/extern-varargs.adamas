@@ -48,12 +48,16 @@ effect Foreign
 
 -- `int snprintf(char *s, size_t n, const char *fmt, ...)`. Поимённых
 -- параметров три, и `...` стоит ровно за ними.
-extern "C" fn snprintf : Array n UInt8 -> UInt64 -> Array m UInt8 -> ... -> UInt64 -> Int32
+-- Буфер `s` чужая сторона пишет, поэтому он `1` и едет ответом рядом с
+-- числом (§5.3, вопрос 186): так написанное читается из ответа, а не из
+-- прежнего имени массива.
+extern "C" fn snprintf : (1 buf : Array n UInt8) -> UInt64 -> Array m UInt8 -> ... -> UInt64 -> (Int32, Array n UInt8)
 
 -- `int sscanf(const char *s, const char *fmt, ...)`. Поимённых параметров
 -- **два**: разбираемый текст и формат. Вариадический аргумент - адрес ячейки,
 -- куда `%lu` кладёт разобранное.
-extern "C" fn sscanf : Array n UInt8 -> Array m UInt8 -> ... -> Array k UInt64 -> Int32
+-- Ячейка пишется, и потому она `1` и в ответе - и в вариадической части тоже.
+extern "C" fn sscanf : Array n UInt8 -> Array m UInt8 -> ... -> (1 out : Array k UInt64) -> (Int32, Array k UInt64)
 
 runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
 runForeign k = handle @Foreign k with
@@ -105,13 +109,16 @@ body : (ω u : Unit) -> {Foreign} UInt64
 body u =
   let text : Array 16 UInt8 = arrayNew 16 blank
   -- Вариадический аргумент один, и едет он целым регистром: `al` равен нулю.
-  let written : Int32 = snprintf text room format number
-  let head : UInt8 = arrayIndex text 0
+  let printed : (Int32, Array 16 UInt8) = snprintf text room format number
+  let written : Int32 = printed._1
+  let filled : Array 16 UInt8 = printed._2
+  let head : UInt8 = arrayIndex filled 0
   -- Тот же формат читает обратно, и вариадический аргумент здесь - **адрес**
   -- нашей ячейки.
   let cell : Array 1 UInt64 = arrayNew 1 empty
-  let assigned : Int32 = sscanf text format cell
-  let back : UInt64 = arrayIndex cell 0
+  let scanned : (Int32, Array 1 UInt64) = sscanf filled format cell
+  let assigned : Int32 = scanned._1
+  let back : UInt64 = arrayIndex scanned._2 0
   let sized : UInt64 = pick (eqInt32 written wrote) 1 0
   let inplace : UInt64 = pick (eqUInt8 head four) 1 0
   let counted : UInt64 = pick (eqInt32 assigned parsed) 1 0

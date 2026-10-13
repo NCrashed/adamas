@@ -344,6 +344,7 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         | Expr::Layout { .. } => Vec::new(),
         Expr::Environment { closure, .. } => vec![&mut **closure],
         Expr::ArrayData { array: value }
+        | Expr::Unshared { array: value }
         | Expr::Unpack { value, .. }
         | Expr::Cancel { value, .. }
         | Expr::SimdSplat { value, .. }
@@ -599,7 +600,7 @@ impl Anf<'_> {
             Expr::SimdLane { lane, .. } => Repr::Flat(*lane),
             // Запись окна отдаёт **колонку**, а не вектор: пара к `arraySet`,
             // и представление у неё то же.
-            Expr::SimdStore { .. } => Repr::Array(crate::ir::Elems::Flat),
+            Expr::SimdStore { .. } | Expr::Unshared { .. } => Repr::Array(crate::ir::Elems::Flat),
             Expr::RegionNew
             | Expr::SharedNew
             | Expr::RegionAlloc { .. }

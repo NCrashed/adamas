@@ -5033,7 +5033,7 @@ fn declare_extern(
         span,
     )
     .map_err(|error| foreign_label_missing(error, span))?;
-    let (params, result, variadic) = crossing(&pending.ty, signature, variadic, span)?;
+    let (params, result, variadic, written) = crossing(&pending.ty, signature, variadic, span)?;
     let symbol: CoreName = Rc::clone(&declared.name.text);
     let name = Rc::clone(&pending.name);
     let demanded = pending.required;
@@ -5054,6 +5054,7 @@ fn declare_extern(
             params,
             result,
             variadic,
+            written,
         },
     );
     // `@noalloc` через границу - объявление обязательства, а не вердикт: тела
@@ -5242,7 +5243,7 @@ fn strip_variadic(
 /// Отдаёт **форму границы**, а не одно только «да»: ту же форму потом читают
 /// понижение и машина, и считать её второй раз значило бы завести вторую копию
 /// этого обхода (см. [`Crossing`]).
-type Shape = (Vec<Cross>, Option<PrimTy>, Option<usize>);
+type Shape = (Vec<Cross>, Option<PrimTy>, Option<usize>, Vec<usize>);
 
 fn crossing(
     ty: &Term,
@@ -5259,7 +5260,13 @@ fn crossing(
     let mut explicit = 0usize;
     let mut named: Option<usize> = None;
     let mut rest = ty;
-    while let Term::Pi(binder, _, written, row, codomain) = rest {
+    // Контекст телескопа: по нему сверяется ответ с записанными буферами
+    // (вопрос 186) - значениями, а не термами, без сдвига индексов.
+    let mut ctx = Ctx::new(signature);
+    let mut writes: Vec<(usize, Rc<Value>)> = Vec::new();
+    while let Term::Pi(binder, name, written, row, codomain) = rest {
+        let bound = ctx.eval(written);
+        ctx = ctx.bind(Rc::clone(name), binder.mult, Rc::clone(&bound));
         if binder.visibility == Visibility::Explicit {
             if named.is_none() && variadic.is_some_and(|(split, _)| split == explicit) {
                 named = Some(params.iter().filter_map(Cross::carried).count());
@@ -5309,6 +5316,11 @@ fn crossing(
         let carried = if let Some(ty) = word(domain) {
             Cross::Word(ty)
         } else if let Some(cell) = lent(signature, domain, span)? {
+            // Буфер кратности `1` чужая сторона пишет, и вызов отдаёт его
+            // обратно значением (§5.3, вопрос 186).
+            if binder.mult == Mult::One {
+                writes.push((params.len(), bound));
+            }
             Cross::Buffer(cell)
         } else if unit_type(domain, signature) {
             Cross::Nothing
@@ -5319,11 +5331,16 @@ fn crossing(
         intermediate(row, codomain, span)?;
         rest = codomain;
     }
-    let answer = unaliased(signature, rest);
-    let result = word(answer);
-    if result.is_none() && !unit_type(answer, signature) {
-        return refuse(adamas_l10n::text!("decl-76"));
-    }
+    let result = if writes.is_empty() {
+        let answer = unaliased(signature, rest);
+        let result = word(answer);
+        if result.is_none() && !unit_type(answer, signature) {
+            return refuse(adamas_l10n::text!("decl-76"));
+        }
+        result
+    } else {
+        returned(signature, &ctx, rest, &writes, span)?
+    };
     // Отметка стояла после последнего связывания: вариадическая часть пуста.
     // Форма законная - `printf(fmt)` пишется в C, - и от невариадической она
     // всё равно отличается: `al` вызывающий обязан обнулить.
@@ -5345,7 +5362,78 @@ fn crossing(
             }
         }
     }
-    Ok((params, result, named))
+    Ok((
+        params,
+        result,
+        named,
+        writes.into_iter().map(|(at, _)| at).collect(),
+    ))
+}
+
+/// Ответ C объявления с записываемыми буферами (§5.3, вопрос 186).
+///
+/// Ответ объявления - сам массив, если символ `void` и буфер один, либо
+/// кортеж: ответ C словом, затем записанные массивы по порядку (при `void` -
+/// одни массивы). Каждый массив обязан быть **того же типа**, что его
+/// связывание: вызов отдаёт именно его, и `Array 5 T` в ответе при `Array n T`
+/// в связывании было бы смешением типов. Сверка - конвертируемостью значений в
+/// контексте телескопа. Ответ - слово C либо `None` у символа `void`.
+///
+/// # Errors
+///
+/// Форма ответа не та (`decl-97`).
+fn returned(
+    signature: &Signature,
+    ctx: &Ctx<'_>,
+    answer: &Term,
+    writes: &[(usize, Rc<Value>)],
+    span: Span,
+) -> Result<Option<PrimTy>, ElabError> {
+    let refused = || ElabError::ForeignType {
+        why: adamas_l10n::text!("decl-97"),
+        span,
+    };
+    let mut metas = Metas::default();
+    let size = ctx.size();
+    let value = whnf(signature, &ctx.eval(answer));
+    let same = |metas: &mut Metas, found: &Rc<Value>, (_, bound): &(usize, Rc<Value>)| {
+        convertible(signature, metas, size, found, bound)
+    };
+    if let [only] = writes {
+        if same(&mut metas, &value, only) {
+            return Ok(None);
+        }
+    }
+    let Value::Record(telescope) = &*value else {
+        return Err(refused());
+    };
+    let fields = telescope.fields().len();
+    let leading = fields.checked_sub(writes.len()).ok_or_else(refused)?;
+    if leading > 1 || telescope.is_open() {
+        return Err(refused());
+    }
+    // Кортеж не зависим: предыдущие поля в типы следующих не входят, и на их
+    // место ставятся свежие переменные.
+    let earlier: Vec<Rc<Value>> = (0..fields)
+        .map(|at| Value::var(Lvl(size + u32::try_from(at).unwrap_or(u32::MAX))))
+        .collect();
+    let result = if leading == 1 {
+        Some(
+            word(unaliased(
+                signature,
+                &quote(size, &telescope.at(0, &earlier)),
+            ))
+            .ok_or_else(refused)?,
+        )
+    } else {
+        None
+    };
+    writes
+        .iter()
+        .enumerate()
+        .all(|(at, write)| same(&mut metas, &telescope.at(leading + at, &earlier), write))
+        .then_some(result)
+        .ok_or_else(refused)
 }
 
 /// Экспорт одного определения: `export "C" fn byWord` (§5.3, колбэк уровня 1).
@@ -5444,6 +5532,7 @@ fn exported_symbol(
             // одной. Отметка при `export` не пишется и потому, что типа он не
             // объявляет вовсе - он читает его у определения выше.
             variadic: None,
+            written: Vec::new(),
         },
     );
     Ok(())

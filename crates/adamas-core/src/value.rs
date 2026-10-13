@@ -403,6 +403,20 @@ impl Block {
         }))
     }
 
+    /// Копия блока: те же ячейки в своих байтах.
+    ///
+    /// Её одалживает машина на запись (§5.3, §10 вопрос 186): чужая сторона
+    /// пишет в копию, и прочие имена исходного массива записи не видят.
+    #[must_use]
+    pub fn copied(&self) -> Rc<Self> {
+        Rc::new(Self {
+            ty: self.ty,
+            elem: Rc::clone(&self.elem),
+            count: self.count,
+            cells: std::cell::RefCell::new(self.cells.borrow().clone()),
+        })
+    }
+
     /// Смещение ячейки и её ширина. `None` - номер вне длины.
     fn slice(&self, at: u64) -> Option<(usize, usize)> {
         if at >= self.count {

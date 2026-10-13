@@ -146,17 +146,21 @@ runForeign k = handle @Foreign k with
 
 body : (ω u : Unit) -> {Foreign} UInt64
 body u =
-  -- Шаблон стоит локальным: `mkstemp` переписывает его на месте.
+  -- Шаблон стоит локальным: `mkstemp` пишет в него настоящий путь, и путь
+  -- приезжает ответом.
   let template : Array 24 UInt8 = "/tmp/adamas-curl-XXXXXX"
-  let made : Int32 = makeLocal template
-  let wrote : Written = writeLocal template payload
-  let url : Array 64 UInt8 = arrayNew 64 blank
-  let printed : Int32 = localUrl url room scheme template
+  let made : (Int32, Array 24 UInt8) = makeLocal template
+  let path : Array 24 UInt8 = made._2
+  let wrote : Written = writeLocal path payload
+  let blankUrl : Array 64 UInt8 = arrayNew 64 blank
+  let addressing : (Int32, Array 64 UInt8) = localUrl blankUrl room scheme path
+  let printed : Int32 = addressing._1
+  let url : Array 64 UInt8 = addressing._2
   let sink : Array 64 UInt8 = arrayNew 64 blank
   let cell : Array 1 UInt64 = arrayNew 1 nowhere
   let stub : Array 1 Int32 = arrayNew 1 unmeasured
   let got : Fetched = intoBuffer sink url stub cell
-  let size : UInt64 = downloaded cell
+  let size : UInt64 = downloaded got
   let matched : Int32 = sameBytes sink payload payloadLength
   -- Тот же путь по заведомо отсутствующему файлу.
   let missing : Array 31 UInt8 = "file:///adamas-no-such-file-42"
@@ -164,7 +168,7 @@ body u =
   let denied : Fetched = intoBuffer absent missing stub cell
   -- У отказавшего переноса тела нет вовсе: писателя libcurl не позвала ни разу.
   let head : UInt8 = arrayIndex absent 0
-  let swept : Int32 = removeLocal template
+  let swept : Int32 = removeLocal path
   let addressed : UInt64 = pick (eqInt32 printed printedLength) 1 0
   let fetched : UInt64 = pick (eqInt32 (statusOf got) curlOk) 1 0
   let counted : UInt64 = pick (eqUInt64 size payloadLength) 1 0

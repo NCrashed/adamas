@@ -135,7 +135,7 @@ claimWriter u =
 writing :
   Claimed -> (ω sink : Array n UInt8) -> (ω url : Array m UInt8) ->
   (ω stub : Array 1 Int32) -> (ω cell : Array 1 UInt64) -> {Foreign} Fetched
-writing Crowded sink url stub cell = Code slotsGone
+writing Crowded sink url stub cell = Code slotsGone 0
 writing (Took slot) sink url stub cell =
   let address : CPtr = memset sink 0 0
   let 1 held : Writer = Registered sink slot

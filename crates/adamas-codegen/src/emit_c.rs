@@ -1986,7 +1986,7 @@ impl Emitter<'_> {
                 lane: *lane,
             },
             Expr::SimdLane { lane, .. } => Repr::Flat(*lane),
-            Expr::SimdStore { .. } => Repr::Array(Elems::Flat),
+            Expr::SimdStore { .. } | Expr::Unshared { .. } => Repr::Array(Elems::Flat),
             Expr::RegionNew
             | Expr::SharedNew
             | Expr::RegionAlloc { .. }
@@ -2131,6 +2131,7 @@ impl Emitter<'_> {
                 closure,
             } => self.userdata(*constructor, closure, depth),
             Expr::ArrayData { array } => self.lending(array, depth),
+            Expr::Unshared { array } => self.unshared(array, depth),
             Expr::Closure { function, captured } => self.closure(*function, captured, depth),
             Expr::Handle {
                 handler,
@@ -3369,6 +3370,20 @@ impl Emitter<'_> {
         let _ = writeln!(
             self.out,
             "{pad}uint64_t {name} = (uint64_t)(uintptr_t)adamas_array_data({array});"
+        );
+        name
+    }
+
+    /// Уникальный массив перед займом на запись (§5.3, вопрос 186): тот же
+    /// блок, если он уникален, иначе копия - тем же `adamas_array_writable`,
+    /// каким пишет `arraySet`.
+    fn unshared(&mut self, array: &Expr, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let array = self.value(array, depth);
+        let name = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_value {name} = adamas_array_writable({array}, adamas_release_value);"
         );
         name
     }

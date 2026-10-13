@@ -47,7 +47,7 @@ extern "C" fn fclose : CPtr -> Int32
 -- то, что прочтёт чужая сторона (тот же приём, что у `compress2`).
 extern "C" fn ftruncate : Int64 -> Int64 -> Int32
 extern "C" fn pwrite : Int64 -> Array n UInt8 -> UInt64 -> Int64 -> Int64
-extern "C" fn pread : Int64 -> Array n UInt8 -> UInt64 -> Int64 -> Int64
+extern "C" fn pread : Int64 -> (1 buf : Array n UInt8) -> UInt64 -> Int64 -> (Int64, Array n UInt8)
 
 -- Право писать и читать байты `[lo, hi)` файла `f`. Дескриптор и границы едут
 -- значением, индексы - их копия на уровне типов.
@@ -73,8 +73,8 @@ readAll : (1 s : Span f lo hi) -> {Foreign} { _1 : Span f lo hi, ω _2 : Array (
 readAll (MkSpan fd a b) =
   let zero : UInt8 = 0
   let buffer : Array (subUInt64 b a) UInt8 = arrayNew (subUInt64 b a) zero
-  let _got : Int64 = pread fd buffer (subUInt64 b a) (uint64ToInt64 a)
-  (MkSpan fd a b, buffer)
+  let got : (Int64, Array (subUInt64 b a) UInt8) = pread fd buffer (subUInt64 b a) (uint64ToInt64 a)
+  (MkSpan fd a b, got._2)
 
 -- Интервал целиком возвращается владельцу файла, и права на байты кончаются.
 release : (1 s : Span f lo hi) -> Unit

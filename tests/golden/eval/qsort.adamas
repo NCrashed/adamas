@@ -44,7 +44,7 @@ effect Foreign
 extern "C" fn memcmp : CPtr -> CPtr -> UInt64 -> Int32
 
 -- Четвёртый аргумент - колбэк: написан функциональным типом, а едет словом.
-extern "C" fn qsort : Array n UInt64 -> UInt64 -> UInt64 -> (CPtr -> CPtr -> {Foreign} Int32) -> Unit
+extern "C" fn qsort : (1 base : Array n UInt64) -> UInt64 -> UInt64 -> (CPtr -> CPtr -> {Foreign} Int32) -> Array n UInt64
 
 -- Компаратор: адреса двух ячеек, восемь байт по каждому.
 byWord : CPtr -> CPtr -> {Foreign} Int32
@@ -81,11 +81,11 @@ body u =
   let third : Array 4 UInt64 = arraySet second 2 four
   let xs : Array 4 UInt64 = arraySet third 3 two
   -- Четыре ячейки по восемь байт; последним - адрес нашего `byWord`.
-  let sorted : Unit = qsort xs 4 8 byWord
-  let a : UInt64 = arrayIndex xs 0
-  let b : UInt64 = arrayIndex xs 1
-  let c : UInt64 = arrayIndex xs 2
-  let d : UInt64 = arrayIndex xs 3
+  let sorted : Array 4 UInt64 = qsort xs 4 8 byWord
+  let a : UInt64 = arrayIndex sorted 0
+  let b : UInt64 = arrayIndex sorted 1
+  let c : UInt64 = arrayIndex sorted 2
+  let d : UInt64 = arrayIndex sorted 3
   addUInt64 (mulUInt64 a 1000)
     (addUInt64 (mulUInt64 b 100) (addUInt64 (mulUInt64 c 10) d))
 

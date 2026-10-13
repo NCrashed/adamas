@@ -1,0 +1,28 @@
+-- Чужая запись не видна через другое имя массива (§5.3, §10 вопрос 186,
+-- решение 2026-10-11).
+--
+-- `kept` - второе имя того же массива, что `out`. Прежде `swab src out 8`
+-- писал в `out` на месте, и `kept` читал записанное: `0` у всех трёх
+-- вычислителей вместо `7`, то есть значение, которое язык считает
+-- неизменяемым, менялось. Теперь буфер на запись объявлен `1`, вызов отдаёт его
+-- ответом, а разделённый массив перед займом копируется: `kept` остаётся `7`,
+-- записанное `0` приезжает в `written`. Ответ - `7 * 10 + 0`.
+
+effect Foreign
+
+extern "C" fn swab : Array n UInt8 -> (1 out : Array m UInt64) -> Int64 -> Array m UInt64
+
+runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign k = handle @Foreign k with
+  return v -> v
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let src : Array 8 UInt8 = arrayNew 8 0
+  let out : Array 1 UInt64 = arrayNew 1 7
+  let kept : Array 1 UInt64 = out
+  let written : Array 1 UInt64 = swab src out 8
+  addUInt64 (mulUInt64 (arrayIndex kept 0) 10) (arrayIndex written 0)
+
+main : UInt64
+main = runForeign body

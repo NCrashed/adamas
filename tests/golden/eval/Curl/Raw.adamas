@@ -49,8 +49,9 @@ extern "C" fn curl_easy_setopt : CPtr -> UInt64 -> ... -> UInt64 -> Int32
 extern "C" fn curl_easy_perform : CPtr -> Int32
 
 -- `CURLcode curl_easy_getinfo(CURL *curl, CURLINFO info, ...)`. Вариадический
--- хвост здесь **буфер**, а не слово: чужая сторона пишет в нашу ячейку.
-extern "C" fn curl_easy_getinfo : CPtr -> UInt64 -> ... -> Array n UInt64 -> Int32
+-- хвост здесь **буфер**, а не слово: чужая сторона пишет в нашу ячейку, поэтому
+-- ячейка `1` и едет ответом рядом с кодом (§5.3, вопрос 186).
+extern "C" fn curl_easy_getinfo : CPtr -> UInt64 -> ... -> (1 value : Array n UInt64) -> (Int32, Array n UInt64)
 
 -- `void curl_easy_cleanup(CURL *curl)`.
 --
@@ -67,7 +68,7 @@ extern "C" fn curl_easy_strerror : UInt64 -> CPtr
 --                           int *outlength)`. Длина 0 значит «до завершающего
 -- нуля»; память ответа принадлежит libcurl и отдаётся `curl_free`.
 extern "C" fn curl_easy_unescape
-  : CPtr -> Array n UInt8 -> UInt64 -> Array m Int32 -> CPtr
+  : CPtr -> Array n UInt8 -> UInt64 -> (1 outlength : Array m Int32) -> (CPtr, Array m Int32)
 
 -- `void curl_free(void *p)`. Кратность написана по той же причине, что у
 -- `curl_easy_cleanup`.

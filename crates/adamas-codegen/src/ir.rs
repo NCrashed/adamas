@@ -1128,6 +1128,14 @@ pub enum Expr {
         /// Какой массив одолжен.
         array: Box<Expr>,
     },
+    /// Тот же массив, но уникальный: забирает владением и отдаёт владением
+    /// (`adamas_array_writable`), копируя разделённый. Ставится перед займом
+    /// буфера, который чужая сторона пишет (§5.3, §10 вопрос 186): копию
+    /// прочие имена массива не видят, и запись едет ответом вызова.
+    Unshared {
+        /// Какой массив.
+        array: Box<Expr>,
+    },
     /// Пустой регион (§3.6): одна область, один блок кучи Perceus.
     RegionNew,
     /// Пустая **разделяемая** область (§3.6 «Thread-safe стратегии», §5.2).
@@ -1708,7 +1716,7 @@ impl Expr {
             Self::Closing { captured, body, .. } => captured.iter().chain([&**body]).collect(),
             Self::Mask { computation, .. } => vec![computation],
             Self::ArrayNew { count, initial, .. } => vec![count, initial],
-            Self::ArrayData { array } => vec![array],
+            Self::ArrayData { array } | Self::Unshared { array } => vec![array],
             Self::ArraySet {
                 array, at, value, ..
             }

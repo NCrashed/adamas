@@ -27,13 +27,18 @@ effect Foreign
 
 -- `int compress2(Bytef *dest, uLongf *destLen, const Bytef *source,
 --                uLong sourceLen, int level)`
+--
+-- `dest` и `destLen` библиотека пишет, поэтому они `1` и едут ответом рядом
+-- со статусом (§5.3, вопрос 186).
 extern "C" fn compress2
-  : Array n UInt8 -> Array m UInt64 -> Array k UInt8 -> UInt64 -> UInt64 -> Int32
+  : (1 dest : Array n UInt8) -> (1 destLen : Array m UInt64) -> Array k UInt8 -> UInt64 -> UInt64
+  -> (Int32, Array n UInt8, Array m UInt64)
 
 -- `int uncompress(Bytef *dest, uLongf *destLen, const Bytef *source,
 --                 uLong sourceLen)`
 extern "C" fn uncompress
-  : Array n UInt8 -> Array m UInt64 -> Array k UInt8 -> UInt64 -> Int32
+  : (1 dest : Array n UInt8) -> (1 destLen : Array m UInt64) -> Array k UInt8 -> UInt64
+  -> (Int32, Array n UInt8, Array m UInt64)
 
 -- `uLong crc32(uLong crc, const Bytef *buf, uInt len)`
 extern "C" fn crc32 : UInt64 -> Array n UInt8 -> UInt64 -> UInt64
@@ -45,7 +50,7 @@ extern "C" fn gzopen : Array n UInt8 -> Array m UInt8 -> CPtr
 extern "C" fn gzwrite : CPtr -> Array n UInt8 -> UInt64 -> Int32
 
 -- `int gzread(gzFile file, voidp buf, unsigned len)`
-extern "C" fn gzread : CPtr -> Array n UInt8 -> UInt64 -> Int32
+extern "C" fn gzread : CPtr -> (1 buf : Array n UInt8) -> UInt64 -> (Int32, Array n UInt8)
 
 -- `int gzclose(gzFile file)`
 --

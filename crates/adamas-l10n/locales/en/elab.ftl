@@ -206,6 +206,7 @@ decl-93 = fixity
 decl-94 = import
 decl-95 = a functor
 decl-96 = a functor member is lifted under its parameters, and a label does not carry them
+decl-97 = a buffer the foreign side writes (`1`) comes back from the call: the declared result is the array itself when the symbol is `void`, or a tuple of the C answer and the written arrays in order, each of the same type as its binder
 expr-1 = the branch is written twice
 expr-2 = the effect has no such operation
 expr-3 = the branch is not written, and a handler must cover all operations

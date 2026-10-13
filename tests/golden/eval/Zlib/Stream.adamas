@@ -81,16 +81,18 @@ writeGz path mode bytes count =
   let 1 file : GzFile = Opened stream
   Bytes (gzwrite stream bytes count)
 
--- Прочитать не более `room` байт. Ответ - число прочитанных; **-1**, если файла
+-- Прочитать не более `room` байт. Ответ - число прочитанных и сам буфер
+-- (`gzread` его пишет, §5.3); число **-1**, если файла
 -- нет: `gzread` по нулевому хендлу отвечает именно так, и это единственный
 -- способ узнать про открытие, не отдавая указатель наружу.
 readGz :
   (ω path : Array n UInt8) -> (ω mode : Array m UInt8) ->
-  (ω bytes : Array k UInt8) -> UInt64 -> {Foreign} Transferred
+  (ω bytes : Array k UInt8) -> UInt64 -> {Foreign} (Transferred, Array k UInt8)
 readGz path mode bytes room =
   let stream : CPtr = gzopen path mode
   let 1 file : GzFile = Opened stream
-  Bytes (gzread stream bytes room)
+  let got : (Int32, Array k UInt8) = gzread stream bytes room
+  (Bytes got._1, got._2)
 
 -- `gzread` по несуществующему файлу. Названо здесь, чтобы программа не писала
 -- это число сама.

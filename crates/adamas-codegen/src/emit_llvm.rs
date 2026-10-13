@@ -764,6 +764,7 @@ fn arrayed(program: &Program) -> bool {
                     | Expr::ArraySet { .. }
                     | Expr::ArrayIndex { .. }
                     | Expr::ArrayData { .. }
+                    | Expr::Unshared { .. }
                     | Expr::SimdLoad { .. }
                     | Expr::SimdStore { .. }
             );
@@ -2851,7 +2852,7 @@ impl<'a> Builder<'a> {
                 lane: *lane,
             },
             Expr::SimdLane { lane, .. } => Repr::Flat(*lane),
-            Expr::SimdStore { .. } => Repr::Array(Elems::Flat),
+            Expr::SimdStore { .. } | Expr::Unshared { .. } => Repr::Array(Elems::Flat),
             Expr::Layout { .. } => Repr::Layout,
             Expr::LayoutField { .. } => Repr::Flat(PrimTy::UInt32),
             // Плотный агрегат (§4.11) и регион (§3.6) - те же строки, что у
@@ -3116,6 +3117,7 @@ impl<'a> Builder<'a> {
                 closure,
             } => self.userdata(*constructor, closure),
             Expr::ArrayData { array } => self.lending(array),
+            Expr::Unshared { array } => self.unshared(array),
             // Приставки сняты `prologue` выше, и досюда узел не
             // доезжает. Ветвь стоит ради исчерпывающего разбора: пропади она,
             // новый узел-приставка ушёл бы в тихий отказ вместо ошибки сборки.
@@ -4810,6 +4812,21 @@ impl<'a> Builder<'a> {
         );
         let name = self.temp();
         self.instruction(&format!("{name} = ptrtoint ptr {data} to i64"), self.here());
+        Ok(name)
+    }
+
+    /// Уникальный массив перед займом на запись (§5.3, вопрос 186): тот же
+    /// блок, если он уникален, иначе копия - тем же `adamas_array_writable`,
+    /// каким пишет `arraySet`.
+    fn unshared(&mut self, array: &Expr) -> Result<String, LlvmError> {
+        let source = self.value(array)?;
+        let name = self.temp();
+        self.instruction(
+            &format!(
+                "{name} = call ptr @adamas_array_writable(ptr {source}, ptr @{RELEASE_SYMBOL})"
+            ),
+            self.here(),
+        );
         Ok(name)
     }
 

@@ -27,7 +27,7 @@ import Std.Except (Except, throw)
 effect Foreign
 
 extern "C" fn write : Int64 -> Array n UInt8 -> UInt64 -> Int64
-extern "C" fn read : Int64 -> Array n UInt8 -> UInt64 -> Int64
+extern "C" fn read : Int64 -> (1 buf : Array n UInt8) -> UInt64 -> (Int64, Array n UInt8)
 extern "C" fn open : Array n UInt8 -> Int64 -> ... -> UInt64 -> Int32
 extern "C" fn close : Int64 -> Int32
 extern "C" fn exit : Int32 -> Unit
@@ -167,12 +167,13 @@ lineFrom : Int64 -> Bytes -> Bool -> {Foreign} Option String
 lineFrom fd seen any =
   let zero : UInt8 = 0
   let cell : Array 1 UInt8 = arrayNew 1 zero
-  let got : Int64 = read fd cell 1
+  let taken : (Int64, Array 1 UInt8) = read fd cell 1
+  let got : Int64 = taken._1
   case decide (leInt64 got 0) of
     Yes _end -> if any then Some (gathered seen) else None
     No _more ->
       let first : UInt64 = 0
-      let b : UInt8 = arrayIndex cell first
+      let b : UInt8 = arrayIndex taken._2 first
       case decide (eqUInt8 b 10) of
         Yes _newline -> Some (gathered seen)
         No _other -> lineFrom fd (More b seen) True

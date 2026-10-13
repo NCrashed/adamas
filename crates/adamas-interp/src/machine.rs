@@ -623,6 +623,8 @@ impl<'a> Machine<'a> {
         // поэтому слот заполняется после обхода.
         let mut userdata: Option<u64> = None;
         let mut slots: Vec<usize> = Vec::new();
+        // Копии буферов на запись - по порядку их связываний: они и есть ответ.
+        let mut returned: Vec<Rc<Value>> = Vec::new();
         for (at, argument) in arguments.into_iter().enumerate() {
             // Слот `userdata`: постулат, чьё значение подставляет не машина, а
             // регистрация. То же соглашение об имени, каким его читает
@@ -674,22 +676,9 @@ impl<'a> Machine<'a> {
                     continue;
                 }
                 Cross::Buffer(cell) => {
-                    let cell = *cell;
-                    let array = self.forced(argument)?;
-                    let Value::Neutral(Head::Block(block), empty) = &*array else {
-                        return Err(it.unlendable());
-                    };
-                    if !empty.is_empty() {
-                        return Err(it.unlendable());
-                    }
-                    if block.ty() != cell {
-                        return Err(it.mismatched(at, cell, block.ty()));
-                    }
-                    let address = block
-                        .lend(|payload| payload as usize as u64)
-                        .ok_or_else(|| it.unlendable())?;
+                    let (address, held) = self.lent(&it, at, *cell, argument, &mut returned)?;
                     bits.push(address);
-                    forced.push(Rc::clone(&array));
+                    forced.push(held);
                     continue;
                 }
             };
@@ -720,12 +709,62 @@ impl<'a> Machine<'a> {
         }
         let answer = answer?;
         drop(forced);
+        if !returned.is_empty() {
+            return Ok(Some(Step::Return(written_answer(
+                it.result.zip(answer),
+                returned,
+            ))));
+        }
         let Some((ty, word)) = it.result.zip(answer) else {
             return Ok(Some(Step::Return(self.unit()?)));
         };
         Ok(Some(Step::Return(Rc::new(Value::Prim(Prim::literal(
             ty, word,
         ))))))
+    }
+
+    /// Заём буфера чужой стороне: адрес нагрузки и значение, которое держит
+    /// блок живым до конца вызова (§5.3, §4.11).
+    ///
+    /// Буфер на запись одалживается **копией** (вопрос 186): прочие имена
+    /// массива записи не видят, а копия едет ответом и ложится в `returned`.
+    /// Машина копирует всегда - счёта ссылок по Perceus у неё нет. Ответ от
+    /// этого тот же, что у понижений, а адрес - нет: понижения пишут
+    /// уникальный массив на месте, и сверка адресов поэтому вне обещания.
+    ///
+    /// # Errors
+    ///
+    /// Массив не плоский блок либо ячейка не того типа.
+    fn lent(
+        &self,
+        it: &Foreign,
+        at: usize,
+        cell: adamas_core::prim::PrimTy,
+        argument: Rc<Value>,
+        returned: &mut Vec<Rc<Value>>,
+    ) -> Result<(u64, Rc<Value>), RunError> {
+        let array = self.forced(argument)?;
+        let Value::Neutral(Head::Block(block), empty) = &*array else {
+            return Err(it.unlendable());
+        };
+        if !empty.is_empty() {
+            return Err(it.unlendable());
+        }
+        if block.ty() != cell {
+            return Err(it.mismatched(at, cell, block.ty()));
+        }
+        let (held, block) = if it.written.contains(&at) {
+            let copy = block.copied();
+            let held = Rc::new(Value::Neutral(Head::Block(Rc::clone(&copy)), Vec::new()));
+            returned.push(Rc::clone(&held));
+            (held, copy)
+        } else {
+            (Rc::clone(&array), Rc::clone(block))
+        };
+        let address = block
+            .lend(|payload| payload as usize as u64)
+            .ok_or_else(|| it.unlendable())?;
+        Ok((address, held))
     }
 
     /// Два символа рантайма, которыми живёт уровень 3 (§5.3).
@@ -1293,4 +1332,28 @@ fn trapped(value: Rc<Value>) -> Result<Step, RunError> {
         Some(message) => Err(RunError::Trap { message }),
         None => Ok(Step::Return(value)),
     }
+}
+
+/// Ответ чужого вызова с записанными буферами (§5.3, §10 вопрос 186): сам
+/// массив при `void` и одном буфере, иначе кортеж - ответ C, затем массивы по
+/// порядку их связываний.
+fn written_answer(
+    answer: Option<(adamas_core::prim::PrimTy, u64)>,
+    mut arrays: Vec<Rc<Value>>,
+) -> Rc<Value> {
+    let mut values: Vec<Rc<Value>> = answer
+        .map(|(ty, word)| Rc::new(Value::Prim(Prim::literal(ty, word))))
+        .into_iter()
+        .collect();
+    if values.is_empty() && arrays.len() == 1 {
+        return arrays.remove(0);
+    }
+    values.extend(arrays);
+    Rc::new(Value::Object(
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(at, value)| (Name::from(format!("_{}", at + 1).as_str()), value))
+            .collect(),
+    ))
 }

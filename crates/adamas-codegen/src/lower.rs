@@ -3168,6 +3168,14 @@ impl<'a> Lowerer<'a> {
         // обхода, а не по ходу.
         let mut pack: Option<LocalId> = None;
         let mut slots: Vec<usize> = Vec::new();
+        // Буферы, которые чужая сторона пишет (§5.3, вопрос 186): их связывания
+        // по порядку - они едут ответом вызова.
+        let written = self
+            .signature
+            .foreign(name)
+            .map(|it| it.written.clone())
+            .unwrap_or_default();
+        let mut writes: Vec<LocalId> = Vec::new();
         for (position, carried) in parameters.iter().enumerate() {
             let Some(argument) = arguments.get(position) else {
                 return Err(LowerError::Missing {
@@ -3205,6 +3213,16 @@ impl<'a> Lowerer<'a> {
             };
             let value = self.given(scope, argument, repr, at)?;
             let local = scope.fresh();
+            // Буфер на запись одалживается уникальным: разделённый копируется, и
+            // прочие имена массива записи не видят (вопрос 186).
+            let value = if written.contains(&position) {
+                writes.push(local);
+                Expr::Unshared {
+                    array: Box::new(value),
+                }
+            } else {
+                value
+            };
             prelude.push((
                 Binding {
                     name: format!("чужой аргумент #{position}"),
@@ -3225,33 +3243,15 @@ impl<'a> Lowerer<'a> {
             }
         }
         let result = self.foreigns[function.0].result;
-        // Среда и место под неё - парой, и парой же проверяются. Одна половина
-        // без другой есть либо трамплин без среды (вызов в никуда), либо слово
-        // без значения (постулат без тела).
-        match (pack, slots.is_empty()) {
-            (Some(local), false) => {
-                for slot in slots {
-                    given[slot] = Expr::Userdata(local);
-                }
-            }
-            (Some(_), true) => {
-                return Err(LowerError::Foreign {
-                    name: name.to_string(),
-                    why: text!("lower-44"),
-                });
-            }
-            (None, false) => {
-                return Err(LowerError::Foreign {
-                    name: name.to_string(),
-                    why: text!("lower-45"),
-                });
-            }
-            (None, true) => {}
-        }
+        paired(name, pack, slots, &mut given)?;
         let mut value = Expr::Foreign {
             function,
             arguments: given,
         };
+        let mut repr = result.repr();
+        if !writes.is_empty() {
+            (value, repr) = self.written_answer(scope, value, result, &writes)?;
+        }
         // Единица-аргумент остаётся связыванием без употребления: ссылку её
         // отдаст вставка RC обычным правилом, а чужая сторона о ней не узнает.
         for (binding, bound) in prelude.into_iter().rev() {
@@ -3261,7 +3261,65 @@ impl<'a> Lowerer<'a> {
                 body: Box::new(value),
             };
         }
-        Ok((value, result.repr()))
+        Ok((value, repr))
+    }
+
+    /// Ответ чужого вызова с записанными буферами (§5.3, §10 вопрос 186): сам
+    /// массив при `void` и одном буфере, иначе кортеж - ответ C словом, затем
+    /// массивы по порядку их связываний. Тот же ответ собирает машина
+    /// (`adamas-interp`, `written_answer`).
+    fn written_answer(
+        &mut self,
+        scope: &mut Scope,
+        call: Expr,
+        result: ForeignResult,
+        writes: &[LocalId],
+    ) -> Result<(Expr, Repr), LowerError> {
+        let answer = scope.fresh();
+        let word = match result {
+            ForeignResult::Flat(ty) => Some(ty),
+            ForeignResult::Unit(_) => None,
+        };
+        let array = Repr::Array(Elems::Flat);
+        let (body, repr) = if let (None, [only]) = (word, writes) {
+            (Expr::Local(*only), array)
+        } else {
+            let mut labels = Vec::new();
+            let mut facts = Vec::new();
+            let mut values = Vec::new();
+            if let Some(ty) = word {
+                facts.push(Fact::declared(Mult::One).shaped(Repr::Flat(ty)));
+                values.push(Expr::Local(answer));
+            }
+            for local in writes {
+                facts.push(Fact::declared(Mult::One).shaped(array));
+                values.push(Expr::Local(*local));
+            }
+            for at in 0..values.len() {
+                labels.push(format!("_{}", at + 1));
+            }
+            let tag = self.shape(&labels, &facts)?;
+            (
+                Expr::Construct {
+                    constructor: tag,
+                    reuse: None,
+                    arguments: values,
+                },
+                Repr::Record(tag),
+            )
+        };
+        Ok((
+            Expr::Bind {
+                binding: Binding {
+                    name: "ответ чужого вызова".to_owned(),
+                    local: answer,
+                    fact: Fact::present(Mult::Many).shaped(result.repr()),
+                },
+                value: Box::new(call),
+                body: Box::new(body),
+            },
+            repr,
+        ))
     }
 
     /// Колбэк в аргументе чужого вызова: имя экспорта либо замыкание (§5.3).
@@ -7696,5 +7754,33 @@ fn escaping(term: &Term, depth: u32, out: &mut BTreeSet<u32>) {
         }
         Term::Project(record, _) => escaping(record, depth, out),
         _ => {}
+    }
+}
+
+/// Среда колбэка уровня 2 и места под неё (§5.3) - парой, и парой же
+/// проверяются. Одна половина без другой есть либо трамплин без среды (вызов в
+/// никуда), либо слово без значения (постулат без тела).
+fn paired(
+    name: &Name,
+    pack: Option<LocalId>,
+    slots: Vec<usize>,
+    given: &mut [Expr],
+) -> Result<(), LowerError> {
+    match (pack, slots.is_empty()) {
+        (Some(local), false) => {
+            for slot in slots {
+                given[slot] = Expr::Userdata(local);
+            }
+            Ok(())
+        }
+        (Some(_), true) => Err(LowerError::Foreign {
+            name: name.to_string(),
+            why: text!("lower-44"),
+        }),
+        (None, false) => Err(LowerError::Foreign {
+            name: name.to_string(),
+            why: text!("lower-45"),
+        }),
+        (None, true) => Ok(()),
     }
 }

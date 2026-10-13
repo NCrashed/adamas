@@ -152,7 +152,7 @@ resource Text where
 -- `Int32`» у LLVM (трек D волны 2). Деструктор §3.3 дробит тело точкой
 -- приостановки, а обрыв через плоский ответ не проходит.
 data Fetched where
-  Code : Int32 -> Fetched
+  Code : Int32 -> UInt64 -> Fetched
 
 -- Скачать по адресу из `url` писателем `writer` в приёмник `sink` и записать
 -- длину тела в `cell`.
@@ -172,23 +172,23 @@ fetch :
 fetch url stub writer sink cell =
   let curl : CPtr = curl_easy_init
   let 1 easy : Easy = Opened curl
-  let copied : CPtr = curl_easy_unescape curl url 0 stub
+  let copied : CPtr = (curl_easy_unescape curl url 0 stub)._1
   let 1 text : Text = Held copied
   let addressed : Int32 = curl_easy_setopt curl optUrl copied
   let patient : Int32 = curl_easy_setopt curl optTimeout patience
   let writes : Int32 = curl_easy_setopt curl optWriteFunction writer
   let sinking : Int32 = curl_easy_setopt curl optSink sink
   let ran : Int32 = curl_easy_perform curl
-  let sized : Int32 = curl_easy_getinfo curl infoDownloaded cell
-  Code ran
+  let info : (Int32, Array 1 UInt64) = curl_easy_getinfo curl infoDownloaded cell
+  Code ran (arrayIndex info._2 0)
 
 -- Код переноса из-под бокса.
 statusOf : Fetched -> Int32
-statusOf (Code status) = status
+statusOf (Code status _) = status
 
 -- Длина тела, написанная чужой стороной в нашу ячейку, именем, а не номером.
-downloaded : (ω cell : Array 1 UInt64) -> UInt64
-downloaded cell = arrayIndex cell 0
+downloaded : Fetched -> UInt64
+downloaded (Code _ size) = size
 
 -- Сообщение кода ошибки: чужая строка, и указатель на неё у каждого кода свой.
 describe : UInt64 -> {Foreign} CPtr

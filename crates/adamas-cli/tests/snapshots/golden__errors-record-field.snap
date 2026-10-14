@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: record-field.adamas:9:10: несовпадение типов: ожидался `Bool`, получен `UInt64`
+  y = {b = one, a = one}
+           ^^^

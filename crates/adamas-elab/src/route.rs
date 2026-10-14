@@ -184,6 +184,16 @@ pub(crate) fn narrow(cases: Cases<'_>, expr: &Expr, route: &[Frame]) -> Span {
             (ExprKind::App(_, argument), Frame::Argument) => (&**argument, rest),
             (ExprKind::Arrow(domain, _), Frame::Domain) => (&**domain, rest),
             (ExprKind::Arrow(_, codomain), Frame::Codomain) => (&**codomain, rest),
+            // Поле записи и компонента кортежа (кортеж - запись `_1 … _n`, §4.2):
+            // кадр несёт написанную позицию (§10 вопрос 251).
+            (ExprKind::Record(fields), Frame::Field(at)) => match fields.get(*at as usize) {
+                Some((_, value)) => (value, rest),
+                None => return expr.span,
+            },
+            (ExprKind::Tuple(items), Frame::Field(at)) => match items.get(*at as usize) {
+                Some(item) => (item, rest),
+                None => return expr.span,
+            },
             (ExprKind::Pi { binders, codomain }, _) => {
                 return pi(cases, binders, codomain, route, expr.span);
             }

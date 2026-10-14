@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: tuple-component.adamas:7:9: несовпадение типов: ожидался `Bool`, получен `Nat`
+  x = (1, 2)
+          ^

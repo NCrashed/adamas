@@ -714,6 +714,10 @@ pub enum Frame {
     MemberBody(u32),
     /// Тип конструктора по его номеру в объявлении.
     Constructor(u32),
+    /// Поле значения записи по его **написанной** позиции; компонента кортежа -
+    /// то же (§4.2, §10 вопрос 251). Безымянный: печать пути его пропускает, а
+    /// маршрут по нему спускается в поле.
+    Field(u32),
 }
 
 impl fmt::Display for Frame {
@@ -735,6 +739,7 @@ impl fmt::Display for Frame {
             Self::MemberType(index) => tr!("frame-member-type", index = index),
             Self::MemberBody(index) => tr!("frame-member-body", index = index),
             Self::Constructor(index) => tr!("frame-constructor", index = index),
+            Self::Field(index) => tr!("frame-field", index = index),
         })
     }
 }

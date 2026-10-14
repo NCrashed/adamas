@@ -86,6 +86,7 @@ frame-branch = branch #{ $index }
 frame-member-type = the type of group member #{ $index }
 frame-member-body = the body of group member #{ $index }
 frame-constructor = constructor #{ $index }
+frame-field = field #{ $index }
 alloc-through = calls `{ $callee }`, which{" "}
 alloc-construct = builds a value with constructor `{ $name }` - that is the Perceus heap. There are three ways out: a linear or unique input, where reuse is guaranteed; a region `{"{"}Alloc r{"}"}`; not constructing. The compiler has none of the first two yet, so the third remains
 alloc-record = builds a record - that is the Perceus heap. There are three ways out: a linear or unique input, where reuse is guaranteed; a region `{"{"}Alloc r{"}"}`; not constructing. The compiler has none of the first two yet, so the third remains

@@ -3293,7 +3293,11 @@ fn check_object(
     let mut usage = Usage::zero(ctx.size());
     let mut earlier = Vec::with_capacity(written.len());
     for (index, field) in telescope.fields().iter().enumerate() {
-        let Some((_, value)) = written.iter().find(|(name, _)| *name == field.name) else {
+        let Some((at, (_, value))) = written
+            .iter()
+            .enumerate()
+            .find(|(_, (name, _))| *name == field.name)
+        else {
             return Err(refuse(
                 ctx,
                 metas,
@@ -3312,10 +3316,13 @@ fn check_object(
             .map(|at| Mult::Var(crate::mult::MultVar(at)))
             .collect();
         let ty = telescope.instantiated(index, &earlier, &[], &[], &opened);
-        let position = u32::try_from(index).unwrap_or(u32::MAX);
+        // Кадр несёт **написанную** позицию поля, а не номер в телескопе: по
+        // ней маршрут находит поле в тексте (§10 вопрос 251), а порядок
+        // написания с порядком типа совпадать не обязан.
+        let position = u32::try_from(at).unwrap_or(u32::MAX);
         let found = framed(
             check(ctx, metas, judgement_under(field.mult, sigma), value, &ty),
-            Frame::MemberBody(position),
+            Frame::Field(position),
         )?;
         usage = usage + &found.scale(field.mult);
         earlier.push(ctx.eval(value));
@@ -3525,7 +3532,7 @@ fn infer_object(
     let mut written = Vec::with_capacity(fields.len());
     for (index, (name, value)) in fields.iter().enumerate() {
         let position = u32::try_from(index).unwrap_or(u32::MAX);
-        let (ty, found) = framed(infer(ctx, metas, sigma, value), Frame::MemberBody(position))?;
+        let (ty, found) = framed(infer(ctx, metas, sigma, value), Frame::Field(position))?;
         written.push(RecordField {
             name: Rc::clone(name),
             mult: Mult::One,

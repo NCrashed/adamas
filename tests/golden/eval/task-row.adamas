@@ -1,0 +1,73 @@
+-- Задача с рядом в типе: `Task e a` (§5.2, решение 2026-10-14).
+--
+-- `spawn : ({Async | e} a) -> Task e a` - ряд тела задачи едет в её типе
+-- row-параметром семейства (§3.2): `Task {Log} Nat`. `await` ряда не несёт:
+-- эффекты задачи производятся, пока её файбер бежит под питомником, и гасятся
+-- рядом питомника, а не ждущим - тип `await` приписывал бы ждущему то, чего он
+-- не производит.
+--
+-- След тот же, что у `task-typed`: 1 9 5 1 8 - ответ задачи приходит через
+-- `await`, брошенная задача отменяется до первого шага.
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Nat -> Unit
+
+resource Task (e : Effect) (a : Type) where
+  MkTask : Nat -> Task e a
+  cancelTask : (1 t : Task e a) -> {Log} Unit
+  cancelTask (MkTask n) = note 8
+
+effect Async where
+  suspend : Unit
+  spawn : ({Async | e} a) -> Task e a
+  await : (1 t : Task e a) -> a
+
+withNursery : ({Async, Log} Nat) -> {Log} Nat
+
+slow : {Async, Log} Nat
+slow =
+  let _a : Unit = note 9
+  let _s : Unit = suspend
+  5
+
+awaiting : {Async, Log} Nat
+awaiting =
+  let t : Task {Log} Nat = spawn slow
+  let _a : Unit = note 1
+  await t
+
+dropping : {Async, Log} Nat
+dropping =
+  let t : Task {Log} Nat = spawn slow
+  let _a : Unit = note 1
+  Zero
+
+waited : {Log} Nat
+waited = withNursery awaiting
+
+released : {Log} Nat
+released = withNursery dropping
+
+shown : List Nat
+shown = handle waited with
+  return v -> Cons v Nil
+  note n -> Cons n (resume MkUnit)
+
+lost : List Nat
+lost = handle released with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+
+append : List a -> List a -> List a
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+main : List Nat
+main = append shown lost

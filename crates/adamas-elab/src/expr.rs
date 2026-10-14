@@ -5264,12 +5264,38 @@ impl<'a> Elaborator<'a> {
     /// вхождения при разных - обычное употребление (`map once` рядом с
     /// `map double`). Общая дырка связывала их в одну, и второе вхождение
     /// отвергалось кратностью, выбранной первым (§10 вопрос 117).
+    ///
+    /// Row - тем же доводом (§10 вопрос 250): хвост, поднятый у имени, есть
+    /// аргумент **вхождения**, а не объявления. Общий связывал вхождения
+    /// `toList numbers` и `forEach shifted numbers` в одну row, и второе
+    /// отвергалось хвостом, закреплённым первым.
     fn regraded(&mut self, name: &str, term: Term) -> Term {
         let Term::Const(head, levels, args) = &term else {
             return term;
         };
+        // Только у определения с телом: его row-параметр есть поднятый хвост
+        // написанной сигнатуры (§4.1). У элиминатора (`#mask.M`, `#handle.M`)
+        // тела нет, а row-аргумент - окружающая, которую подставляет форма; по
+        // ней `mask` решает, что снимать, и свежая дырка оставила бы его без
+        // метки (замер: 20 упавших тестов, когда освежались все).
+        let regular = self
+            .signature
+            .lookup(name)
+            .is_some_and(|it| matches!(it.kind, DefinitionKind::Regular) && it.body.is_some());
+        let rows: Vec<Row<Term>> = if regular {
+            args.row_args()
+                .iter()
+                .map(|_| self.metas.fresh_row())
+                .collect()
+        } else {
+            args.row_args().to_vec()
+        };
         if args.mult_args().is_empty() {
-            return term;
+            return Term::Const(
+                Rc::clone(head),
+                Rc::clone(levels),
+                Args::new(rows, Vec::new()),
+            );
         }
         let allowed: Vec<Rc<[Mult]>> = self
             .signature
@@ -5280,11 +5306,7 @@ impl<'a> Elaborator<'a> {
             .into_iter()
             .map(|it| self.metas.fresh_mult(it))
             .collect();
-        Term::Const(
-            Rc::clone(head),
-            Rc::clone(levels),
-            Args::new(args.row_args().iter().cloned(), mults),
-        )
+        Term::Const(Rc::clone(head), Rc::clone(levels), Args::new(rows, mults))
     }
 
     /// Вставляет выводимые аргументы имени, тип которого знает ядро.

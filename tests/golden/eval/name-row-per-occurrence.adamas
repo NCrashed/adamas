@@ -1,0 +1,21 @@
+-- Хвост row - аргумент вхождения имени, а не объявления (§4.1, §10 вопрос
+-- 250, решение 2026-10-14).
+--
+-- `numbers` употреблено дважды в одном определении: первый раз поток сводит
+-- `toList`, и хвост там пуст; второй раз он идёт в `forEach shifted`, и хвосту
+-- нужно место под `Yield` функции. Элаборация держала одну инстанциацию на
+-- имя вместе с row-аргументами, и второе вхождение отвергалось хвостом,
+-- закреплённым первым: «ожидался `{Yield UInt64, Yield UInt64} Unit`, получен
+-- `{Yield UInt64} Unit`». Теперь row у каждого вхождения свои, как кратности
+-- (§10 вопрос 117).
+
+import Std.Stream (toList)
+
+numbers : {Yield UInt64} Unit
+numbers = each [1, 2]
+
+shifted : UInt64 -> {Yield UInt64} Unit
+shifted x = yield (x + 100)
+
+main : (List UInt64, List UInt64)
+main = (toList numbers, toList (forEach shifted numbers))

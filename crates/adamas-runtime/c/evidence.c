@@ -72,8 +72,27 @@ static void inherit_shared(adamas_evidence *child, const adamas_evidence *parent
         ((const adamas_header *)(const void *)parent)->flags & ADAMAS_FLAG_SHARED;
 }
 
+/* Пустой вектор - один на процесс (§10 вопрос 190). Первая форма заводит его
+ * на каждом корне, и блок кучи на пустое место был третьей аллокацией
+ * площадки хендлера. Записей у него нет, править в нём нечего: подавление и
+ * перепривязка обходят ноль записей. Счётчик его не правится вовсе - `dup` и
+ * `drop` узнают его по адресу, - поэтому он годен с любого потока. Разделяемым
+ * его не метят: базу питомника, оказавшуюся им, `adamas_evidence_owned`
+ * заменяет свежей копией, и метка ложится на неё. */
+static adamas_evidence empty_vector = {
+    .header = {.rc = 0, .tag = ADAMAS_TAG_EVIDENCE, .flags = 0},
+    .count = 0,
+};
+
 adamas_evidence *adamas_evidence_empty(void) {
-    return evidence_alloc(0);
+    return &empty_vector;
+}
+
+adamas_evidence *adamas_evidence_owned(const adamas_evidence *evidence) {
+    if (evidence == NULL || evidence == &empty_vector) {
+        return evidence_alloc(0);
+    }
+    return adamas_evidence_dup((adamas_evidence *)(uintptr_t)evidence);
 }
 
 adamas_evidence *adamas_evidence_extend(const adamas_evidence *parent, uint32_t label,
@@ -271,7 +290,7 @@ __attribute__((noinline, cold)) static int evidence_released_shared(adamas_heade
 }
 
 adamas_evidence *adamas_evidence_dup(adamas_evidence *evidence) {
-    if (evidence == NULL) {
+    if (evidence == NULL || evidence == &empty_vector) {
         return NULL;
     }
     adamas_header *header = adamas_header_of(evidence);
@@ -284,7 +303,7 @@ adamas_evidence *adamas_evidence_dup(adamas_evidence *evidence) {
 }
 
 void adamas_evidence_drop(adamas_evidence *evidence) {
-    if (evidence == NULL) {
+    if (evidence == NULL || evidence == &empty_vector) {
         return;
     }
     adamas_header *header = adamas_header_of(evidence);

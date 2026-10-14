@@ -220,8 +220,8 @@ fn the_destructor_runs_on_the_exceptional_path() {
         "деструктор на обрыве не отработал: {empty} против {full}"
     );
     assert_eq!(
-        empty, 15,
-        "пустой деструктор на обрыве стоит не пятнадцать блоков"
+        empty, 14,
+        "пустой деструктор на обрыве стоит не четырнадцать блоков"
     );
 }
 
@@ -267,8 +267,8 @@ fn the_normal_exit_of_the_second_form_closes_its_frame() {
         "деструктор на нормальном выходе не отработал: {empty} против {full}"
     );
     assert_eq!(
-        empty, 10,
-        "пустой деструктор второй формы стоит не десять блоков"
+        empty, 9,
+        "пустой деструктор второй формы стоит не девять блоков"
     );
 }
 
@@ -325,10 +325,10 @@ fn the_inner_resource_closes_first_when_the_body_aborts() {
     let tag_last = allocated("abortive-tag-last", &lifo("Tag"));
     let note_last = allocated("abortive-note-last", &lifo("Note"));
     assert_eq!(
-        tag_last, 22,
+        tag_last, 21,
         "`Tag` связан последним: закрыться ему первым, и `flip` перепишет пару по месту"
     );
-    assert_eq!(note_last, 23, "`Note` связан последним: `flip` копирует");
+    assert_eq!(note_last, 22, "`Note` связан последним: `flip` копирует");
 }
 
 /// Тот же порядок в порождённом коде: кадры ставятся так, как их снимают.

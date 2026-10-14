@@ -2011,6 +2011,35 @@ impl Module {
     }
 }
 
+/// Точки входа второй формы: кадр в куче, вектор evidence, сегмент.
+const SECOND_FORM: &str = concat!(
+    "; Вторая форма понижения: кадр в куче, вектор evidence, сегмент.\n",
+    "declare i32 @adamas_is_imm(ptr)\n",
+    "declare ptr @adamas_evidence_empty()\n",
+    "declare ptr @adamas_evidence_owned(ptr)\n",
+    "declare ptr @adamas_evidence_extend(ptr, i32, ptr)\n",
+    "declare ptr @adamas_evidence_mask(ptr, i32)\n",
+    "declare i32 @adamas_evidence_lookup(ptr, i32, ptr)\n",
+    "declare void @adamas_evidence_drop(ptr)\n",
+    "declare void @adamas_kont_init(ptr)\n",
+    "declare ptr @adamas_kont_push(ptr, i16, i32, ptr, ptr, i64, i64, ptr)\n",
+    "declare ptr @adamas_kont_handler(ptr, i32, ptr, ptr, i64, ptr)\n",
+    "declare ptr @adamas_kont_closing(ptr, ptr, ptr, ptr)\n",
+    "declare ptr @adamas_kont_run(ptr, ptr)\n",
+    "declare ptr @adamas_kont_abort(ptr)\n",
+    "declare ptr @adamas_kont_cut(ptr, ptr)\n",
+    "declare void @adamas_kont_resume(ptr, ptr)\n",
+    "declare ptr @adamas_frame_env(ptr)\n",
+    "declare ptr @adamas_frame_evidence(ptr)\n",
+    "declare ptr @adamas_frame_perform(ptr, ptr, i32, ptr, i64)\n",
+    "declare void @adamas_segment_unwind(ptr, ptr)\n",
+    "declare ptr @adamas_segment_value(ptr)\n",
+    "declare ptr @adamas_segment_multi(ptr)\n",
+    "declare void @adamas_resumption_drop(ptr, ptr)\n",
+    "declare ptr @adamas_unwind_value(ptr, ptr)\n",
+    "\n",
+);
+
 /// Объявления второй формы понижения и дроп среды кадра scope.
 ///
 /// Отдельно от [`Module::finish`], потому что оба куска условны: точек входа
@@ -2057,32 +2086,7 @@ fn second_form(out: &mut String, program: &Program) {
         }
     }
     if framed {
-        out.push_str(concat!(
-            "; Вторая форма понижения: кадр в куче, вектор evidence, сегмент.\n",
-            "declare i32 @adamas_is_imm(ptr)\n",
-            "declare ptr @adamas_evidence_empty()\n",
-            "declare ptr @adamas_evidence_extend(ptr, i32, ptr)\n",
-            "declare ptr @adamas_evidence_mask(ptr, i32)\n",
-            "declare i32 @adamas_evidence_lookup(ptr, i32, ptr)\n",
-            "declare void @adamas_evidence_drop(ptr)\n",
-            "declare void @adamas_kont_init(ptr)\n",
-            "declare ptr @adamas_kont_push(ptr, i16, i32, ptr, ptr, i64, i64, ptr)\n",
-            "declare ptr @adamas_kont_handler(ptr, i32, ptr, ptr, i64, ptr)\n",
-            "declare ptr @adamas_kont_closing(ptr, ptr, ptr, ptr)\n",
-            "declare ptr @adamas_kont_run(ptr, ptr)\n",
-            "declare ptr @adamas_kont_abort(ptr)\n",
-            "declare ptr @adamas_kont_cut(ptr, ptr)\n",
-            "declare void @adamas_kont_resume(ptr, ptr)\n",
-            "declare ptr @adamas_frame_env(ptr)\n",
-            "declare ptr @adamas_frame_evidence(ptr)\n",
-            "declare ptr @adamas_frame_perform(ptr, ptr, i32, ptr, i64)\n",
-            "declare void @adamas_segment_unwind(ptr, ptr)\n",
-            "declare ptr @adamas_segment_value(ptr)\n",
-            "declare ptr @adamas_segment_multi(ptr)\n",
-            "declare void @adamas_resumption_drop(ptr, ptr)\n",
-            "declare ptr @adamas_unwind_value(ptr, ptr)\n",
-            "\n",
-        ));
+        out.push_str(SECOND_FORM);
     }
     if nursery {
         out.push_str(concat!(
@@ -4884,7 +4888,7 @@ impl<'a> Builder<'a> {
                 self.here(),
             ),
             None => self.instruction(
-                &format!("{vector} = call ptr @adamas_evidence_empty()"),
+                &format!("{vector} = call ptr @adamas_evidence_owned(ptr null)"),
                 self.here(),
             ),
         }

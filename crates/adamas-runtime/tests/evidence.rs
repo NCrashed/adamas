@@ -179,11 +179,29 @@ fn extension_copies_and_leaves_the_parent_alone() {
 fn vector_lives_by_the_same_counting_rule() {
     unsafe {
         adamas_stat_reset();
-        let evidence = adamas_evidence_empty();
+        let evidence = adamas_evidence_extend(adamas_evidence_empty(), 0, ptr::null_mut());
         adamas_evidence_dup(evidence);
         adamas_evidence_drop(evidence);
         assert_eq!(adamas_stat_live(), 1);
         adamas_evidence_drop(evidence);
         assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+/// Пустой вектор - один на процесс (§10 вопрос 190): блока он не стоит, и
+/// счёт по нему ничего не меняет - ни `dup`, ни лишний `drop`.
+#[test]
+fn the_empty_vector_costs_no_block() {
+    unsafe {
+        adamas_stat_reset();
+        let first = adamas_evidence_empty();
+        let second = adamas_evidence_empty();
+        assert_eq!(first, second, "пустой вектор заводится заново");
+        assert_eq!(adamas_stat_live(), 0);
+        adamas_evidence_dup(first);
+        adamas_evidence_drop(first);
+        adamas_evidence_drop(first);
+        assert_eq!(adamas_stat_live(), 0);
+        assert_eq!(adamas_evidence_count(first), 0);
     }
 }

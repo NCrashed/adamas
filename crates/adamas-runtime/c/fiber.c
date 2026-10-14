@@ -826,7 +826,8 @@ adamas_value adamas_nursery_begin(adamas_kont *kont, const adamas_evidence *evid
     nursery->last = NULL;
     nursery->blocked = NULL;
     nursery->done = NULL;
-    nursery->base = adamas_evidence_dup((adamas_evidence *)(uintptr_t)evidence);
+    /* Своя, а не общая: многопоточный круг метит её разделяемой ниже. */
+    nursery->base = adamas_evidence_owned(evidence);
     nursery->release = release;
     nursery->promote = promote;
     nursery->result = adamas_unit();

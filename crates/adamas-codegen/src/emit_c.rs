@@ -2022,6 +2022,7 @@ impl Emitter<'_> {
             | Expr::Nursery { .. }
             | Expr::Fiber { .. }
             | Expr::Cancel { .. }
+            | Expr::Unwind { .. }
             // Ответ возобновления - ответ хендлера: возобновлённое вычисление
             // договаривает под ним же (§3.4, глубокий хендлер).
             | Expr::Resume { .. }
@@ -2158,7 +2159,8 @@ impl Emitter<'_> {
             Expr::Closing { .. }
             | Expr::Resume { .. }
             | Expr::Fiber { .. }
-            | Expr::Cancel { .. } => {
+            | Expr::Cancel { .. }
+            | Expr::Unwind { .. } => {
                 unreachable!("точка приостановки в чистом отрезке: дробление её не сняло")
             }
             Expr::Apply { callee, argument } => self.applying(callee, argument, depth),
@@ -4291,6 +4293,11 @@ impl Emitter<'_> {
             Expr::Cancel { at, value } => {
                 let value = self.value(value, depth);
                 let call = format!("adamas_nursery_cancel(kont, {value}, {at}u)");
+                self.finish(&call, Repr::Boxed, depth);
+            }
+            Expr::Unwind { value } => {
+                let value = self.value(value, depth);
+                let call = format!("adamas_unwind_value(kont, {value})");
                 self.finish(&call, Repr::Boxed, depth);
             }
             Expr::Fiber {

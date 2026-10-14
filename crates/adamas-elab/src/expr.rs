@@ -6003,10 +6003,24 @@ impl<'a> Elaborator<'a> {
     /// ни тем, ни другим тело лямбды - остаток спайна до него доходит, но
     /// `Argument` результирующего типа не несёт (§9, Фаза 4).
     fn executed(&mut self, term: Term, expected: Option<&Rc<Value>>) -> Term {
-        if expected.is_none_or(|ty| self.computation(ty)) {
+        if expected.is_none_or(|ty| self.computation(ty) || self.open_arrow(ty)) {
             return term;
         }
         self.run(term)
+    }
+
+    /// Стрелка с нерешённым доменом: ждут функцию, а вычислением ли - решит
+    /// унификация (§3.4, §10 вопрос 249). Исполнить приостановку здесь значило
+    /// бы отдать результат туда, где ждут стрелку: `unwind k` над резумпцией
+    /// `Unit -> r` исполнял бы её.
+    fn open_arrow(&self, ty: &Rc<Value>) -> bool {
+        let Value::Pi(_, _, domain, _, _) = &*whnf_solved(self.signature, self.metas, ty) else {
+            return false;
+        };
+        matches!(
+            &*whnf_solved(self.signature, self.metas, domain),
+            Value::Neutral(Head::Meta(_), _)
+        )
     }
 
     /// `handle e with …` - применение элиминатора эффекта (§3.4).

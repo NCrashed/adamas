@@ -137,7 +137,9 @@ use adamas_core::level::Level;
 use adamas_core::mult::Mult;
 use adamas_core::prim::{ArrayOp, Prim, PrimTy, SimdOp};
 use adamas_core::row::{Row, RowVar, Tail};
-use adamas_core::sig::{CLOSING, Callback as CallbackForm, Cross, DefinitionKind, Signature};
+use adamas_core::sig::{
+    CLOSING, Callback as CallbackForm, Cross, DefinitionKind, Signature, UNWIND,
+};
 use adamas_core::source::{Location, SourceFile};
 use adamas_core::term::{Args, Case, Index, Name, Term};
 use adamas_core::value::{Env, Lvl, Value};
@@ -2759,6 +2761,10 @@ impl<'a> Lowerer<'a> {
         if &**name == NURSERY && self.definition(name)?.body.is_none() {
             return self.nursing(scope, name, arguments);
         }
+        // Размотка резумпции (§3.4) - тот же постулат прелюдии.
+        if &**name == UNWIND && self.definition(name)?.body.is_none() {
+            return self.unwound(scope, name, arguments);
+        }
         // Чужой символ (§5.3). Спрашивается до вида по той же причине, что
         // выход из scope: вид у него `Regular`, тела нет, а смысл есть.
         if self.signature.foreign(name).is_some() {
@@ -3115,6 +3121,57 @@ impl<'a> Lowerer<'a> {
             };
         }
         Ok((value, Repr::Boxed))
+    }
+
+    /// `unwind k` (§3.4): размотка резумпции на стеке вызывающего.
+    ///
+    /// Резумпция здесь обычно лежала в поле ресурса и пришла `Boxed`, поэтому
+    /// резумпция ли это, решает рантайм по тегу: сегмент разматывается кадром,
+    /// прочее дропается.
+    ///
+    /// Кадр умеет только вторая форма. В первой ряд вызывающего пуст, эффекту
+    /// деструктора уйти некуда, и размотка на своём корне честна: это обычный
+    /// дроп значения, а сегмент `release.c` отдаёт `adamas_segment_abandon`.
+    fn unwound(
+        &mut self,
+        scope: &mut Scope,
+        name: &Name,
+        arguments: &[Arg<'_>],
+    ) -> Result<(Expr, Repr), LowerError> {
+        // `a`, `r`, резумпция.
+        let [_, _, resumption] = arguments else {
+            return Err(LowerError::Handler {
+                name: name.to_string(),
+                why: text!("lower-134"),
+            });
+        };
+        let value = self.given(scope, resumption, Repr::Boxed, text!("lower-135"))?;
+        if self.detached {
+            return Ok((
+                Expr::Unwind {
+                    value: Box::new(value),
+                },
+                Repr::Boxed,
+            ));
+        }
+        let unit = self.tag(&self.unit_name()?)?;
+        let dropped = Binding {
+            name: "разматываемое".to_owned(),
+            local: scope.fresh(),
+            fact: Fact::present(Mult::One).shaped(Repr::Boxed),
+        };
+        Ok((
+            Expr::Bind {
+                binding: dropped,
+                value: Box::new(value),
+                body: Box::new(Expr::Construct {
+                    constructor: unit,
+                    reuse: None,
+                    arguments: Vec::new(),
+                }),
+            },
+            Repr::Boxed,
+        ))
     }
 
     /// Вызов чужого символа: `extern "C"` (§5.3, уровень 1).

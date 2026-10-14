@@ -32,7 +32,7 @@ use adamas_core::prim::PrimTy;
 use adamas_core::row::{Label, Row, RowVar, Tail};
 use adamas_core::sig::{
     Blocked, Callback as CallbackForm, Cross, Crossing, DefinitionKind, Group, Member as SigMember,
-    Reuse, Scope, Signature, Spot,
+    Reuse, Scope, Signature, Spot, UNWIND,
 };
 use adamas_core::source::Span;
 use adamas_core::term::{Args, Binder, Fields, Name as CoreName, Term};
@@ -5785,6 +5785,11 @@ fn postulate(
     // абстрактный тип, а не значение, и он тотален без утверждения. Иначе
     // его нельзя было бы поставить в тип вовсе.
     signature.promise_total(&pending.name, pending.required.total || sort);
+    // Размотка тратит резумпцию однажды и ничего из неё не отдаёт: ответ
+    // резумпции бывает ресурсом (`Step` у `reify`, §3.4).
+    if &*pending.name == UNWIND {
+        signature.promise_carriers(UNWIND, &[0, 1]);
+    }
     verdicts(signature, &pending.name, pending.required, pending.span)
 }
 
@@ -6992,6 +6997,12 @@ fn declare_effect(
             error: Box::new(error),
             names,
         })?;
+    // Одношотный элиминатор отдаёт результат вычисления и ответ однажды: их
+    // носитель `1`, и ответ хендлера вправе быть ресурсом - так резумпция
+    // уходит из ветки значением (§3.4, §10 вопрос 249). Позиции - сразу за
+    // параметрами метки (`handler_type`).
+    let carried = params.len();
+    signature.promise_carriers(&format!("#handle.{declared}"), &[carried, carried + 1]);
     declare_defaults(
         signature,
         metas,

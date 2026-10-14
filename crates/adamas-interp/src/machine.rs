@@ -14,7 +14,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use adamas_core::eval;
 use adamas_core::level::Level;
@@ -1110,12 +1110,6 @@ impl<'a> Machine<'a> {
             self.multishot.set(true);
         }
         let index = table.len();
-        table.push(Resumption {
-            segment,
-            invoked: false,
-            multi,
-            stateful,
-        });
         let value = Rc::new(Value::Neutral(
             Head::Global(
                 Rc::from(format!("{RESUME}{index}")),
@@ -1125,6 +1119,13 @@ impl<'a> Machine<'a> {
             ),
             Vec::new(),
         ));
+        table.push(Resumption {
+            segment,
+            invoked: false,
+            multi,
+            stateful,
+            value: Rc::downgrade(&value),
+        });
         (value, index)
     }
 
@@ -1144,12 +1145,48 @@ impl<'a> Machine<'a> {
             .is_some_and(|it| it.invoked)
     }
 
+    /// Ушла ли резумпция из ветки значением (§3.4, §10 вопрос 249).
+    ///
+    /// Ветка, не позвавшая резумпцию, её не хоронит, если ссылка на неё
+    /// пережила ветку: резумпция лежит в ответе (`Next x (Suspended resume)`)
+    /// и умрёт явно - вызовом либо `unwind` в деструкторе обёртки. Ссылку
+    /// держит и замыкание, захватившее среду ветки без чтения `resume`: среда
+    /// машины захватывается целиком, и такую резумпцию машина не хоронит.
+    pub(crate) fn escaped(&self, index: usize) -> bool {
+        self.resumptions
+            .borrow()
+            .get(index)
+            .is_some_and(|it| it.value.strong_count() > 0)
+    }
+
     /// Параметризован ли хендлер этой резумпции (§10 вопрос 129).
     pub(crate) fn stateful(&self, index: usize) -> bool {
         self.resumptions
             .borrow()
             .get(index)
             .is_some_and(|it| it.stateful)
+    }
+
+    /// Сегмент резумпции, брошенной `unwind`: она тратится, как при вызове.
+    ///
+    /// `None` - раскручивать нечего: значение не резумпция (обычная функция
+    /// дропается молча), либо сегмент уже потрачен.
+    pub(crate) fn abandoned(&self, value: &Value) -> Option<Segment> {
+        let Value::Neutral(Head::Global(name, ..), spine) = value else {
+            return None;
+        };
+        if !spine.is_empty() {
+            return None;
+        }
+        let index: usize = name.strip_prefix(RESUME)?.parse().ok()?;
+        let mut table = self.resumptions.borrow_mut();
+        let entry = table.get_mut(index)?;
+        if entry.invoked {
+            return None;
+        }
+        entry.invoked = true;
+        let segment = std::mem::take(&mut entry.segment);
+        (segment.len() > 0).then_some(segment)
     }
 
     /// Возобновление: сегмент кладётся обратно, значение идёт ему.
@@ -1237,6 +1274,7 @@ struct Resumption {
     invoked: bool,
     multi: bool,
     stateful: bool,
+    value: Weak<Value>,
 }
 
 /// Живой ли аргумент ждёт операция над массивом (§4.11) следующим.

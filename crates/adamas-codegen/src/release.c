@@ -90,3 +90,18 @@ static void adamas_release_value(adamas_value value) {
         adamas_drop_value(adamas_field(value, index));
     }
 }
+
+/* `unwind` (§3.4): резумпция разматывается на стеке вызывающего - кадром,
+ * поэтому место вызова есть хвост куска, - а прочее значение дропается.
+ * Внешнее, а не `static`: у LLVM-бэкенда его зовёт `.ll` из другой единицы
+ * трансляции, как трамплины колбэка. */
+adamas_value adamas_unwind_value(adamas_kont *kont, adamas_value value);
+
+adamas_value adamas_unwind_value(adamas_kont *kont, adamas_value value) {
+    if (!adamas_is_imm(value) && adamas_tag(value) == ADAMAS_TAG_SEGMENT) {
+        adamas_resumption_drop(kont, value);
+    } else {
+        adamas_drop_value(value);
+    }
+    return adamas_unit();
+}

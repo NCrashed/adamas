@@ -29,7 +29,7 @@
 use std::rc::Rc;
 
 use adamas_core::row::Row;
-use adamas_core::sig::{CLOSING, DefinitionKind};
+use adamas_core::sig::{CLOSING, DefinitionKind, UNWIND};
 use adamas_core::term::{Mults, Name, Term};
 use adamas_core::value::{Elim, Value};
 
@@ -79,6 +79,24 @@ impl Machine<'_> {
                 return Ok(None);
             };
             return Ok(Some(self.nursing(body, kont)?));
+        }
+        // Размотка резумпции: тот же постулат, тело ему даёт машина (§3.4).
+        let unwound = &**name == UNWIND
+            && self
+                .signature()
+                .lookup(name)
+                .is_some_and(|definition| definition.body.is_none());
+        if unwound {
+            let arguments = applied(spine);
+            // `a`, `r`, резумпция.
+            let [_, _, resumption] = arguments.as_slice() else {
+                return Ok(None);
+            };
+            let unit = self.unit()?;
+            let Some(segment) = self.abandoned(resumption) else {
+                return Ok(Some(Step::Return(unit)));
+            };
+            return Ok(Some(self.unwinding(&segment, segment.len(), unit, kont)));
         }
         let operation =
             self.signature()
@@ -272,7 +290,7 @@ impl Machine<'_> {
 
     /// Продолжение мертво: раскрутить его сегмент и продолжить значением.
     pub(crate) fn buried(&self, ticket: usize, value: Rc<Value>, kont: &mut Kont) -> Step {
-        if self.invoked(ticket) {
+        if self.invoked(ticket) || self.escaped(ticket) {
             return Step::Return(value);
         }
         let Some(segment) = self.segment(ticket) else {

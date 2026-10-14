@@ -107,7 +107,7 @@ use adamas_codegen::llvm::{MINIMUM_MAJOR, MINIMUM_TOOLS_VARIABLE, Pipeline};
 /// C-стороне её отсутствие уже стоило четырёх молча потерянных имён
 /// (`agreement.rs`, шапка `TAKEN`); печать списка её не заменяет - глазами её
 /// никто не сверял.
-const TAKEN: [&str; 223] = [
+const TAKEN: [&str; 224] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",
@@ -182,6 +182,7 @@ const TAKEN: [&str; 223] = [
     "functor-chain",
     "handler-label-variable",
     "stream-push",
+    "stream-pull",
     "name-row-per-occurrence",
     "region-in-handler-state",
     "comparisons",

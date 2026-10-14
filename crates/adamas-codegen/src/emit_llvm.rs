@@ -2080,6 +2080,7 @@ fn second_form(out: &mut String, program: &Program) {
             "declare ptr @adamas_segment_value(ptr)\n",
             "declare ptr @adamas_segment_multi(ptr)\n",
             "declare void @adamas_resumption_drop(ptr, ptr)\n",
+            "declare ptr @adamas_unwind_value(ptr, ptr)\n",
             "\n",
         ));
     }
@@ -3205,7 +3206,7 @@ impl<'a> Builder<'a> {
             // Операция питомника и отмена значением не бывают: тишина их не
             // касается - уступка режет сегмент по построению, - и дробление
             // выносит их хвостом куска.
-            Expr::Fiber { .. } | Expr::Cancel { .. } => {
+            Expr::Fiber { .. } | Expr::Cancel { .. } | Expr::Unwind { .. } => {
                 Err(self.node(adamas_l10n::text!("emit_llvm-31")))
             }
         }
@@ -5390,6 +5391,7 @@ impl<'a> Builder<'a> {
                 arguments,
             } => self.fibering_tail(*op, *label, *operation, arguments),
             Expr::Cancel { at, value } => self.cancelling(*at, value),
+            Expr::Unwind { value } => self.unwinding(value),
             Expr::Apply { callee, argument } => self.applying(callee, argument),
             other => {
                 let repr = self.shape(other);
@@ -6260,6 +6262,19 @@ impl<'a> Builder<'a> {
             self.here(),
         );
         self.finish(&seed, Repr::Boxed)
+    }
+
+    /// `unwind` (§3.4): размотка резумпции кладётся кадром - тот же хвост куска,
+    /// что у отмены. Отдаёт единицу.
+    fn unwinding(&mut self, value: &Expr) -> Result<(), LlvmError> {
+        let kont = self.kont()?;
+        let value = self.value(value)?;
+        let answer = self.temp();
+        self.instruction(
+            &format!("{answer} = call ptr @adamas_unwind_value(ptr {kont}, ptr {value})"),
+            self.here(),
+        );
+        self.finish(&answer, Repr::Boxed)
     }
 
     /// Отмена: разбор значения задачи потребил её мимо `await` (§5.2).

@@ -456,21 +456,7 @@ impl Pass<'_> {
             | Expr::SimdArith { .. } => self.vector(expr, owned),
             Expr::Primitive { .. } | Expr::Compare { .. } => self.binary(expr, owned),
             Expr::Convert { .. } => self.converting(expr, owned),
-            Expr::Construct {
-                constructor,
-                reuse,
-                arguments,
-            } => {
-                let (arguments, spare) = self.sequence(arguments, owned);
-                drops(
-                    spare,
-                    Expr::Construct {
-                        constructor,
-                        reuse,
-                        arguments,
-                    },
-                )
-            }
+            Expr::Construct { .. } => self.constructed(expr, owned),
             // Чужой вызов (§5.3) идёт тем же путём, что свой; едущие аргументы
             // плоские, и RC по ним не идёт сам собой - см. `self.flat`.
             Expr::Call { .. } | Expr::Foreign { .. } => self.applied_to(expr, owned),
@@ -502,6 +488,7 @@ impl Pass<'_> {
             | Expr::Nursery { .. }
             | Expr::Fiber { .. }
             | Expr::Cancel { .. }
+            | Expr::Unwind { .. }
             | Expr::Mask { .. } => self.effectful(expr, owned),
             Expr::Resume { .. } => self.resumed(expr, owned),
             Expr::Apply { callee, argument } => self.applied(*callee, *argument, owned),
@@ -1205,8 +1192,39 @@ impl Pass<'_> {
                     },
                 )
             }
+            Expr::Unwind { value } => {
+                let (mut items, spare) = self.sequence(vec![*value], owned);
+                let value = items.pop().unwrap_or(Expr::Erased);
+                drops(
+                    spare,
+                    Expr::Unwind {
+                        value: Box::new(value),
+                    },
+                )
+            }
             other => other,
         }
+    }
+
+    /// Конструктор потребляет аргументы: они уходят в поля владением.
+    fn constructed(&mut self, expr: Expr, owned: &BTreeSet<LocalId>) -> Expr {
+        let Expr::Construct {
+            constructor,
+            reuse,
+            arguments,
+        } = expr
+        else {
+            return expr;
+        };
+        let (arguments, spare) = self.sequence(arguments, owned);
+        drops(
+            spare,
+            Expr::Construct {
+                constructor,
+                reuse,
+                arguments,
+            },
+        )
     }
 
     /// Возобновление потребляет обе стороны: резумпцию - потому что она аффинна
@@ -1567,6 +1585,7 @@ impl Pass<'_> {
             | Expr::Nursery { .. }
             | Expr::Fiber { .. }
             | Expr::Cancel { .. }
+            | Expr::Unwind { .. }
             | Expr::Layout { .. } => false,
         }
     }
@@ -1709,6 +1728,7 @@ impl Pass<'_> {
             | Expr::Nursery { .. }
             | Expr::Fiber { .. }
             | Expr::Cancel { .. }
+            | Expr::Unwind { .. }
             | Expr::Layout { .. } => false,
         }
     }

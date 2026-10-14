@@ -1,0 +1,61 @@
+-- Pull-форма потока (§3.4, §10 вопрос 249): резумпция уходит из ветки
+-- значением, и два продюсера приостановлены разом.
+--
+-- `reify` кладёт резумпцию в поле ресурса `Resumption`, `advance` зовёт её вне
+-- хендлера, `zipped` шагает двумя продюсерами по очереди. Короткий договаривает
+-- сам - его `Guard` закрывается на выходе из scope (отметка 1). Длинный
+-- брошен на середине: деструктор обёртки зовёт `unwind`, и размотка его
+-- сегмента закрывает `Guard` внутри (отметка 2). Эффект деструктора уходит
+-- хендлеру вызывающего - `collect`, - а не теряется.
+
+effect Log where
+  note : UInt64 -> Unit
+
+resource Guard where
+  Held : (ω n : UInt64) -> Guard
+  release : (1 g : Guard) -> {Log} Unit
+  release (Held n) = note n
+
+resource Resumption (r : Type) where
+  Suspended : (1 k : Unit -> {Log} r) -> Resumption r
+  abandon : (1 s : Resumption r) -> {Log} Unit
+  abandon (Suspended k) = unwind k
+
+resource Step where
+  Done : Step
+  Next : (ω x : UInt64) -> Resumption Step -> Step
+  dropStep : (1 s : Step) -> {Log} Unit
+  dropStep Done = MkUnit
+  dropStep (Next _x r) = abandon r
+
+reify : ({Yield UInt64, Log} Unit) -> {Log} Step
+reify prod = handle prod with
+  yield x -> Next x (Suspended resume)
+  return _v -> Done
+
+advance : (1 r : Resumption Step) -> {Log} Step
+advance (Suspended k) = k MkUnit
+
+guarded : UInt64 -> List UInt64 -> {Yield UInt64, Log} Unit
+guarded n xs =
+  let 1 _g : Guard = Held n
+  each xs
+
+-- Сумма попарных произведений до конца короткого.
+zipped : UInt64 -> (1 a : Step) -> (1 b : Step) -> {Log} UInt64
+zipped acc Done b =
+  let 1 _gone : Unit = dropStep b
+  acc
+zipped acc (Next _x ra) Done =
+  let 1 _gone : Unit = abandon ra
+  acc
+zipped acc (Next x ra) (Next y rb) = zipped (acc + x * y) (advance ra) (advance rb)
+
+collect : ({Log} UInt64) -> (UInt64, List UInt64)
+collect k = handle k with
+  state Nil
+  return v -> (v, state)
+  note n -> resume MkUnit (Cons n state)
+
+main : (UInt64, List UInt64)
+main = collect (\_u -> zipped 0 (reify (guarded 1 [1, 2, 3])) (reify (guarded 2 [10, 20, 30, 40])))

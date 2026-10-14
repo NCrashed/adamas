@@ -149,6 +149,7 @@ fn suspends(expr: &Expr, known: &BTreeSet<FuncId>, quiet: bool) -> bool {
         Expr::Nursery { .. }
         | Expr::Fiber { .. }
         | Expr::Cancel { .. }
+        | Expr::Unwind { .. }
         | Expr::Handle { .. }
         | Expr::Closing { .. }
         | Expr::Resume { .. }
@@ -347,6 +348,7 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         | Expr::Unshared { array: value }
         | Expr::Unpack { value, .. }
         | Expr::Cancel { value, .. }
+        | Expr::Unwind { value }
         | Expr::SimdSplat { value, .. }
         | Expr::Convert { value, .. } => {
             vec![value]
@@ -633,6 +635,7 @@ impl Anf<'_> {
             | Expr::Nursery { .. }
             | Expr::Fiber { .. }
             | Expr::Cancel { .. }
+            | Expr::Unwind { .. }
             // Ответ сравнения - конструктор `Bool` (§4.3): аргументы плоские,
             // ответ указательный.
             | Expr::Compare { .. }

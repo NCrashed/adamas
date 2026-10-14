@@ -127,6 +127,16 @@ void adamas_closure_release(adamas_value closure) {
 
 adamas_value adamas_apply(adamas_value closure, const adamas_evidence *evidence, adamas_kont *kont,
                           adamas_value argument) {
+    /* Резумпция значением (§3.4, §10 вопрос 249): применённая там, где тип её
+     * не называет (`advance (Suspended k) = k ()`), она приходит сюда, а не в
+     * `Resume`. Делается то же, что там: сегмент встаёт на вершину, а значение
+     * операции уходит трамплину - его получит верхний кадр сегмента. Ответ
+     * возобновлённого вычисления спустится до кадра под сегментом, то есть до
+     * продолжения вызывающего: `Apply` - точка приостановки всегда. */
+    if (!adamas_is_imm(closure) && adamas_tag(closure) == ADAMAS_TAG_SEGMENT) {
+        adamas_kont_resume(kont, closure);
+        return argument;
+    }
     struct closure_block *block = closure_of(closure);
     if (block->applied + 1 == block->arity) {
         return block->code(closure, evidence, kont, argument);

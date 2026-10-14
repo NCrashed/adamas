@@ -8,6 +8,7 @@ warn-unused-implicit = имя `{ $name }` из implicit-группы нигде 
 warn-defaulted-literal = использую default { $name }; для явного типа добавьте аннотацию
 warn-unused-binding = `{ $name }` - { $what } - нигде не читается; если так и задумано, назовите его `_{ $name }`
 warn-discarded-result = результат типа `{ $ty }` отбрасывается; если так и задумано, напишите `let _ = …`
+warn-abandoned-function = поле конструктора `{ $constructor }` - эффектная функция - брошено без `unwind`: если это резумпция, её сегмент размотается лишь в ближайшей точке приостановки, и порядок эффектов её деструкторов не определён; напишите `unwind`
 warn-unused-import = `{ $name }` импортировано из `{ $module }`, но нигде не употребляется
 elab-unknown-name = имя `{ $name }` не найдено
 elab-foreign-abi = ABI { $abi } не поддержан: уровень 1 FFI знает только "C"

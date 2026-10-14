@@ -20,7 +20,10 @@ use adamas_parser::ast::{
     Symbol,
 };
 
+use adamas_core::mult::Mult;
 use adamas_core::sig::{DefinitionKind, Signature};
+use adamas_core::term::Term;
+use adamas_core::visibility::Visibility;
 
 use crate::expr::{
     CONS, DEFAULT_FLOAT, DEFAULT_INT, FROM_NAT, GRADE, NIL, SUCC, UNIT, ZERO, names_any,
@@ -467,4 +470,105 @@ pub(crate) fn uses(expr: &Expr, wanted: &[&Symbol]) -> bool {
                 || section.operand.as_deref().is_some_and(recur)
         }
     }
+}
+
+/// Поля-эффектные функции, брошенные паттерном клаузы (§3.4, §10 вопрос 252).
+///
+/// Резумпция, сохранённая в поле ресурса, разматывается `unwind`; брошенная
+/// молча, она разматывается лишь в ближайшей точке приостановки, и порядок
+/// эффектов её деструкторов у исполнителей не определён. Тип не говорит,
+/// резумпция ли это: поле - линейная стрелка с непустой row, - поэтому предупреждение, а не отказ. Над обычной
+/// функцией совет безвреден: `unwind` её просто дропает.
+///
+/// Видимый случай один - паттерн конструктора в клаузе, обычно деструктор
+/// обёртки (`abandon (Suspended _k) = MkUnit`). Обобщённый дроп (`ignore k`)
+/// по типу связывания не виден и сюда не входит.
+pub(crate) fn abandoned_fields(decls: &[Decl], signature: &Signature) -> Vec<Warning> {
+    let mut found = Vec::new();
+    for decl in decls {
+        abandoned_in(decl, signature, &mut found);
+    }
+    found
+}
+
+fn abandoned_in(decl: &Decl, signature: &Signature, found: &mut Vec<Warning>) {
+    match &decl.kind {
+        DeclKind::Clauses { clauses, .. } => {
+            for clause in clauses {
+                for pattern in &clause.patterns {
+                    abandoned_pattern(pattern, &clause.body, signature, found);
+                }
+                for it in &clause.wheres {
+                    abandoned_in(it, signature, found);
+                }
+            }
+        }
+        DeclKind::Mutual(decls) => decls
+            .iter()
+            .for_each(|it| abandoned_in(it, signature, found)),
+        DeclKind::Module(module) => module
+            .members
+            .iter()
+            .for_each(|it| abandoned_in(it, signature, found)),
+        DeclKind::Class(class) => class
+            .members
+            .iter()
+            .for_each(|it| abandoned_in(it, signature, found)),
+        DeclKind::Resource(resource) => resource
+            .members
+            .iter()
+            .for_each(|it| abandoned_in(it, signature, found)),
+        _ => {}
+    }
+}
+
+fn abandoned_pattern(
+    pattern: &Pattern,
+    body: &Expr,
+    signature: &Signature,
+    found: &mut Vec<Warning>,
+) {
+    match &pattern.kind {
+        PatternKind::App { head, fields } => {
+            let effectful = effectful_fields(signature, &head.text);
+            for (at, field) in fields.iter().enumerate() {
+                let dropped = match &field.kind {
+                    PatternKind::Wildcard => true,
+                    PatternKind::Name(name) => !names_any(body, &[&name.text]),
+                    _ => false,
+                };
+                if dropped && effectful.get(at).copied().unwrap_or(false) {
+                    found.push(Warning::AbandonedFunction {
+                        constructor: head.text.clone(),
+                        span: field.span,
+                    });
+                }
+                abandoned_pattern(field, body, signature, found);
+            }
+        }
+        PatternKind::Tuple(items) => items
+            .iter()
+            .for_each(|it| abandoned_pattern(it, body, signature, found)),
+        _ => {}
+    }
+}
+
+/// По явному полю конструктора: линейная ли это стрелка с непустой row.
+fn effectful_fields(signature: &Signature, constructor: &str) -> Vec<bool> {
+    let Some(definition) = signature.lookup(constructor) else {
+        return Vec::new();
+    };
+    if !matches!(definition.kind, DefinitionKind::Constructor { .. }) {
+        return Vec::new();
+    }
+    let mut fields = Vec::new();
+    let mut current = &definition.ty;
+    while let Term::Pi(binder, _, domain, _, codomain) = current {
+        if binder.visibility == Visibility::Explicit {
+            let arrow = matches!(&**domain, Term::Pi(_, _, _, row, _) if !row.is_empty());
+            fields.push(binder.mult == Mult::One && arrow);
+        }
+        current = codomain;
+    }
+    fields
 }

@@ -8,6 +8,7 @@ warn-unused-implicit = name `{ $name }` from an implicit group is never used: in
 warn-defaulted-literal = using default { $name }; add an annotation for an explicit type
 warn-unused-binding = `{ $name }` - { $what } - is never read; if that is intended, name it `_{ $name }`
 warn-discarded-result = a result of type `{ $ty }` is discarded; if that is intended, write `let _ = …`
+warn-abandoned-function = a field of `{ $constructor }` - an effectful function - is dropped without `unwind`: if it is a resumption, its segment unwinds only at the nearest suspension point, and the order of its destructor effects is unspecified; write `unwind`
 warn-unused-import = `{ $name }` is imported from `{ $module }`, but never used
 elab-unknown-name = name `{ $name }` not found
 elab-foreign-abi = ABI { $abi } is not supported: level 1 FFI knows only "C"

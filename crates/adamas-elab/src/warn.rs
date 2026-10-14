@@ -75,6 +75,15 @@ pub enum Warning {
         /// Где оно в списке импорта.
         span: Span,
     },
+    /// Поле-эффектная функция, брошенное паттерном без `unwind` (§3.4, §10
+    /// вопрос 252): если это резумпция, её размотка отложится до точки приостановки.
+    #[error("{}", adamas_l10n::tr!("warn-abandoned-function", constructor = .constructor))]
+    AbandonedFunction {
+        /// Конструктор, чьё поле брошено.
+        constructor: Symbol,
+        /// Паттерн поля.
+        span: Span,
+    },
 }
 
 impl Warning {
@@ -85,6 +94,7 @@ impl Warning {
             Self::UnusedImplicit { span, .. }
             | Self::DefaultedLiteral { span, .. }
             | Self::UnusedBinding { span, .. }
+            | Self::AbandonedFunction { span, .. }
             | Self::UnusedImport { span, .. }
             | Self::DiscardedResult { span, .. } => *span,
         }

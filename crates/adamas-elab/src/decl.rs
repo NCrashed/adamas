@@ -292,6 +292,7 @@ pub(crate) fn elaborate_file(
     // 218).
     if within.is_none() {
         warnings.extend(crate::unused::unused_imports(decls, signature));
+        warnings.extend(crate::unused::abandoned_fields(decls, signature));
     }
     // Экспорты - объявление файла наравне с прочими, и граница у них та же:
     // ненайденный символ не отменяет остальных отказов файла.

@@ -290,7 +290,11 @@ impl Machine<'_> {
 
     /// Продолжение мертво: раскрутить его сегмент и продолжить значением.
     pub(crate) fn buried(&self, ticket: usize, value: Rc<Value>, kont: &mut Kont) -> Step {
-        if self.invoked(ticket) || self.escaped(ticket) {
+        if self.invoked(ticket) {
+            return Step::Return(value);
+        }
+        if self.escaped(ticket) {
+            self.escape(ticket);
             return Step::Return(value);
         }
         let Some(segment) = self.segment(ticket) else {

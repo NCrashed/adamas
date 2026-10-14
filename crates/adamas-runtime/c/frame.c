@@ -81,8 +81,27 @@ static adamas_frame *frame_alloc(uint16_t mark, uint32_t label, adamas_frame_cod
  * Цена - копия вектора на деструктор. Путь холодный (раскрутка), и другого
  * места у пометки нет: вектор общий с живым кодом, править его на месте нельзя.
  */
-static adamas_evidence *closing_evidence(adamas_frame *frame, adamas_frame *rest) {
+/* Корень, на котором остаток очереди брошенных разматывается без хендлеров
+ * (`adamas_segment_settle`). Своя у потока: воркер свою очередь разбирает сам. */
+static _Thread_local adamas_kont *isolated = NULL;
+
+/* Очередь брошенных без ручки и её разбор - см. `adamas_segment_abandon`. */
+struct pending;
+static _Thread_local struct pending *pending_head;
+static void pending_push(adamas_kont *kont);
+
+static adamas_evidence *closing_evidence(adamas_kont *kont, adamas_frame *frame,
+                                         adamas_frame *rest) {
     adamas_evidence *evidence = adamas_evidence_copy(frame->evidence);
+    if (kont == isolated) {
+        /* Свой корень после последнего трамплина: живых хендлеров вне
+         * сегмента нет вовсе. Операция к ним обрывает остаток деструктора,
+         * как к мёртвому, а раскрутка идёт дальше (§10 вопрос 252); разрез
+         * `adamas_kont_cut` по ним шёл бы поперёк стеков. Хендлеры,
+         * поставленные самим деструктором, в копию не входят и живы. */
+        adamas_evidence_suppress_all(evidence);
+        return evidence;
+    }
     for (adamas_frame *below = rest; below != NULL; below = below->below) {
         uint16_t mark = adamas_frame_mark(below);
         /* Кадр питомника подавляется наравне с хендлером, и по тому же счёту:
@@ -219,7 +238,7 @@ static adamas_value unwind_step(adamas_kont *kont, adamas_frame *frame, adamas_v
          * ложится кадром **до** деструктора: операция к живому хендлеру
          * снаружи режет один стек, и раскрутка уезжает в сегмент резумпции
          * вместе с ним - возобновление продолжит обе. */
-        adamas_evidence *evidence = closing_evidence(next, chain->top);
+        adamas_evidence *evidence = closing_evidence(kont, next, chain->top);
         unwind_push(kont, chain, held, 1);
         adamas_value closer = next->env[0];
         adamas_value answer = adamas_apply(closer, evidence, kont, adamas_unit());
@@ -337,7 +356,16 @@ adamas_value adamas_kont_run(adamas_kont *kont, adamas_value value) {
 }
 
 adamas_value adamas_kont_run_to(adamas_kont *kont, adamas_frame *floor, adamas_value value) {
-    while (kont->top != floor) {
+    for (;;) {
+        /* Брошенное без ручки кладётся до проверки выхода: последний кусок
+         * корня тоже вправе был бросить, и разматывать это надо на его стеке,
+         * а не на стеке того, кто крутит следующим (§10 вопрос 252). */
+        if (pending_head != NULL) {
+            pending_push(kont);
+        }
+        if (kont->top == floor) {
+            break;
+        }
         if (kont->top == NULL) {
             /* Пол не встретился: кадр, до которого крутили, сняли не мы. */
             adamas_fail("the unwind floor does not belong to this stack");
@@ -649,19 +677,69 @@ void adamas_segment_promote(adamas_value value, adamas_promote children) {
     }
 }
 
+/* Очередь брошенных без ручки (§10 вопрос 252): цепочки, ждущие своего стека.
+ * Своя у потока - бросил воркер, его трамплин и разберёт. Порядок FIFO, а
+ * кладутся они кадрами по одному, поэтому брошенная последней разматывается
+ * первой - LIFO, как у `adamas_resumption_drop`. */
+struct pending {
+    adamas_segment *chain;
+    struct pending *next;
+};
+
+static _Thread_local struct pending *pending_head = NULL;
+static _Thread_local struct pending *pending_tail = NULL;
+
 void adamas_segment_abandon(adamas_value value) {
     adamas_segment *segment = adamas_segment_of(value);
     if (segment->top == NULL) {
         return;
     }
-    /* Корень свой: `adamas_release` о стеке не знает по своей сигнатуре.
-     * Деструкторы поэтому бегут здесь же, а не откладываются кадром, - точки
-     * приостановки у этого пути нет вовсе. */
-    adamas_kont local;
-    adamas_kont_init(&local);
-    adamas_segment *chain = segment_alloc(segment->top, segment->base);
+    /* `adamas_release` о стеке не знает по своей сигнатуре, и разматывать
+     * здесь не на чем: свой корень хендлеров вызывающего не держит, а разрез
+     * по ним шёл бы поперёк стеков (§10 вопрос 252). Поэтому цепочка ждёт
+     * трамплина: ближайший шаг `adamas_kont_run_to` кладёт её кадром на
+     * **свой** стек - тот, чей код её и бросил, - и деструкторы бегут там, с
+     * живыми хендлерами. Блок ручки отдаёт тот, кто дропал. */
+    struct pending *node = (struct pending *)adamas_block_alloc(sizeof(struct pending));
+    node->chain = segment_alloc(segment->top, segment->base);
+    node->next = NULL;
     segment->top = NULL;
     segment->base = NULL;
-    unwind_push(&local, chain, adamas_unit(), 0);
-    adamas_drop(adamas_kont_run(&local, adamas_unit()), NULL);
+    if (pending_tail == NULL) {
+        pending_head = node;
+    } else {
+        pending_tail->next = node;
+    }
+    pending_tail = node;
+}
+
+/* Кладёт очередь кадрами раскрутки на `kont`. Ответ, текущий по стеку, первым
+ * возьмёт верхний кадр и отдаст его, договорив, - тот же протокол `captured`,
+ * что у `adamas_resumption_drop`. */
+static void pending_push(adamas_kont *kont) {
+    while (pending_head != NULL) {
+        struct pending *node = pending_head;
+        pending_head = node->next;
+        if (pending_head == NULL) {
+            pending_tail = NULL;
+        }
+        unwind_push(kont, node->chain, adamas_unit(), 0);
+        adamas_block_free(node);
+    }
+}
+
+void adamas_segment_settle(void) {
+    /* Трамплина больше не будет: остаток очереди разматывается на своём
+     * корне. Хендлеров вызывающего здесь нет и не будет, поэтому вектор
+     * деструкторов подавлен целиком (`closing_evidence`): операция обрывает
+     * остаток своего деструктора, а раскрутка идёт дальше и отдаёт память. */
+    while (pending_head != NULL) {
+        adamas_kont local;
+        adamas_kont_init(&local);
+        pending_push(&local);
+        adamas_kont *outer = isolated;
+        isolated = &local;
+        adamas_drop(adamas_kont_run(&local, adamas_unit()), NULL);
+        isolated = outer;
+    }
 }

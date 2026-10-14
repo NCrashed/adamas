@@ -112,6 +112,15 @@ pub struct Machine<'a> {
     /// вопроса 94 в программах, где мультишот есть; программ таких мало, и
     /// платят они только за себя.
     multishot: std::cell::Cell<bool>,
+    /// Резумпции, пережившие свою ветку значением (§3.4, §10 вопрос 252).
+    ///
+    /// Брошенную молча такую резумпцию хоронит её смерть: понижение кладёт
+    /// раскрутку кадром на ближайшем шаге трамплина, и машина делает то же на
+    /// ближайшем `Return` - когда слабая ссылка умерла, а вызова не было.
+    escaped: RefCell<Vec<usize>>,
+    /// Глубина вложенных прогонов: хоронит только внешний. Вложенный идёт со
+    /// своим пустым стеком (`forced`), и хендлеров вызывающего на нём нет.
+    driven: std::cell::Cell<usize>,
     /// Имена, за которыми стоит чужой символ, а не тело (§5.3).
     ///
     /// Наполняется с двух сторон. Объявление `extern "C"` приходит **из
@@ -154,6 +163,8 @@ impl<'a> Machine<'a> {
             signature,
             resumptions: RefCell::new(Vec::new()),
             multishot: std::cell::Cell::new(false),
+            escaped: RefCell::new(Vec::new()),
+            driven: std::cell::Cell::new(0),
             nurseries: RefCell::new(Vec::new()),
             foreign: RefCell::new(HashMap::new()),
             linkage: Linkage::default(),
@@ -209,14 +220,33 @@ impl<'a> Machine<'a> {
     /// Здесь и живёт вся глубина исполнения: цикл вместо рекурсии, состояние в
     /// куче вместо кадров Rust.
     fn driving(&self, start: Step, kont: &mut Kont) -> Result<Rc<Value>, RunError> {
+        let outermost = self.driven.get() == 0;
+        self.driven.set(self.driven.get() + 1);
+        let answer = self.driven_from(start, kont, outermost);
+        self.driven.set(self.driven.get() - 1);
+        answer
+    }
+
+    fn driven_from(
+        &self,
+        start: Step,
+        kont: &mut Kont,
+        outermost: bool,
+    ) -> Result<Rc<Value>, RunError> {
         let mut step = start;
         loop {
             step = match step {
                 Step::Eval(env, term) => Self::evaluating(&env, &term, kont),
                 Step::Apply(callee, argument) => self.forcing(&callee, argument, kont)?,
-                Step::Return(value) => match kont.pop() {
-                    None => return Ok(value),
-                    Some(frame) => self.resuming(frame, value, kont)?,
+                // Умершая сбежавшая резумпция разматывается до того, как
+                // значение уйдёт дальше, - как кадр раскрутки, положенный
+                // трамплином понижения поверх стека (§10 вопрос 252).
+                Step::Return(value) => match self.dead_escaped(outermost) {
+                    Some(segment) => self.unwinding(&segment, segment.len(), value, kont),
+                    None => match kont.pop() {
+                        None => return Ok(value),
+                        Some(frame) => self.resuming(frame, value, kont)?,
+                    },
                 },
             };
         }
@@ -1157,6 +1187,42 @@ impl<'a> Machine<'a> {
             .borrow()
             .get(index)
             .is_some_and(|it| it.value.strong_count() > 0)
+    }
+
+    /// Запоминает резумпцию, пережившую ветку: хоронить её будет её смерть.
+    pub(crate) fn escape(&self, index: usize) {
+        self.escaped.borrow_mut().push(index);
+    }
+
+    /// Сегмент сбежавшей резумпции, умершей без вызова, - если такая есть.
+    ///
+    /// Проверяется только во внешнем прогоне и только пока список не пуст:
+    /// обычная программа за это не платит ничего.
+    fn dead_escaped(&self, outermost: bool) -> Option<Segment> {
+        if !outermost || self.escaped.borrow().is_empty() {
+            return None;
+        }
+        let mut escaped = self.escaped.borrow_mut();
+        let mut table = self.resumptions.borrow_mut();
+        let mut found = None;
+        escaped.retain(|&index| {
+            let Some(entry) = table.get_mut(index) else {
+                return false;
+            };
+            if entry.invoked {
+                return false;
+            }
+            if found.is_some() || entry.value.strong_count() > 0 {
+                return true;
+            }
+            entry.invoked = true;
+            let segment = std::mem::take(&mut entry.segment);
+            if segment.len() > 0 {
+                found = Some(segment);
+            }
+            false
+        });
+        found
     }
 
     /// Параметризован ли хендлер этой резумпции (§10 вопрос 129).

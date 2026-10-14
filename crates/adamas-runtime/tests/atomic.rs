@@ -46,7 +46,7 @@ use adamas_runtime::ffi::{
     adamas_dup, adamas_evidence_drop, adamas_evidence_empty, adamas_field, adamas_frame_env,
     adamas_imm, adamas_is_shared, adamas_is_unique, adamas_kont_cut, adamas_kont_init,
     adamas_kont_push, adamas_rc, adamas_segment_abandon, adamas_segment_promote,
-    adamas_segment_value, adamas_set_field, adamas_share, adamas_tag,
+    adamas_segment_settle, adamas_segment_value, adamas_set_field, adamas_share, adamas_tag,
 };
 
 /// Сколько потоков и сколько ходов каждый.
@@ -267,6 +267,7 @@ fn promotion_reaches_inside_a_captured_resumption() {
         );
 
         adamas_segment_abandon(segment);
+        adamas_segment_settle();
         adamas_drop(segment, None);
         adamas_evidence_drop(evidence);
     }

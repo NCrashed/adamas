@@ -142,6 +142,15 @@ void adamas_evidence_suppress(adamas_evidence *evidence, const adamas_frame *han
     }
 }
 
+void adamas_evidence_suppress_all(adamas_evidence *evidence) {
+    if (evidence == NULL) {
+        return;
+    }
+    for (size_t index = 0; index < evidence->count; index += 1) {
+        evidence->entries[index].flags |= ADAMAS_EV_SUPPRESSED;
+    }
+}
+
 void adamas_evidence_rebind(adamas_evidence *evidence, const adamas_frame *from,
                             adamas_frame *to) {
     if (evidence == NULL) {

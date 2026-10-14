@@ -999,14 +999,15 @@ fn a_resumption_is_a_value_with_its_own_count() {
     }
 }
 
-/// Брошенная резумпция без ручки стека: деструкторы бегут на своём корне.
+/// Брошенная резумпция без ручки стека ждёт трамплина (§10 вопрос 252).
 ///
 /// Путь этот принадлежит слоту замыкания и полю объекта - там, где дроп идёт
-/// через `adamas_release`, у которого ручки нет по сигнатуре. Ближайший
-/// проходящий сосед - `adamas_resumption_drop` с ручкой: там раскрутка
-/// откладывается кадром, здесь бежит немедленно.
+/// через `adamas_release`, у которого ручки нет по сигнатуре. Свой корень
+/// здесь был бы разрезом поперёк стеков, поэтому цепочка откладывается, и
+/// ближайший шаг трамплина кладёт её раскрутку кадром на **свой** стек: ответ,
+/// текущий по нему, проходит раскрутку насквозь.
 #[test]
-fn an_abandoned_resumption_unwinds_on_its_own_root() {
+fn an_abandoned_resumption_waits_for_the_trampoline() {
     unsafe {
         adamas_stat_reset();
         TRACE.with_borrow_mut(Vec::clear);
@@ -1018,9 +1019,18 @@ fn an_abandoned_resumption_unwinds_on_its_own_root() {
         let resumption = adamas_segment_value(adamas_kont_cut(&raw mut kont, handler));
 
         adamas_segment_abandon(resumption);
-        // Немедленно, без трамплина: у этого пути точки приостановки нет вовсе.
+        assert!(
+            TRACE.with_borrow(Vec::is_empty),
+            "раскрутка пошла без трамплина - то есть на своём корне"
+        );
+        let answer = adamas_kont_run(&raw mut kont, adamas_imm(3));
         assert_eq!(TRACE.with_borrow(Clone::clone), vec![5]);
-        assert!(kont.top.is_null(), "раскрутка ушла на чужой стек");
+        assert_eq!(
+            adamas_imm_get(answer),
+            3,
+            "ответ не прошёл раскрутку насквозь"
+        );
+        assert!(kont.top.is_null(), "кадр раскрутки остался на стеке");
         // Блок ручки отдаёт дроп: `adamas_release` его не освобождает.
         adamas_resumption_drop(&raw mut kont, resumption);
 

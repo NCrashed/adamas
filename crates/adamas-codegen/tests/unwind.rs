@@ -132,3 +132,27 @@ fn an_abandoned_resumption_runs_its_destructors_under_the_caller() {
         stderr.trim_end()
     );
 }
+
+/// Брошенная молча (§10 вопрос 252): дроп без ручки стека откладывает
+/// раскрутку до ближайшего шага трамплина, и она идёт на стеке вызывающего -
+/// отметка деструктора доходит до `collect`. Машина хоронит ту же резумпцию
+/// по смерти её значения. До правки раскрутка шла на своём корне, разрез к
+/// хендлеру вызывающего пришивал свой стек к чужому, отметка терялась, и
+/// одиннадцать блоков оставались висеть.
+#[test]
+fn a_silently_dropped_resumption_unwinds_under_the_caller() {
+    let source = format!("{SHAPE}{EFFECTFUL}")
+        .replace("letGo (Kept k) = unwind k", "letGo (Kept _k) = MkUnit");
+    assert_eq!(
+        harness::printed(&source),
+        "{_1 = 3, _2 = Cons 7 Nil}",
+        "машина посчитала не то"
+    );
+    let stderr = harness::agreed("unwind-silent", &source)
+        .unwrap_or_else(|error| panic!("молчаливый бросок отвергнут: {error}"));
+    assert!(
+        stderr.contains("alive 0"),
+        "сегмент не отдан: {}",
+        stderr.trim_end()
+    );
+}

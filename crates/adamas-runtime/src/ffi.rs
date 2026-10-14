@@ -393,8 +393,10 @@ unsafe extern "C" {
     pub fn adamas_segment_of(value: Value) -> *mut Segment;
     /// Дроп резумпции: последняя ссылка кладёт размотку сегмента кадром.
     pub fn adamas_resumption_drop(kont: *mut Kont, value: Value);
-    /// Он же там, где ручки стека нет: раскрутка идёт немедленно, на своём корне.
+    /// Он же там, где ручки стека нет: раскрутка ждёт ближайшего трамплина.
     pub fn adamas_segment_abandon(value: Value);
+    /// Остаток отложенного - на своём корне, без хендлеров вызывающего.
+    pub fn adamas_segment_settle();
     /// Промоушен захваченной резумпции (§5.2): значения в средах её кадров.
     pub fn adamas_segment_promote(resumption: Value, children: Promote);
 }

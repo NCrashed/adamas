@@ -1,0 +1,37 @@
+-- Row-параметр семейства (§3.2, §5.2): `Thunk e a` несёт в типе эффект
+-- отложенного вычисления.
+--
+-- Параметр сортом `Effect` - не связывание, а параметр определения, как
+-- уровень: аргумент пишется на его месте (`Thunk {Log} UInt64`, `Thunk {} a`),
+-- голое имя там - хвост (`Thunk e a`). `force` полиморфен по нему, и эффект
+-- отложенного доходит до хендлера вызывающего; чистый `Thunk {}` вызывается
+-- где угодно. Row без меток перед типом пишется `{| e} A`.
+
+effect Log where
+  note : UInt64 -> Unit
+
+data Thunk (e : Effect) (a : Type) where
+  Delay : (Unit -> {| e} a) -> Thunk e a
+
+force : Thunk e a -> {| e} a
+force (Delay k) = k MkUnit
+
+loud : Unit -> {Log} UInt64
+loud _u =
+  let _x : Unit = note 5
+  7
+
+logged : Thunk {Log} UInt64
+logged = Delay loud
+
+pure : Thunk {} UInt64
+pure = Delay (\_u -> 30)
+
+collect : ({Log} UInt64) -> (UInt64, List UInt64)
+collect k = handle k with
+  state Nil
+  return v -> (v, state)
+  note n -> resume MkUnit (Cons n state)
+
+main : (UInt64, List UInt64)
+main = collect (\_u -> force logged + force pure)

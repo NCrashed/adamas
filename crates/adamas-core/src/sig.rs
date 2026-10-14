@@ -790,6 +790,11 @@ pub struct Blocked {
 #[derive(Clone, Debug, Default)]
 pub struct Signature {
     definitions: HashMap<Name, Definition>,
+    /// Написанные позиции row-аргументов у формера семейства (§3.2, §5.2):
+    /// `Task (e : Effect) (a : Type)` даёт `[0]`. Row параметром семейства не
+    /// связывание, а параметр определения, и тип формера о ней молчит, -
+    /// поэтому где её писать, хранится рядом.
+    row_slots: HashMap<Name, Rc<[u32]>>,
     origins: HashMap<Name, crate::source::Span>,
     /// Маршрут до первого источника аллокации - от [`crate::alloc::source`].
     ///
@@ -1419,6 +1424,20 @@ impl Signature {
                 self.allocations.remove(name);
             }
         }
+    }
+
+    /// Позиции row-аргументов формера `name` среди написанных (§5.2).
+    pub fn place_rows(&mut self, name: &str, slots: Rc<[u32]>) {
+        if !slots.is_empty() {
+            self.row_slots.insert(Name::from(name), slots);
+        }
+    }
+
+    /// Где формер `name` ждёт row среди написанных аргументов; пусто у всякого
+    /// другого имени.
+    #[must_use]
+    pub fn row_slots(&self, name: &str) -> &[u32] {
+        self.row_slots.get(name).map_or(&[], |it| it)
     }
 
     /// Носитель `1` на названных позициях определения без тела (§3.3, §10

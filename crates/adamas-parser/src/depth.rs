@@ -107,10 +107,9 @@ fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<
         ExprKind::Effectful { labels, body, .. } => {
             let inner = deepen(depth, 1, expr.span)?;
             pending.push((Node::Expr(body), inner));
-            for label in labels {
-                pending.extend(label.arguments.iter().map(|it| (Node::Expr(it), inner)));
-            }
+            labelled(labels, inner, pending);
         }
+        ExprKind::Row { labels, .. } => labelled(labels, deepen(depth, 1, expr.span)?, pending),
         ExprKind::Using { body, .. } => pending.push((Node::Expr(body), depth)),
         // Тип записи - **телескоп**: тип поля живёт под предыдущими, и звено
         // ставит каждое (§4.2). Хвост звена не ставит - он переменная, а не
@@ -553,5 +552,12 @@ fn binder_terms<'a>(binders: &'a [Binder], depth: u32, pending: &mut Pending<'a>
                 .as_ref()
                 .map(|default| (Node::Expr(default), depth)),
         );
+    }
+}
+
+/// Аргументы меток row - на одной глубине, соседями.
+fn labelled<'a>(labels: &'a [crate::ast::EffectLabel], inner: u32, pending: &mut Pending<'a>) {
+    for label in labels {
+        pending.extend(label.arguments.iter().map(|it| (Node::Expr(it), inner)));
     }
 }

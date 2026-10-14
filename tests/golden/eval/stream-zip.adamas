@@ -1,0 +1,40 @@
+-- Pull-форма из `Std.Stream` (§3.4, §5.2): `zip` двух продюсеров с эффектом.
+--
+-- Эффект продюсера едет в типе row-параметром: `Step {Log} UInt64`. Короткий
+-- продюсер договаривает сам - его `Guard` закрывается на выходе (отметка 1);
+-- длинный брошен на середине, и деструктор шага разматывает его сегмент -
+-- `Guard` внутри отмечается двойкой у хендлера вызывающего.
+
+import Std.Stream (Step, Done, Next, reify, advance, abandon, dropStep)
+
+effect Log where
+  note : UInt64 -> Unit
+
+resource Guard where
+  Held : (ω n : UInt64) -> Guard
+  release : (1 g : Guard) -> {Log} Unit
+  release (Held n) = note n
+
+guarded : UInt64 -> List UInt64 -> {Yield UInt64, Log} Unit
+guarded n xs =
+  let 1 _g : Guard = Held n
+  each xs
+
+-- Сумма попарных произведений до конца короткого.
+zipped : UInt64 -> (1 a : Step {Log} UInt64) -> (1 b : Step {Log} UInt64) -> {Log} UInt64
+zipped acc Done b =
+  let 1 _gone : Unit = dropStep b
+  acc
+zipped acc (Next _x ra) Done =
+  let 1 _gone : Unit = abandon ra
+  acc
+zipped acc (Next x ra) (Next y rb) = zipped (acc + x * y) (advance ra) (advance rb)
+
+collect : ({Log} UInt64) -> (UInt64, List UInt64)
+collect k = handle k with
+  state Nil
+  return v -> (v, state)
+  note n -> resume MkUnit (Cons n state)
+
+main : (UInt64, List UInt64)
+main = collect (\_u -> zipped 0 (reify (guarded 1 [1, 2, 3])) (reify (guarded 2 [10, 20, 30, 40])))

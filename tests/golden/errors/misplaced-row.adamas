@@ -1,0 +1,11 @@
+-- Row аргументом там, где формер её не ждёт (§3.2, §5.2): у `List`
+-- row-параметра нет, и `{Log}` на месте типа смысла не имеет.
+
+effect Log where
+  note : UInt64 -> Unit
+
+lengthOf : List {Log} -> UInt64
+lengthOf _ = 0
+
+main : UInt64
+main = 0

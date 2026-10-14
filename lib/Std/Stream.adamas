@@ -2,11 +2,10 @@
 --
 -- Сам поток - эффект `Yield` прелюдии вместе с `each` и `forEach`: итерация -
 -- базовая идиома и пишется без импорта. Здесь - то, что строит поток из потока
--- и сводит его к значению. Всё это push-форма: продюсер ведёт, хендлер
--- отвечает. Pull-форма (`reify`, `Step`) - для `zip` и `merge`, где два
--- продюсера приостановлены разом, - пишется пользовательским кодом с `unwind`
--- прелюдии (§3.4): эффектов продюсера обёртка в типе не несёт, пока семейства
--- не берут row-параметров, и здесь её нет.
+-- и сводит его к значению. Push-форма: продюсер ведёт, хендлер отвечает.
+-- Pull-форма (`reify`, `Step`, `advance`) - для `zip` и `merge`, где два
+-- продюсера приостановлены разом: шаг вытягивает потребитель, а эффекты
+-- продюсера едут в типе row-параметром (§5.2).
 --
 -- Свёртка - параметризованный хендлер: состояние идёт нитью (`state`), потому
 -- что результат резумпции в ω-позицию не отдать - она линейна (§3.3).
@@ -49,3 +48,29 @@ toList : ({Yield a} Unit) -> List a
 toList prod = handle prod with
   yield x -> Cons x (resume MkUnit)
   return _v -> Nil
+
+-- | Резумпция потока, ушедшая из ветки значением (§3.4). Брошенную разматывает
+-- деструктор - `unwind` прелюдии, - и деструкторы приостановленного продюсера
+-- отрабатывают у хендлеров того, кто бросил.
+resource Resumption (e : Effect) (r : Type) where
+  Suspended : (1 k : Unit -> {| e} r) -> Resumption e r
+  abandon : (1 s : Resumption e r) -> {| e} Unit
+  abandon (Suspended k) = unwind k
+
+-- | Поток, вытягиваемый по шагу: элемент с остатком либо конец.
+resource Step (e : Effect) (a : Type) where
+  Done : Step e a
+  Next : (ω x : a) -> Resumption e (Step e a) -> Step e a
+  dropStep : (1 s : Step e a) -> {| e} Unit
+  dropStep Done = MkUnit
+  dropStep (Next _x r) = abandon r
+
+-- | Продюсер, приостановленный на первом элементе.
+reify : ({Yield a | e} Unit) -> {| e} Step e a
+reify prod = handle prod with
+  yield x -> Next x (Suspended resume)
+  return _v -> Done
+
+-- | Следующий шаг потока.
+advance : (1 r : Resumption e (Step e a)) -> {| e} Step e a
+advance (Suspended k) = k MkUnit

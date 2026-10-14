@@ -170,6 +170,7 @@ impl<'a> Spent<'a> {
             | ExprKind::Arrow(..)
             // Row стоит в позиции типа, а тип ничего не расходует.
             | ExprKind::Effectful { .. }
+            | ExprKind::Row { .. }
             | ExprKind::Lit(_)
             | ExprKind::Hole => false,
         }

@@ -3925,20 +3925,22 @@ fn infer_case(
 
     let constructors = constructors.clone();
     let binders = peel_pis(&declaration.ty).0.len();
-    let family = declaration.instantiate_type(&case.levels, &[], &[]);
 
     // Тип разбираемого значения обязан быть этим семейством, применённым
     // полностью: параметры, потом индексы.
     let (scrutinee_ty, scrutinee_usage) =
         framed(infer(ctx, metas, sigma, &case.scrutinee), Frame::Scrutinee)?;
-    let arguments = data_arguments(signature, metas, case, &scrutinee_ty)
-        .filter(|arguments| arguments.len() == binders)
+    let (arguments, rows) = data_arguments(signature, metas, case, &scrutinee_ty)
+        .filter(|(arguments, _)| arguments.len() == binders)
         .ok_or_else(|| ErrorKind::NotADataValue {
             data: Rc::clone(&case.data),
             ty: read_back(ctx, metas, &scrutinee_ty),
         })?;
     let (data_params, data_indices) = arguments.split_at(params as usize);
 
+    // Row-аргументы семейства (§5.2) узел разбора не несёт: они в типе
+    // разбираемого, и правда о них там.
+    let family = family_instance(ctx, declaration, &case.levels, &rows);
     let indexed = instantiate_telescope(family, data_params);
     let motive_ty = motive_type(ctx, metas, case, &indexed, data_params);
     let motive_usage = framed(
@@ -3964,7 +3966,7 @@ fn infer_case(
     branch_shape(case, &constructors)?;
     let mut branches = Usage::zero(ctx.size());
     for (index, branch) in case.branches.iter().enumerate() {
-        let expected = branch_type(ctx, case, &branch.constructor, data_params, &motive);
+        let expected = branch_type(ctx, case, &rows, &branch.constructor, data_params, &motive);
         let usage = framed(
             check(ctx, metas, sigma, &branch.body, &expected),
             Frame::Branch(u32::try_from(index).unwrap_or(u32::MAX)),
@@ -3996,6 +3998,9 @@ pub(crate) fn erasable(signature: &Signature, constructors: &[Name], params: u32
     })
 }
 
+/// Row-аргументы семейства в голове типа значения (§5.2).
+type FamilyRows = Rc<[Row<Rc<Value>>]>;
+
 /// Аргументы, к которым применено индуктивное семейство в типе значения.
 ///
 /// `None` - тип не то семейство. δ-разворот здесь обязателен: у
@@ -4006,9 +4011,9 @@ fn data_arguments(
     metas: &mut Metas,
     case: &Case,
     ty: &Rc<Value>,
-) -> Option<Vec<Rc<Value>>> {
+) -> Option<(Vec<Rc<Value>>, FamilyRows)> {
     let reduced = whnf_solved(signature, metas, ty);
-    let Value::Neutral(Head::Global(name, levels, _, _), spine) = &*reduced else {
+    let Value::Neutral(Head::Global(name, levels, rows, _), spine) = &*reduced else {
         return None;
     };
     if *name != case.data || levels.len() != case.levels.len() {
@@ -4027,7 +4032,8 @@ fn data_arguments(
             Elim::App(argument) => Some(Rc::clone(argument)),
             Elim::Case(_) | Elim::Split(_) | Elim::Project(_) | Elim::With(_) => None,
         })
-        .collect()
+        .collect::<Option<Vec<_>>>()
+        .map(|arguments| (arguments, Rc::clone(rows)))
 }
 
 /// Тип мотива: `(0 i⃗ : I) -> (0 x : D levels params i⃗) -> Type ?ℓ`.
@@ -4085,6 +4091,7 @@ fn motive_type(
 fn branch_type(
     ctx: &Ctx<'_>,
     case: &Case,
+    rows: &[Row<Rc<Value>>],
     constructor: &Name,
     params: &[Rc<Value>],
     motive: &Rc<Value>,
@@ -4093,8 +4100,10 @@ fn branch_type(
         .signature()
         .lookup(constructor)
         .unwrap_or_else(|| unreachable!("конструктор `{constructor}` пропал из сигнатуры"));
-    let applied =
-        instantiate_telescope(declaration.instantiate_type(&case.levels, &[], &[]), params);
+    let applied = instantiate_telescope(
+        family_instance(ctx, declaration, &case.levels, rows),
+        params,
+    );
     let (telescope, size) = telescope_of(ctx.size(), &applied);
 
     // Хвост телескопа - `D levels params indices`, оттуда и берутся индексы,
@@ -4278,4 +4287,23 @@ fn spine_head(term: &Term) -> &Term {
         Term::App(callee, _) => spine_head(callee),
         _ => term,
     }
+}
+
+/// Тип определения семейства при row-аргументах разбираемого (§5.2) - в
+/// окружении контекста: аргументы меток бывают открытыми.
+fn family_instance(
+    ctx: &Ctx<'_>,
+    declaration: &Definition,
+    levels: &[Level],
+    rows: &[Row<Rc<Value>>],
+) -> Rc<Value> {
+    if rows.is_empty() {
+        return declaration.instantiate_type(levels, &[], &[]);
+    }
+    let size = ctx.size();
+    let rows: Vec<Row<Term>> = rows
+        .iter()
+        .map(|row| row.map(|argument| crate::eval::quote(size, argument)))
+        .collect();
+    ctx.eval(&declaration.instantiated_type(levels, &rows, &[]))
 }

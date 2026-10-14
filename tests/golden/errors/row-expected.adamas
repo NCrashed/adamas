@@ -1,0 +1,12 @@
+-- Row-аргумент семейства пишется row (§3.2, §5.2): на месте параметра сортом
+-- `Effect` тип не стоит. До среза row-параметров объявление `Task` отвергалось
+-- само; теперь оно законно, и отказ переехал туда, где написано не то.
+
+data Task (e : Effect) (a : Type) where
+  MkTask : Nat -> Task e a
+
+wrong : Task Nat Nat -> Nat
+wrong (MkTask n) = n
+
+main : Nat
+main = Zero

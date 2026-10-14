@@ -1704,7 +1704,14 @@ impl<'a> Parser<'a> {
             if type_app {
                 self.bump();
             }
-            let argument = self.postfix()?;
+            // Row аргументом (`Task {Log} Nat`, §5.2) - только здесь: в голове
+            // скобки ничего не открывают, и пустая row перед типом не пишется
+            // (§10 вопрос 217).
+            let argument = if !type_app && self.at_row_argument() {
+                self.row_argument()?
+            } else {
+                self.postfix()?
+            };
             blocked = contains_block(&argument);
             let span = callee.span.merge(argument.span);
             let kind = if type_app {
@@ -2071,51 +2078,92 @@ impl<'a> Parser<'a> {
     /// связывает: метка ряда заглавная, поле записи строчное. От группы
     /// implicit-связываний её отличает отсутствие двоеточия, от констрейнта -
     /// отсутствие `=>` за скобкой, и оба проверены раньше.
+    ///
+    /// Row из одного хвоста пишется `{| e} A` (§5.2): `{e} A` читается
+    /// записью-punning, и строчное имя первым её от неё не отличит.
     fn at_effect_row(&self) -> bool {
         self.at(TokenKind::LBrace)
-            && self.kind_ahead(1) == TokenKind::Ident
-            && self.text_ahead(1).starts_with(|ch: char| ch.is_uppercase())
-            && !self.at_binder()
+            && (self.kind_ahead(1) == TokenKind::Pipe
+                || (self.kind_ahead(1) == TokenKind::Ident
+                    && self.text_ahead(1).starts_with(|ch: char| ch.is_uppercase())
+                    && !self.at_binder()))
     }
 
     /// `{State Int, IO | e} A`.
     fn effect_row(&mut self) -> Result<Expr, ParseError> {
-        let open = self.expect(TokenKind::LBrace)?;
-        let mut labels = Vec::new();
-        let mut tail = None;
-        loop {
-            let name = self.ident()?;
-            let name = self.pathed(name);
-            let mut arguments = Vec::new();
-            while starts_atom(self.kind()) {
-                arguments.push(self.atom()?);
-            }
-            let span = arguments
-                .last()
-                .map_or(name.span, |last| name.span.merge(last.span));
-            labels.push(EffectLabel {
-                name,
-                arguments,
-                span,
-            });
-            if self.eat(TokenKind::Comma).is_some() {
-                continue;
-            }
-            if self.eat(TokenKind::Pipe).is_some() {
-                tail = Some(self.ident()?);
-            }
-            break;
-        }
-        self.expect(TokenKind::RBrace)?;
+        let (open, labels, tail, _) = self.row_labels()?;
         let body = self.expr()?;
         Ok(Expr {
-            span: open.span.merge(body.span),
+            span: open.merge(body.span),
             kind: ExprKind::Effectful {
                 labels,
                 tail,
                 body: Box::new(body),
             },
         })
+    }
+
+    /// Начинается ли здесь row аргументом: `{Log}`, `{| e}`, `{}` (§5.2).
+    ///
+    /// Заглавное имя за скобкой - метка, как у [`Self::at_effect_row`]; `|`
+    /// и сразу `}` записью не бывают вовсе.
+    fn at_row_argument(&self) -> bool {
+        self.at(TokenKind::LBrace)
+            && match self.kind_ahead(1) {
+                TokenKind::Pipe | TokenKind::RBrace => true,
+                TokenKind::Ident => {
+                    self.text_ahead(1).starts_with(|ch: char| ch.is_uppercase())
+                        && !self.at_binder()
+                }
+                _ => false,
+            }
+    }
+
+    /// `{Log | e}` аргументом: row без тела.
+    fn row_argument(&mut self) -> Result<Expr, ParseError> {
+        let (open, labels, tail, close) = self.row_labels()?;
+        Ok(Expr {
+            span: open.merge(close),
+            kind: ExprKind::Row { labels, tail },
+        })
+    }
+
+    /// Скобки row: метки, хвост и спаны обеих скобок. Меток бывает ноль -
+    /// `{}` и `{| e}`; префиксная форма до сюда с пустой не доходит, её
+    /// отбирает [`Self::at_effect_row`].
+    fn row_labels(&mut self) -> Result<(Span, Vec<EffectLabel>, Option<Name>, Span), ParseError> {
+        let open = self.expect(TokenKind::LBrace)?;
+        let mut labels = Vec::new();
+        let mut tail = None;
+        if self.eat(TokenKind::Pipe).is_some() {
+            tail = Some(self.ident()?);
+        } else if !self.at(TokenKind::RBrace) {
+            loop {
+                let name = self.ident()?;
+                let name = self.pathed(name);
+                let mut arguments = Vec::new();
+                while starts_atom(self.kind()) {
+                    arguments.push(self.atom()?);
+                }
+                let span = arguments
+                    .last()
+                    .map_or(name.span, |last| name.span.merge(last.span));
+                labels.push(EffectLabel {
+                    name,
+                    arguments,
+                    span,
+                });
+                if self.eat(TokenKind::Comma).is_some() {
+                    continue;
+                }
+                if self.eat(TokenKind::Pipe).is_some() {
+                    tail = Some(self.ident()?);
+                }
+                break;
+            }
+        }
+        let close = self.expect(TokenKind::RBrace)?;
+        Ok((open.span, labels, tail, close.span))
     }
 
     fn at_record(&self) -> bool {

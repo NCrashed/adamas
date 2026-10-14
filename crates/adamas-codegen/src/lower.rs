@@ -6654,8 +6654,22 @@ fn nested_rows(term: &Term, into: &mut BTreeSet<u32>) {
         | Term::RowKind(_)
         | Term::EffectKind
         | Term::Prim(_)
-        | Term::Meta(_)
-        | Term::Const(..) => {}
+        | Term::Meta(_) => {}
+        // Row-аргумент семейства (§5.2): `Thunk e a` несёт вычисление с row
+        // `e`, и применять его будет тот, кто его разберёт, - то есть параметр
+        // производит через аргумент так же, как стрелка внутри домена.
+        Term::Const(_, _, args) => {
+            for row in args.row_args() {
+                if let Some(Tail::Var(RowVar(index))) = row.tail() {
+                    into.insert(index);
+                }
+                for label in row.labels() {
+                    for argument in &label.arguments {
+                        nested_rows(argument, into);
+                    }
+                }
+            }
+        }
         Term::Record(fields) | Term::Row(fields) => {
             for field in fields.iter() {
                 nested_rows(&field.ty, into);

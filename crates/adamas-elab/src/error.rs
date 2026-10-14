@@ -594,18 +594,21 @@ pub enum ElabError {
         span: Span,
     },
 
-    /// Параметр семейства сортом `Effect` - `Task eff a` из §5.2 (§10 вопрос
-    /// 121, граница).
+    /// Row аргументом там, где формер её не ждёт (§3.2, §5.2): `Nat {Log}`
+    /// либо row на месте типового параметра семейства.
     ///
-    /// Отказ, а не молчание: формер по row-аргументу не применяется, спайн
-    /// значения row не несёт, и принятая форма падала бы дальше - на пробе
-    /// «применение не-функции» роняло сам компилятор при объявлении эффекта,
-    /// чья операция называет такое семейство.
-    #[error("{}", adamas_l10n::tr!("elab-row-parameter", name = .name))]
-    RowParameter {
-        /// Имя параметра.
-        name: Symbol,
-        /// Где написан.
+    /// Row - значение сорта `Effect`, а не тип: на месте типа она смысла не
+    /// имеет, и промолчать значило бы потерять написанное.
+    #[error("{}", adamas_l10n::tr!("elab-misplaced-row"))]
+    MisplacedRow {
+        /// Где написана.
+        span: Span,
+    },
+    /// На месте параметра сортом `Effect` написана не row (§3.2, §5.2):
+    /// `Task Nat a` при `Task (e : Effect) (a : Type)`.
+    #[error("{}", adamas_l10n::tr!("elab-row-expected"))]
+    RowExpected {
+        /// Где написано.
         span: Span,
     },
 
@@ -1671,7 +1674,8 @@ impl ElabError {
             | Self::AmbiguousInstance { span, .. }
             | Self::CoherentDuplicate { span, .. }
             | Self::NotAnEffect { span, .. }
-            | Self::RowParameter { span, .. }
+            | Self::MisplacedRow { span }
+            | Self::RowExpected { span }
             | Self::TrailingDefault { span, .. }
             | Self::SealedConstraint { span, .. }
             | Self::SealedInstance { span, .. }

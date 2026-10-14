@@ -3817,6 +3817,11 @@ fn declare_families(
     if families.is_empty() {
         return Ok(());
     }
+    // Места row всей группы - до конструкторов: сосед называет соседа
+    // написанными аргументами (§5.2).
+    for family in &families {
+        signature.place_rows(&family.declared, Rc::clone(&family.slots));
+    }
     // Имена **всей** группы: маршрут несёт номер члена, и `Tree` рядом с
     // `Forest` печатались бы как «член группы #0» и «#1».
     let names = Names::group(families.iter().map(|family| {
@@ -6661,6 +6666,10 @@ struct Family<'a> {
     levels: Rc<[Level]>,
     /// Имена для маршрута.
     names: Names,
+    /// Row-параметры по порядку: `RowVar(i)` - `i`-е имя (§5.2).
+    rows: Vec<Symbol>,
+    /// Их места среди написанных параметров.
+    slots: Rc<[u32]>,
 }
 
 impl Family<'_> {
@@ -6669,8 +6678,11 @@ impl Family<'_> {
         Member {
             name: Rc::clone(&self.declared),
             levels: Rc::clone(&self.levels),
-            // Тип-формер семейства row не носит: метка не тип.
-            args: Args::none(),
+            // Свой row-параметр сосед по группе видит переменной, как уровень.
+            args: Args::rows((0..self.rows.len()).map(|index| {
+                let var = RowVar(u32::try_from(index).unwrap_or(u32::MAX));
+                Row::closing(Vec::new(), Some(Tail::Var(var)))
+            })),
             ty: Rc::new(self.kind.clone()),
         }
     }
@@ -6691,29 +6703,23 @@ fn family_header<'a>(
     // Телескоп параметров элаборируется один раз и переиспользуется: kind и
     // каждый конструктор обязаны нести **один и тот же** телескоп, иначе
     // `List` в результате и `List` в объявлении - два разных семейства.
-    let mut elaborator =
-        Elaborator::new(signature, metas, owned, fixities, warnings).within(within);
+    //
+    // Параметр сортом `Effect` - row (§3.2): связыванием телескопа он не
+    // становится, а встаёт параметром определения, как уровень, и ссылка
+    // несёт его аргументом (`Task {Log} Nat`, §5.2). Снимается он до
+    // элаборации телескопа, а место его среди написанных запоминается -
+    // по нему применение снимет row со спайна.
+    let (rows, slots, typed) = row_params(&data.params);
+    let mut elaborator = Elaborator::new(signature, metas, owned, fixities, warnings)
+        .within(within)
+        .with_row_params(&rows);
     // Связывания двух родов в одном телескопе, как у алиаса: сперва параметры
     // функтора, потом свои. Написанный параметр живёт под функторными - его тип
     // вправе их упоминать.
     let outer = elaborator.telescope(params_of(within), true, Mult::Many, Unwritten::Sort)?;
     let own = elaborator.beneath(&outer, |it| {
-        it.telescope(&data.params, false, Mult::Zero, Unwritten::Sort)
+        it.telescope(&typed, false, Mult::Zero, Unwritten::Sort)
     })?;
-    // Параметр сортом `Effect` - `Task eff a` из §5.2 - форма следующего
-    // среза: формер по row-аргументу не применяется, спайн значения row не
-    // несёт. Отказ здесь, при объявлении, - дальше падал сам компилятор.
-    if let Some(param) = own.iter().find(|it| matches!(&*it.ty, Term::EffectKind)) {
-        let at = data
-            .params
-            .iter()
-            .find(|binder| binder.names.iter().any(|name| name.text == param.name))
-            .map_or(span, |binder| binder.span);
-        return Err(ElabError::RowParameter {
-            name: Rc::clone(&param.name),
-            span: at,
-        });
-    }
     let params: Vec<Param> = outer.iter().chain(own.iter()).cloned().collect();
     let kind = match &data.kind {
         // Параметры пишутся, поэтому в kind они явные: `Vect a n`. Функторные -
@@ -6764,7 +6770,37 @@ fn family_header<'a>(
         kind,
         levels,
         names,
+        rows,
+        slots: slots.into(),
     })
+}
+
+/// Row-параметры заголовка (§3.2, §5.2): их имена, места среди написанных и
+/// остальной телескоп.
+///
+/// Узнаётся параметр по написанному сорту `Effect`: тип его ещё не
+/// элаборирован, а элаборировать нечем - связыванием он не станет.
+fn row_params(params: &[ast::Binder]) -> (Vec<Symbol>, Vec<u32>, Vec<ast::Binder>) {
+    let mut rows = Vec::new();
+    let mut slots = Vec::new();
+    let mut typed = Vec::new();
+    let mut position = 0u32;
+    for binder in params {
+        let effect = binder.ty.as_ref().is_some_and(
+            |ty| matches!(&ty.kind, ast::ExprKind::Name(name) if &*name.text == "Effect"),
+        );
+        for name in &binder.names {
+            if effect {
+                rows.push(Rc::clone(&name.text));
+                slots.push(position);
+            }
+            position += 1;
+        }
+        if !effect {
+            typed.push(binder.clone());
+        }
+    }
+    (rows, slots, typed)
 }
 
 /// Типы конструкторов - под группой, в которой семейство объявляется.
@@ -6801,6 +6837,7 @@ fn family_constructors(
                 visible.to_vec(),
             )
             .within(within)
+            .with_row_params(&family.rows)
             .wrapped(&family.params, true, |it| {
                 it.constructor_type(&constructor.ty, Mult::One)
             })?;
@@ -6821,9 +6858,20 @@ fn family_constructors(
 fn family_member(family: &Family<'_>, constructors: &[(Symbol, Term)]) -> SigMember {
     let parameters = u32::try_from(family.params.len()).unwrap_or(u32::MAX);
     constructors.iter().fold(
-        SigMember::data(&family.declared, parameters, family.kind.clone()),
+        family_rowed(
+            SigMember::data(&family.declared, parameters, family.kind.clone()),
+            family,
+        ),
         |member, (constructor, ty)| member.with_constructor(constructor, ty.clone()),
     )
+}
+
+/// Член с row-арностью семейства (§5.2): конструкторы получают ту же.
+fn family_rowed(member: SigMember, family: &Family<'_>) -> SigMember {
+    if family.rows.is_empty() {
+        return member;
+    }
+    member.with_rows(u32::try_from(family.rows.len()).unwrap_or(u32::MAX))
 }
 
 /// Семейство вместе с тем, что решается до его объявления.
@@ -7642,6 +7690,9 @@ fn declare_data(
     let mut family = family_header(
         signature, metas, owned, fixities, warnings, within, data, span,
     )?;
+    // Места row - до конструкторов: `Thunk e a` в поле снимает row со спайна
+    // по ним же.
+    signature.place_rows(&family.declared, Rc::clone(&family.slots));
     let mut constructors = family_constructors(
         signature,
         metas,
@@ -7682,14 +7733,15 @@ fn declare_data(
         .iter()
         .map(|(name, ty)| (&**name, ty.clone()))
         .collect();
+    let member = written.iter().fold(
+        family_rowed(
+            SigMember::data(&family.declared, parameters, family.kind.clone()).with_inferred_sort(),
+            &family,
+        ),
+        |member, (constructor, ty)| member.with_constructor(constructor, ty.clone()),
+    );
     signature
-        .declare_data_inferred(
-            metas,
-            &family.declared,
-            parameters,
-            family.kind.clone(),
-            &written,
-        )
+        .declare(metas, &Group::of(member))
         .map_err(|error| ElabError::Core {
             span: route::locate(&Declared::Data(data), &error, span),
             error: Box::new(error),

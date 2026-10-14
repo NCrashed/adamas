@@ -864,6 +864,20 @@ impl<'a> Names<'a> {
         self.locals.truncate(scope);
     }
 
+    /// Метки row и её хвост: хвост - переменная, как параметр.
+    fn row(
+        &mut self,
+        labels: &[adamas_parser::ast::EffectLabel],
+        tail: Option<&adamas_parser::ast::Name>,
+    ) {
+        for label in labels {
+            self.label(label);
+        }
+        if let Some(tail) = tail {
+            self.mark(tail.span, Face::Parameter, 0);
+        }
+    }
+
     fn expr(&mut self, expr: &Expr) {
         match &expr.kind {
             ExprKind::Name(name) => self.used(name),
@@ -893,13 +907,9 @@ impl<'a> Names<'a> {
                 self.expr(codomain);
                 self.locals.truncate(scope);
             }
+            ExprKind::Row { labels, tail } => self.row(labels, tail.as_ref()),
             ExprKind::Effectful { labels, tail, body } => {
-                for label in labels {
-                    self.label(label);
-                }
-                if let Some(tail) = tail {
-                    self.mark(tail.span, Face::Parameter, 0);
-                }
+                self.row(labels, tail.as_ref());
                 self.expr(body);
             }
             ExprKind::Block(block) => self.block(block),

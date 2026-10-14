@@ -114,6 +114,7 @@ impl Expr {
             | ExprKind::Hole
             | ExprKind::Tuple(_)
             | ExprKind::RecordType(..)
+            | ExprKind::Row { .. }
             | ExprKind::Record(_)
             | ExprKind::Project(..)
             | ExprKind::Update(..)
@@ -826,6 +827,7 @@ impl<'a> Printer<'a> {
             ExprKind::Hole => self.push("_"),
             ExprKind::Mask(inner) => self.wrapped("mask ", inner),
             ExprKind::Effectful { .. } => self.effect_row(expr),
+            ExprKind::Row { labels, tail } => self.row_braces(labels, tail.as_ref()),
             ExprKind::Using { name, body } => {
                 self.push("using ");
                 self.push(&name.text);
@@ -1206,7 +1208,13 @@ impl<'a> Printer<'a> {
         let ExprKind::Effectful { labels, tail, body } = &expr.kind else {
             return;
         };
-        let tail = tail.as_ref();
+        self.row_braces(labels, tail.as_ref());
+        self.push(" ");
+        self.expr(body, Prec::Lowest);
+    }
+
+    /// Скобки row: метки и хвост. Хвост без меток пишется `{| e}`.
+    fn row_braces(&mut self, labels: &[EffectLabel], tail: Option<&Name>) {
         self.push("{");
         for (position, label) in labels.iter().enumerate() {
             if position > 0 {
@@ -1219,11 +1227,10 @@ impl<'a> Printer<'a> {
             }
         }
         if let Some(tail) = tail {
-            self.push(" | ");
+            self.push(if labels.is_empty() { "| " } else { " | " });
             self.push(&tail.text);
         }
-        self.push("} ");
-        self.expr(body, Prec::Lowest);
+        self.push("}");
     }
 
     fn binder(&mut self, binder: &Binder) {

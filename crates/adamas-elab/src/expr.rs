@@ -20,7 +20,7 @@ use adamas_core::pattern::{
 };
 use adamas_core::prim;
 use adamas_core::prim::{Prim, PrimOp, PrimTy};
-use adamas_core::row::{Label, Row, Tail};
+use adamas_core::row::{Label, Row, RowVar, Tail};
 use adamas_core::sig::{Definition, DefinitionKind, Signature};
 use adamas_core::source::Span;
 use adamas_core::term::{
@@ -606,6 +606,12 @@ fn depends_by_text(fields: &[ast::RecordField]) -> bool {
 fn written_row_tail(expr: &Expr) -> Option<&ast::Name> {
     let recur = written_row_tail;
     match &expr.kind {
+        ExprKind::Row { tail, labels } => tail.as_ref().or_else(|| {
+            labels
+                .iter()
+                .flat_map(|it| &it.arguments)
+                .find_map(written_row_tail)
+        }),
         ExprKind::Effectful { tail, body, labels } => tail.as_ref().or_else(|| {
             recur(body).or_else(|| {
                 labels
@@ -673,6 +679,7 @@ pub(crate) fn names_any(expr: &Expr, wanted: &[&Symbol]) -> bool {
     match &expr.kind {
         ExprKind::Name(name) => wanted.iter().any(|it| **it == name.text),
         ExprKind::Lit(_) | ExprKind::Hole => false,
+        ExprKind::Row { labels, .. } => labels.iter().flat_map(|it| &it.arguments).any(recur),
         ExprKind::Effectful { labels, body, .. } => {
             recur(body) || labels.iter().flat_map(|it| &it.arguments).any(recur)
         }
@@ -1150,6 +1157,12 @@ pub(crate) struct Elaborator<'a> {
     /// `instantiated`: два вхождения `e` обязаны быть одним параметром, иначе
     /// написанная связь между позициями теряется.
     tails: HashMap<Symbol, Row<Term>>,
+    /// Row-параметры объявляемого семейства (§3.2, §5.2): имя и его `RowVar`.
+    ///
+    /// Отдельно от [`Self::tails`], потому что те сбрасываются на каждой
+    /// сигнатуре, а параметр семейства виден во всём объявлении - в типах
+    /// параметров, формера и каждого конструктора.
+    row_params: HashMap<Symbol, Row<Term>>,
     /// Запрещена ли вставка имплиситов ближайшему имени - см. `type_app`.
     bare: bool,
     /// Оставить ли хвостовые факты ближайшего применения невставленными:
@@ -1348,6 +1361,18 @@ impl<'a> Elaborator<'a> {
     }
 
     /// То же, внутри тела модуля: короткое имя члена ищется квалифицированным.
+    /// Row-параметры семейства по порядку - `RowVar` с номером позиции (§5.2).
+    pub(crate) fn with_row_params(mut self, names: &[Symbol]) -> Self {
+        for (index, name) in names.iter().enumerate() {
+            let var = RowVar(u32::try_from(index).unwrap_or(u32::MAX));
+            self.row_params.insert(
+                Rc::clone(name),
+                Row::closing(Vec::new(), Some(Tail::Var(var))),
+            );
+        }
+        self
+    }
+
     pub(crate) fn within(mut self, enclosing: Option<&Enclosing>) -> Self {
         self.enclosing = enclosing.cloned();
         self
@@ -1474,6 +1499,7 @@ impl<'a> Elaborator<'a> {
             rows: None,
             lifted: None,
             tails: HashMap::new(),
+            row_params: HashMap::new(),
             types: false,
             position: Position::Inner,
             produced: None,
@@ -1816,7 +1842,11 @@ impl<'a> Elaborator<'a> {
         // Отсутствие подъёма само по себе хвост не запрещает: написанный
         // руками проходил мимо него и оставлял переменную свободной - тип
         // получался тихо неверный.
-        if let Some(name) = written_row_tail(ty) {
+        // Row-параметр объявляемого семейства хвостом писать законно (§5.2): его
+        // ведёт `row_params`, и свободным он не остаётся.
+        if let Some(name) =
+            written_row_tail(ty).filter(|name| !self.row_params.contains_key(&name.text))
+        {
             return Err(ElabError::WrittenRowTail {
                 name: Rc::clone(&name.text),
                 why,
@@ -1904,6 +1934,25 @@ impl<'a> Elaborator<'a> {
         (found.names, found.tails)
     }
 
+    /// Применение: имя на месте row-параметра семейства - хвост, а не
+    /// свободный тип (§5.2), и `Task e a` не поднимает `e : Type`. Хвосты row
+    /// эффектов подъём не собирает вовсе - их ведёт `named_tail`.
+    fn free_in_application(&self, expr: &Expr, bound: &mut Vec<Symbol>, found: &mut Unbound) {
+        let (head, arguments) = written_spine(expr);
+        let slots = match &head.kind {
+            ExprKind::Name(name) => self.slots_of(&name.text),
+            _ => Rc::from([]),
+        };
+        self.free_in(head, bound, found);
+        for (at, argument) in arguments.iter().enumerate() {
+            let slot = u32::try_from(at).is_ok_and(|at| slots.contains(&at));
+            if slot && matches!(argument.kind, ExprKind::Name(_)) {
+                continue;
+            }
+            self.free_in(argument, bound, found);
+        }
+    }
+
     fn free_in(&self, expr: &Expr, bound: &mut Vec<Symbol>, found: &mut Unbound) {
         match &expr.kind {
             ExprKind::Name(name) => self.free_name(name, bound, found),
@@ -1911,6 +1960,11 @@ impl<'a> Elaborator<'a> {
             // Метка row - объявленное имя, свободной быть не может; аргументы
             // её - обычные термы, и свободные имена в них поднимаются как
             // всюду. Хвост здесь не считается: он приходит с auto-lift.
+            ExprKind::Row { labels, .. } => {
+                for argument in labels.iter().flat_map(|it| &it.arguments) {
+                    self.free_in(argument, bound, found);
+                }
+            }
             ExprKind::Effectful { labels, body, .. } => {
                 self.free_in(body, bound, found);
                 for argument in labels.iter().flat_map(|it| &it.arguments) {
@@ -1920,9 +1974,8 @@ impl<'a> Elaborator<'a> {
             // Имя инстанса свободным не считается: оно обязано быть
             // объявленным, как и всякая ссылка (§4.3).
             ExprKind::Using { body, .. } => self.free_in(body, bound, found),
-            ExprKind::App(callee, argument)
-            | ExprKind::TypeApp(callee, argument)
-            | ExprKind::Annotated(callee, argument) => {
+            ExprKind::App(..) => self.free_in_application(expr, bound, found),
+            ExprKind::TypeApp(callee, argument) | ExprKind::Annotated(callee, argument) => {
                 self.free_in(callee, bound, found);
                 self.free_in(argument, bound, found);
             }
@@ -2047,6 +2100,35 @@ impl<'a> Elaborator<'a> {
             ty = codomain.apply(value);
         }
         (term, ty)
+    }
+    /// Где формер, названный `name`, ждёт row среди написанных аргументов
+    /// (§5.2): та же лестница имён, какой разрешается сама ссылка.
+    ///
+    /// Спрашивается таблица мест, а не определения: внутри модуля конструкторы
+    /// и деструктор элаборируются до того, как семейство объявлено, а места
+    /// ставятся раньше их.
+    fn slots_of(&self, name: &str) -> Rc<[u32]> {
+        let direct = self.signature.row_slots(name);
+        if !direct.is_empty() {
+            return Rc::from(direct);
+        }
+        if let Some(enclosing) = &self.enclosing {
+            let mut prefix: &str = &enclosing.name;
+            loop {
+                let slots = self.signature.row_slots(&format!("{prefix}.{name}"));
+                if !slots.is_empty() {
+                    return Rc::from(slots);
+                }
+                let Some(cut) = prefix.rfind('.') else {
+                    break;
+                };
+                prefix = &prefix[..cut];
+            }
+        }
+        self.qualified(name).map_or_else(
+            || Rc::from([]),
+            |full| Rc::from(self.signature.row_slots(&full)),
+        )
     }
 
     /// То же, но только если такой член уже объявлен, - **на любом уровне
@@ -2678,6 +2760,9 @@ impl<'a> Elaborator<'a> {
             ExprKind::Arrow(domain, codomain) => self.arrow(domain, codomain, default, expr.span),
             ExprKind::Pi { binders, codomain } => self.pi(binders, codomain, default),
             ExprKind::Effectful { .. } => self.suspended(expr, default),
+            // Row на своём месте снята применением раньше (`row_arguments`): сюда
+            // доходит только чужая позиция.
+            ExprKind::Row { .. } => Err(ElabError::MisplacedRow { span: expr.span }),
             ExprKind::Lam { params, body } => {
                 // Захват - то, чем лямбда привязывается к scope. Позиция
                 // решает снаружи; здесь только считается свойство, и ставится
@@ -3628,7 +3713,35 @@ impl<'a> Elaborator<'a> {
             Some(name) => self.named_tail(&name.text),
             None => self.opened(),
         };
-        let written = labels;
+        let labels = self.labels_of(labels)?;
+        Ok(Row::closing(labels, tail.tail()))
+    }
+
+    /// Row аргументом семейства (§3.2, §5.2): `{Log | e}`, `{}` либо голое
+    /// имя хвоста `e`.
+    ///
+    /// Без написанного хвоста row **закрыта**: аргумент говорит ровно то, что
+    /// написано, и подъёма у него нет - тот стоит на стрелках сигнатуры, а не
+    /// в аргументах типа.
+    fn row_argument(&mut self, written: &Expr) -> Result<Row<Term>, ElabError> {
+        match &written.kind {
+            ExprKind::Row { labels, tail } => {
+                let tail = match tail {
+                    Some(name) => self.named_tail(&name.text).tail(),
+                    None => None,
+                };
+                let labels = self.labels_of(labels)?;
+                Ok(Row::closing(labels, tail))
+            }
+            ExprKind::Name(name) if name.text.starts_with(|ch: char| ch.is_lowercase()) => {
+                Ok(self.named_tail(&name.text))
+            }
+            _ => Err(ElabError::RowExpected { span: written.span }),
+        }
+    }
+
+    /// Написанные метки row: имя эффекта и его аргументы-термы.
+    fn labels_of(&mut self, written: &[ast::EffectLabel]) -> Result<Vec<Label<Term>>, ElabError> {
         let mut labels = Vec::with_capacity(written.len());
         for label in written {
             let head = self.name(&label.name)?;
@@ -3658,7 +3771,7 @@ impl<'a> Elaborator<'a> {
             }
             labels.push(Label { name, arguments });
         }
-        Ok(Row::closing(labels, tail.tail()))
+        Ok(labels)
     }
 
     /// Совпадают ли аргументы метки с написанными.
@@ -4127,6 +4240,9 @@ impl<'a> Elaborator<'a> {
 
     /// Хвост, названный руками. Второе вхождение того же имени берёт первую.
     fn named_tail(&mut self, name: &Symbol) -> Row<Term> {
+        if let Some(param) = self.row_params.get(name) {
+            return param.clone();
+        }
         if let Some(known) = self.tails.get(name) {
             return known.clone();
         }
@@ -5462,6 +5578,27 @@ impl<'a> Elaborator<'a> {
         // поэтому спрошенный после спайна он всегда пуст.
         let awaited = self.result.clone();
         let mut term = self.placed(Position::Inner, |it| it.expr(head, Mult::Many))?;
+        // Row-аргументы семейства (§3.2, §5.2) - не связывания, а параметры
+        // ссылки: снимаются со спайна до остальных и встают в аргументы
+        // головы. `arguments` идёт от последнего написанного к первому.
+        let slots = const_head(&term).map_or_else(
+            || Rc::from([]),
+            |name| Rc::<[u32]>::from(self.signature.row_slots(name)),
+        );
+        if !slots.is_empty() {
+            let written = arguments.len();
+            let mut rows = Vec::new();
+            let mut kept = Vec::with_capacity(written);
+            for (index, argument) in arguments.iter().enumerate() {
+                let position = written - 1 - index;
+                match slots.iter().position(|it| *it as usize == position) {
+                    Some(slot) => rows.push((slot, self.row_argument(argument)?)),
+                    None => kept.push(*argument),
+                }
+            }
+            arguments = kept;
+            term = with_row_arguments(&term, &rows);
+        }
         // Поднятый хвост насыщенного вызова (§10 вопрос 241): [`Self::pure_rows`].
         {
             let mut callee = &term;
@@ -5480,7 +5617,9 @@ impl<'a> Elaborator<'a> {
                     }
                     count
                 });
-                if arguments.len() >= explicit {
+                // Row-аргументы формера семейства написаны, а не подняты (§5.2):
+                // закрывать их пустой row значило бы решить чужой хвост.
+                if arguments.len() >= explicit && slots.is_empty() {
                     let (name, constant) = (Rc::clone(name), callee.clone());
                     self.pure_rows(&name, &constant);
                 }
@@ -9243,7 +9382,21 @@ impl<'a> Elaborator<'a> {
             return None;
         };
         let levels: Vec<Level> = (0..arity).map(|_| self.metas.fresh_level()).collect();
-        let mut current = eval(&Env::default(), &declared.substitute_levels(&levels));
+        // Row-аргументы семейства (§5.2) - тоже у типа разбираемого: без них
+        // поле `Unit -> {| e} a` несло бы голую `RowVar` семейства, и тело
+        // ветви решило бы ею чужой хвост.
+        let rows = family_rows(self.signature, self.metas, ty);
+        let mut current = if rows.is_empty() {
+            eval(&Env::default(), &declared.substitute_levels(&levels))
+        } else {
+            let size = self.ctx.size();
+            let rows: Vec<Row<Term>> = rows
+                .iter()
+                .map(|row| row.map(|argument| quote(size, argument)))
+                .collect();
+            self.ctx
+                .eval(&declared.substitute_levels(&levels).substitute_rows(&rows))
+        };
         // Аргументы семейства берутся у **типа разбираемого**: ветвь
         // их не связывает, а телескоп конструктора с них начинается.
         let spine = arguments_of(ty.map(std::convert::AsRef::as_ref));
@@ -10491,4 +10644,68 @@ fn spine_arguments(term: &Term) -> Vec<Term> {
     }
     found.reverse();
     found
+}
+
+/// Голова написанного применения и аргументы в порядке написания.
+fn written_spine(expr: &Expr) -> (&Expr, Vec<&Expr>) {
+    let mut arguments = Vec::new();
+    let mut head = expr;
+    while let ExprKind::App(callee, argument) = &head.kind {
+        arguments.push(&**argument);
+        head = callee;
+    }
+    arguments.reverse();
+    (head, arguments)
+}
+
+/// Имя константы в голове применения.
+fn const_head(term: &Term) -> Option<&CoreName> {
+    let mut head = term;
+    while let Term::App(callee, _) = head {
+        head = callee;
+    }
+    match head {
+        Term::Const(name, ..) => Some(name),
+        _ => None,
+    }
+}
+
+/// Голова с подставленными row-аргументами: номер row-параметра и row.
+fn with_row_arguments(term: &Term, rows: &[(usize, Row<Term>)]) -> Term {
+    match term {
+        Term::App(callee, argument) => Term::App(
+            Rc::new(with_row_arguments(callee, rows)),
+            Rc::clone(argument),
+        ),
+        Term::Const(name, levels, args) => {
+            let mut given = args.row_args().to_vec();
+            for (slot, row) in rows {
+                if let Some(place) = given.get_mut(*slot) {
+                    *place = row.clone();
+                }
+            }
+            Term::Const(
+                Rc::clone(name),
+                Rc::clone(levels),
+                Args::new(given, args.mult_args().to_vec()),
+            )
+        }
+        other => other.clone(),
+    }
+}
+
+/// Row-аргументы семейства в голове типа разбираемого (§5.2); пусто, если
+/// тип не известен или row у семейства нет.
+fn family_rows(
+    signature: &Signature,
+    metas: &Metas,
+    ty: Option<&Rc<Value>>,
+) -> Rc<[Row<Rc<Value>>]> {
+    let Some(ty) = ty else {
+        return Rc::from([]);
+    };
+    match &*whnf_solved(signature, metas, ty) {
+        Value::Neutral(Head::Global(_, _, rows, _), _) => Rc::clone(rows),
+        _ => Rc::from([]),
+    }
 }

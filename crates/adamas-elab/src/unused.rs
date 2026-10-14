@@ -216,6 +216,7 @@ fn in_expr(expr: &Expr, found: &mut Vec<Warning>) {
         | ExprKind::Lit(_)
         | ExprKind::Hole
         | ExprKind::Pi { .. }
+        | ExprKind::Row { .. }
         | ExprKind::RecordType(..) => {}
     }
 }
@@ -402,6 +403,7 @@ pub(crate) fn uses(expr: &Expr, wanted: &[&Symbol]) -> bool {
         ExprKind::Pi { binders, codomain } => {
             binders.iter().filter_map(|it| it.ty.as_ref()).any(recur) || recur(codomain)
         }
+        ExprKind::Row { labels, .. } => labels.iter().any(|it| label_uses(it, wanted)),
         ExprKind::Effectful { labels, body, .. } => {
             labels.iter().any(|it| label_uses(it, wanted)) || recur(body)
         }

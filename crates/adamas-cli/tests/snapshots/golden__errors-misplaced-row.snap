@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: misplaced-row.adamas:7:17: row стоит там, где формер её не ждёт: row аргументом пишется на месте параметра сортом `Effect`
+  lengthOf : List {Log} -> UInt64
+                  ^^^^^

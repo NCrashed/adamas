@@ -1202,7 +1202,7 @@ impl Compiler<'_> {
             return false;
         };
         family.constructors.iter().all(|constructor| {
-            let (_, result) = self.fields(ctx, constructor, &family.levels, &family.params);
+            let (_, result) = self.family_fields(ctx, constructor, &family);
             let indices = family
                 .branch_indices(self.signature, &result)
                 .unwrap_or_default();
@@ -1275,7 +1275,14 @@ impl Compiler<'_> {
         if arguments.len() < parameters {
             return Err(unmatchable());
         }
-        let fields = self.applied_fields(&constructor, &levels, &arguments, parameters);
+        let fields = self.applied_fields(
+            ctx,
+            &constructor,
+            &levels,
+            &family.rows,
+            &arguments,
+            parameters,
+        );
 
         let mut inner_columns = Vec::with_capacity(columns.len() + fields.len());
         for (index, other) in columns.iter().enumerate() {
@@ -1498,6 +1505,7 @@ impl Compiler<'_> {
         Ok(Family {
             data,
             levels: (0..declaration.level_arity).map(|_| Level::Zero).collect(),
+            rows: Rc::from([]),
             parameters: 0,
             params: Vec::new(),
             constructors: constructors.clone(),
@@ -1544,7 +1552,7 @@ impl Compiler<'_> {
         // с индексами разбираемого значения.
         let mut candidates = Vec::with_capacity(family.constructors.len());
         for constructor in &family.constructors {
-            let (fields, result) = self.fields(ctx, constructor, &family.levels, &family.params);
+            let (fields, result) = self.family_fields(ctx, constructor, &family);
             let indices = family
                 .branch_indices(self.signature, &result)
                 .unwrap_or_default();
@@ -1964,7 +1972,7 @@ impl Compiler<'_> {
         // Связывания мотива: индексы семейства, потом само разбираемое
         // значение. Формы индексов идут с ними парой - по ним и различается.
         let mut current = instantiate_telescope(
-            declaration.instantiate_type(&family.levels, &[], &[]),
+            instance(ctx, declaration, &family.levels, &family.rows),
             &family.params,
         );
         let mut inner = ctx.clone();
@@ -2038,7 +2046,7 @@ impl Compiler<'_> {
                 self.discriminate(ctx, plan, size, rest, &solved, sort)
             }
             Shape::Constructor(name, shapes) => {
-                let (Some(sort), Some((data, levels, arguments))) = (
+                let (Some(sort), Some((data, levels, rows, arguments))) = (
                     sort,
                     data_head(self.signature, &Rc::clone(&binding(ctx, *level).ty)),
                 ) else {
@@ -2071,7 +2079,7 @@ impl Compiler<'_> {
                 let mut branches = Vec::with_capacity(constructors.len());
                 for candidate in &constructors {
                     let (fields, _) =
-                        self.fields(ctx, candidate, &levels, &arguments[..parameters]);
+                        self.fields(ctx, candidate, &levels, &rows, &arguments[..parameters]);
                     let mut inner = ctx.clone();
                     for field in &fields {
                         inner =
@@ -2115,8 +2123,10 @@ impl Compiler<'_> {
     /// Поля конструктора, применённого к известным аргументам: значение и тип.
     fn applied_fields(
         &self,
+        ctx: &Ctx<'_>,
         constructor: &Name,
         levels: &Rc<[Level]>,
+        rows: &[ValueRow],
         arguments: &[Rc<Value>],
         params: usize,
     ) -> Vec<(Rc<Value>, Rc<Value>)> {
@@ -2124,7 +2134,7 @@ impl Compiler<'_> {
             unreachable!("конструктор `{constructor}` объявлен")
         };
         let mut current = instantiate_telescope(
-            declaration.instantiate_type(levels, &[], &[]),
+            instance(ctx, declaration, levels, rows),
             &arguments[..params],
         );
         let mut fields = Vec::new();
@@ -2147,7 +2157,8 @@ impl Compiler<'_> {
         rows: &[Row],
         split: usize,
     ) -> Result<Family, PatternError> {
-        let Some((data, levels, arguments)) = data_head(self.signature, &column.ty) else {
+        let Some((data, levels, row_args, arguments)) = data_head(self.signature, &column.ty)
+        else {
             return Err(PatternError::NotMatchable {
                 ty: ctx.quote(&column.ty).to_string(),
             });
@@ -2190,6 +2201,7 @@ impl Compiler<'_> {
         Ok(Family {
             data,
             levels,
+            rows: row_args,
             params: params.to_vec(),
             shapes: indices
                 .iter()
@@ -2198,6 +2210,22 @@ impl Compiler<'_> {
             constructors: constructors.clone(),
             parameters: *parameters,
         })
+    }
+
+    /// Поля конструктора при параметрах и row семейства разбираемого.
+    fn family_fields(
+        &self,
+        ctx: &Ctx<'_>,
+        constructor: &Name,
+        family: &Family,
+    ) -> (Vec<Field>, Rc<Value>) {
+        self.fields(
+            ctx,
+            constructor,
+            &family.levels,
+            &family.rows,
+            &family.params,
+        )
     }
 
     /// Поля конструктора при заданных параметрах и его результат.
@@ -2209,13 +2237,13 @@ impl Compiler<'_> {
         ctx: &Ctx<'_>,
         constructor: &Name,
         levels: &Rc<[Level]>,
+        rows: &[ValueRow],
         params: &[Rc<Value>],
     ) -> (Vec<Field>, Rc<Value>) {
         let Some(declaration) = self.signature.lookup(constructor) else {
             unreachable!("конструктор `{constructor}` объявлен")
         };
-        let mut current =
-            instantiate_telescope(declaration.instantiate_type(levels, &[], &[]), params);
+        let mut current = instantiate_telescope(instance(ctx, declaration, levels, rows), params);
         let mut fields = Vec::new();
         let mut level = ctx.size();
         while let Value::Pi(Binder { mult, .. }, name, domain, _, codomain) = &*current {
@@ -2237,6 +2265,8 @@ impl Compiler<'_> {
 struct Family {
     data: Name,
     levels: Rc<[Level]>,
+    /// Row-аргументы семейства (§5.2): тип поля их называет.
+    rows: Rc<[ValueRow]>,
     /// Параметры семейства - те же во всех ветвях.
     params: Vec<Rc<Value>>,
     /// Формы индексов разбираемого значения: по ним унифицируются ветви и по
@@ -2253,7 +2283,7 @@ impl Family {
     /// `None` - результат конструктора не то семейство; проверено при
     /// объявлении, поэтому здесь этого не бывает.
     fn branch_indices(&self, signature: &Signature, result: &Rc<Value>) -> Option<Vec<Rc<Value>>> {
-        let (_, _, arguments) = data_head(signature, result)?;
+        let (_, _, _, arguments) = data_head(signature, result)?;
         Some(arguments[self.parameters as usize..].to_vec())
     }
 }
@@ -2779,7 +2809,10 @@ fn binding<'a>(ctx: &'a Ctx<'_>, level: u32) -> &'a Binding {
 }
 
 /// Индуктивное семейство в голове типа: имя, аргументы уровня и параметры.
-type DataHead = (Name, Rc<[Level]>, Vec<Rc<Value>>);
+type DataHead = (Name, Rc<[Level]>, Rc<[ValueRow]>, Vec<Rc<Value>>);
+
+/// Row-аргумент семейства в голове значения (§5.2).
+type ValueRow = EffectRow<Rc<Value>>;
 
 /// Индуктивное семейство в голове типа, вместе с аргументами.
 ///
@@ -2788,7 +2821,7 @@ type DataHead = (Name, Rc<[Level]>, Vec<Rc<Value>>);
 /// собственного цикла здесь не было.
 fn data_head(signature: &Signature, ty: &Rc<Value>) -> Option<DataHead> {
     let reduced = crate::conv::whnf(signature, ty);
-    let Value::Neutral(Head::Global(name, levels, _, _), spine) = &*reduced else {
+    let Value::Neutral(Head::Global(name, levels, rows, _), spine) = &*reduced else {
         return None;
     };
     if !matches!(
@@ -2804,7 +2837,12 @@ fn data_head(signature: &Signature, ty: &Rc<Value>) -> Option<DataHead> {
             Elim::Case(_) | Elim::Split(_) | Elim::Project(_) | Elim::With(_) => None,
         })
         .collect::<Option<Vec<_>>>()?;
-    Some((Rc::clone(name), Rc::clone(levels), arguments))
+    Some((
+        Rc::clone(name),
+        Rc::clone(levels),
+        Rc::clone(rows),
+        arguments,
+    ))
 }
 
 /// Тип равенства, у которого переменная стоит на месте параметра, а индекс -
@@ -2821,7 +2859,7 @@ struct Equality {
 /// Узнаёт [`Equality`] по форме: один конструктор без полей, чей единственный
 /// индекс - последний параметр (`Refl : Equal a x x`).
 fn equality(signature: &Signature, ty: &Rc<Value>) -> Option<Equality> {
-    let (data, levels, arguments) = data_head(signature, ty)?;
+    let (data, levels, _, arguments) = data_head(signature, ty)?;
     let DefinitionKind::Data {
         constructors,
         params,
@@ -3295,4 +3333,26 @@ pub fn instantiate(body: &Term, argument: &Term) -> Term {
 /// Счётчик в `u32`. Столько аргументов и переменных не бывает.
 fn arity_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or_else(|_| unreachable!("счётчик не помещается в u32"))
+}
+
+/// Тип определения при аргументах семейства - в окружении контекста.
+///
+/// Row-аргументы бывают открытыми (`Thunk {State s} a` с локальной `s`), и
+/// вычислять тип в пустом окружении их переменным не на что указывать. Без
+/// row - прежний путь, и считает он то же самое.
+fn instance(
+    ctx: &Ctx<'_>,
+    declaration: &crate::sig::Definition,
+    levels: &[Level],
+    rows: &[ValueRow],
+) -> Rc<Value> {
+    if rows.is_empty() {
+        return declaration.instantiate_type(levels, &[], &[]);
+    }
+    let size = ctx.size();
+    let rows: Vec<EffectRow<Term>> = rows
+        .iter()
+        .map(|row| row.map(|argument| quote(size, argument)))
+        .collect();
+    ctx.eval(&declaration.instantiated_type(levels, &rows, &[]))
 }

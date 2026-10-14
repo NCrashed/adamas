@@ -301,6 +301,17 @@ pub enum ExprKind {
         /// Что стоит за row.
         body: Box<Expr>,
     },
+    /// Row аргументом семейства: `Task {Log | e} Nat` (§3.2, §5.2).
+    ///
+    /// Тела у неё нет - это значение сорта `Effect`, а не тип вычисления.
+    /// Пишется в позиции аргумента; на каком месте формер ждёт row, знает
+    /// элаборация, и в чужой позиции она отказывает.
+    Row {
+        /// Метки.
+        labels: Vec<EffectLabel>,
+        /// Хвост, если написан: `{| e}`.
+        tail: Option<Name>,
+    },
     /// Блок операторов - тело определения или `let` (§4.1).
     Block(Block),
     /// Хендлер: `handle e with …` (§3.4).
@@ -972,6 +983,9 @@ pub fn contains_block(expr: &Expr) -> bool {
                 pending.push(body);
                 pending.extend(labels.iter().flat_map(|label| &label.arguments));
             }
+            ExprKind::Row { labels, .. } => {
+                pending.extend(labels.iter().flat_map(|label| &label.arguments));
+            }
             ExprKind::RecordType(fields, _) => pending.extend(fields.iter().map(|it| &it.ty)),
             ExprKind::Record(fields) => pending.extend(fields.iter().map(|(_, it)| it)),
             ExprKind::Mask(inner) | ExprKind::Project(inner, _) => pending.push(inner),
@@ -1041,6 +1055,9 @@ pub fn mentions(expr: &Expr, name: &str) -> bool {
             ExprKind::Lit(_) | ExprKind::Hole => {}
             ExprKind::Effectful { labels, body, .. } => {
                 pending.push(body);
+                pending.extend(labels.iter().flat_map(|label| &label.arguments));
+            }
+            ExprKind::Row { labels, .. } => {
                 pending.extend(labels.iter().flat_map(|label| &label.arguments));
             }
             ExprKind::RecordType(fields, _) => pending.extend(fields.iter().map(|it| &it.ty)),
@@ -1663,6 +1680,7 @@ fn dump_expr(out: &mut String, expr: &Expr) {
         ExprKind::Hole => out.push('_'),
         ExprKind::Mask(inner) => dump_wrapped(out, "mask", inner),
         ExprKind::Effectful { labels, tail, body } => dump_row(out, labels, tail.as_ref(), body),
+        ExprKind::Row { labels, tail } => dump_row_argument(out, labels, tail.as_ref()),
         ExprKind::RecordType(..) | ExprKind::Record(_) => dump_record(out, &expr.kind),
         ExprKind::Using { name, body } => dump_using(out, name, body),
         ExprKind::Project(inner, name) => dump_projection(out, inner, name),
@@ -1821,4 +1839,22 @@ fn dump_pattern(out: &mut String, pattern: &Pattern) {
             out.push(')');
         }
     }
+}
+
+/// Row аргументом: `(row-arg (Log) | e)`.
+fn dump_row_argument(out: &mut String, labels: &[EffectLabel], tail: Option<&Name>) {
+    out.push_str("(row-arg (");
+    dump_list(out, labels, |out, label| {
+        out.push_str(&label.name.text);
+        for argument in &label.arguments {
+            out.push(' ');
+            dump_expr(out, argument);
+        }
+    });
+    out.push(')');
+    if let Some(tail) = tail {
+        out.push_str(" | ");
+        out.push_str(&tail.text);
+    }
+    out.push(')');
 }

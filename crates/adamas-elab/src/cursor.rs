@@ -707,6 +707,14 @@ impl Search<'_> {
                 self.expr(codomain);
                 self.scope.truncate(depth);
             }
+            ExprKind::Row { labels, tail } => {
+                for label in labels {
+                    self.label(label);
+                }
+                if let Some(tail) = tail {
+                    self.refer(tail);
+                }
+            }
             ExprKind::Effectful { labels, tail, body } => {
                 for label in labels {
                     self.label(label);

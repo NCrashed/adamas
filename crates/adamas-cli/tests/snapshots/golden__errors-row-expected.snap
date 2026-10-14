@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: row-expected.adamas:8:14: здесь формер ждёт row: `{Log}`, `{Log | e}`, `{}` либо имя хвоста
+  wrong : Task Nat Nat -> Nat
+               ^^^

@@ -227,6 +227,15 @@ impl Spans<'_> {
         }
     }
 
+    fn labels(&mut self, at: Span, labels: &[adamas_parser::ast::EffectLabel]) {
+        for label in labels {
+            self.name(at, &label.name);
+            for argument in &label.arguments {
+                self.expr(at, argument);
+            }
+        }
+    }
+
     fn expr(&mut self, parent: Span, expr: &Expr) {
         self.inside("выражение", parent, expr.span);
         let at = expr.span;
@@ -234,13 +243,14 @@ impl Spans<'_> {
             ExprKind::Name(name) => self.name(at, name),
             ExprKind::Mask(inner) => self.expr(at, inner),
             ExprKind::Effectful { labels, body, .. } => {
-                for label in labels {
-                    self.name(at, &label.name);
-                    for argument in &label.arguments {
-                        self.expr(at, argument);
-                    }
-                }
+                self.labels(at, labels);
                 self.expr(at, body);
+            }
+            ExprKind::Row { labels, tail } => {
+                self.labels(at, labels);
+                if let Some(tail) = tail {
+                    self.name(at, tail);
+                }
             }
             ExprKind::Using { name, body } => {
                 self.name(at, name);

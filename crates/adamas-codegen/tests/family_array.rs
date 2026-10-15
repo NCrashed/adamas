@@ -94,6 +94,9 @@ main = first (again (MkBox (arraySet (arrayNew 4 7) 1 9)))
 
 /// Без `{Flat a}` поле в обобщённом коде указательное, и плоский массив туда
 /// не уходит: отказ при сборке, а не обрыв прогона.
+///
+/// Отказ - у **обобщённого** тела. Специализация по типам (§10 вопрос 253)
+/// даёт `again` копию на `Int32`, и собранная программа отвечает как машина.
 #[test]
 fn a_flat_field_does_not_enter_code_without_flat() {
     let source = format!(
@@ -108,12 +111,14 @@ main : Int32
 main = first (again (MkBox (arrayNew 4 7)))
 "
     );
-    let error = harness::compiled(&source).expect_err("плоский массив в код без `Flat`");
+    let error = harness::written_text(&source).expect_err("плоский массив в код без `Flat`");
     let text = error.to_string();
     assert!(
         text.contains("указательный массив") && text.contains("без `Flat`"),
         "отказ не назвал причину: {text}"
     );
+    harness::agreed("поле-без-flat", &source)
+        .unwrap_or_else(|error| panic!("специализация границу не сняла: {error}"));
 }
 
 /// То же через второе семейство: `W a` держит `Box a`, и `peel : W a -> W a`
@@ -135,8 +140,10 @@ main : Int32
 main = open (peel (MkW (MkBox (arrayNew 4 7))))
 "
     );
-    let error = harness::compiled(&source).expect_err("плоский массив через `W`");
+    let error = harness::written_text(&source).expect_err("плоский массив через `W`");
     assert!(error.to_string().contains("без `Flat`"), "{error}");
+    harness::agreed("поле-через-w", &source)
+        .unwrap_or_else(|error| panic!("специализация границу не сняла: {error}"));
 }
 
 /// Указательный элемент ходит в обобщённый код, как ходил.

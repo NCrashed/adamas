@@ -340,10 +340,10 @@ fn the_inner_resource_closes_first_when_the_body_aborts() {
 fn the_frames_stand_in_that_order() {
     let text = harness::text(&lifo("Tag")).unwrap_or_else(|error| panic!("{error}"));
     let body = text
-        .split_once("/* broken */\nstatic ")
+        .split_once("/* broken@ */\nstatic ")
         .and_then(|(_, rest)| rest.split_once("\n}\n"))
         .map_or_else(
-            || panic!("`broken` не порождена:\n{text}"),
+            || panic!("`broken@` не порождена:\n{text}"),
             |(body, _)| body,
         );
     let note = body

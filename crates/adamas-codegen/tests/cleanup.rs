@@ -246,12 +246,13 @@ fn the_calls_stand_in_that_order() {
     let text = harness::text(&lifo("Tag")).unwrap_or_else(|error| panic!("{error}"));
     // Тело `sealed`: от её заголовка до закрывающей скобки. Заголовок ищется
     // вместе со `static`, потому что то же имя стоит комментарием у **места
-    // вызова**, и оно в тексте раньше.
+    // вызова**, и оно в тексте раньше. Имя - копии `sealed@`: тело зовёт
+    // обобщённое, и специализация по типам копирует вызывающего.
     let body = text
-        .split_once("/* sealed */\nstatic ")
+        .split_once("/* sealed@ */\nstatic ")
         .and_then(|(_, rest)| rest.split_once("\n}\n"))
         .map_or_else(
-            || panic!("`sealed` не порождена:\n{text}"),
+            || panic!("`sealed@` не порождена:\n{text}"),
             |(body, _)| body,
         );
     let closes_tag = body

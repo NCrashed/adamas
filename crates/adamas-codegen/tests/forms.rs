@@ -337,6 +337,11 @@ fn the_first_form_cannot_call_the_second() {
 /// аргументы в сигнатуре и в применении, у первого - `NULL` и свой корень,
 /// как у всякой первой формы. Операция значением едет замыканием над
 /// синтетическим телом, и хендлер оно ищет вектором.
+///
+/// Читается текст **без специализации**. Специализация по типам (§10 вопрос
+/// 253) разводит те же два употребления по копиям `forEach@Nat` с разными
+/// row, и экземпляр по спросу понижению заводить уже не приходится; механизм
+/// его живёт для обобщённого кода, и свидетель держит его там.
 const DEMANDED: &str = "\
 data Unit where
   MkUnit : Unit
@@ -378,8 +383,8 @@ main = Cons (pureLen (collected (Cons Zero Nil))) (collected (Cons (Succ Zero) N
 /// Спрос места вызова заводит второй экземпляр, не отнимая первого.
 #[test]
 fn a_demanded_site_gets_its_own_second_form() {
-    let text =
-        harness::text(DEMANDED).unwrap_or_else(|error| panic!("`DEMANDED` не понизился: {error}"));
+    let text = harness::written_text(DEMANDED)
+        .unwrap_or_else(|error| panic!("`DEMANDED` не понизился: {error}"));
 
     // Экземпляр по спросу: скрытые аргументы в сигнатуре и в применении `f`.
     let demanded = signature(&text, "forEach#ev");

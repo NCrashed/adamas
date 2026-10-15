@@ -556,14 +556,13 @@ static adamas_frame *nursery_frame(const adamas_evidence *evidence) {
 /* Код кадра старта: применяет тело к единице под вектором своего кадра. */
 static adamas_value fiber_start(adamas_frame *frame, adamas_kont *kont, adamas_value incoming) {
     adamas_value *env = adamas_frame_env(frame);
-    adamas_nursery *nursery = (adamas_nursery *)(void *)env[1];
     adamas_value body = env[0];
     adamas_value answer;
     adamas_drop(incoming, NULL);
     env[0] = adamas_unit();
+    /* Тело уходит владением: `adamas_apply` замыкание потребляет (`adamas.h`,
+     * волна 8 Фазы 9). */
     answer = adamas_apply(body, adamas_frame_evidence(frame), kont, adamas_unit());
-    /* Тело потреблено: `adamas_apply` замыкание заимствует (`adamas.h`). */
-    adamas_drop(body, nursery->release);
     return answer;
 }
 

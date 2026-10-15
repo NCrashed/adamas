@@ -15,10 +15,10 @@
 //!
 //! Из правила следует всё остальное. `adamas_set_field` и `adamas_closure_set`
 //! владение забирают, поэтому построение ничего не дропает. `adamas_apply`
-//! замыкание **заимствует** (`adamas.h`), поэтому применение дропает его само:
-//! в IR это `Bind` вокруг [`Expr::Apply`] и [`Expr::Drop`] после него.
-//! Трамплин замыкания достаёт среду из слотов, которыми замыкание владеет, -
-//! значит `dup` на каждый слот, и его ставит эмиттер, потому что трамплина в IR
+//! замыкание **потребляет** (`adamas.h`, волна 8 Фазы 9), как и аргумент:
+//! [`Expr::Apply`] берёт оба владением, и после него дропать нечего. Трамплин
+//! замыкания достаёт среду из слотов - `dup` на каждый указательный - и отпускает
+//! само замыкание до вызова кода; его ставит эмиттер, потому что трамплина в IR
 //! нет вовсе.
 //!
 //! # Как считается, где `dup`
@@ -1248,33 +1248,20 @@ impl Pass<'_> {
 
     /// Применение значения-функции.
     ///
-    /// `adamas_apply` замыкание заимствует (`adamas.h`), поэтому дропает его
-    /// применение - и **после** вызова, а не до: связывание ответа для того тут
-    /// и заводится.
+    /// `adamas_apply` замыкание **потребляет** (`adamas.h`, волна 8 Фазы 9), как
+    /// и аргумент: оба уходят владением, и после вызова дропать нечего. Отсюда
+    /// хвостовая позиция у применения - прежний заём ставил после него `Drop`.
     fn applied(&mut self, callee: Expr, argument: Expr, owned: &BTreeSet<LocalId>) -> Expr {
         let (mut parts, spare) = self.sequence(vec![callee, argument], owned);
         let argument = parts.pop().unwrap_or(Expr::Erased);
         let callee = parts.pop().unwrap_or(Expr::Erased);
-        let held = self.temporary(adamas_l10n::text!("perceus-2"));
-        let answer = self.temporary(adamas_l10n::text!("perceus-3"));
-        let (borrowed, given) = (held.local, answer.local);
-        let node = Expr::Bind {
-            binding: held,
-            value: Box::new(callee),
-            body: Box::new(Expr::Bind {
-                binding: answer,
-                value: Box::new(Expr::Apply {
-                    callee: Box::new(Expr::Local(borrowed)),
-                    argument: Box::new(argument),
-                }),
-                body: Box::new(Expr::Drop {
-                    local: borrowed,
-                    salvage: Salvage::default(),
-                    body: Box::new(Expr::Local(given)),
-                }),
-            }),
-        };
-        drops(spare, node)
+        drops(
+            spare,
+            Expr::Apply {
+                callee: Box::new(callee),
+                argument: Box::new(argument),
+            },
+        )
     }
 
     /// Связывание значения.

@@ -896,10 +896,11 @@ fn trampoline_signature(id: CallbackId, described: &Callback, statics: bool) -> 
 /// Владение расписано построчно, потому что ошибка здесь - течь либо
 /// use-after-free, а не неверный ответ:
 ///
-/// * замыкание в слоте 0 **одолжено** - `adamas_apply` его заимствует
-///   (`adamas.h`), и дропает его дроп самой среды после чужого вызова;
-/// * промежуточное частичное применение приходит **владением** (копия
-///   замыкания) и дропается тут же;
+/// * замыкание в слоте 0 принадлежит среде, а `adamas_apply` его потребляет
+///   (`adamas.h`, волна 8 Фазы 9) - первому применению отдаётся `dup`, и само
+///   замыкание дропает дроп среды после чужого вызова;
+/// * промежуточное частичное применение приходит **владением** и уходит
+///   следующему применению им же;
 /// * аргументы уходят владением, ровно как их ждёт `adamas_apply`;
 /// * ответ приходит владением, и биты из него читаются до дропа.
 pub(crate) fn callbacks(out: &mut String, program: &Program, statics: bool) {
@@ -930,8 +931,10 @@ pub(crate) fn callbacks(out: &mut String, program: &Program, statics: bool) {
                 "    adamas_slot_write(w{position}, 0, adamas_word_{}(a{position}));",
                 ty.name()
             );
+            // `adamas_apply` замыкание потребляет (волна 8 Фазы 9): своё, лежащее в
+            // `userdata`, отдаётся копией ссылки, промежуточные - самим собой.
             let callee = if position == 0 {
-                "held".to_owned()
+                "adamas_dup(held)".to_owned()
             } else {
                 format!("t{}", position - 1)
             };
@@ -939,9 +942,6 @@ pub(crate) fn callbacks(out: &mut String, program: &Program, statics: bool) {
                 out,
                 "    adamas_value t{position} = adamas_apply({callee}, ev, &kont, w{position});"
             );
-            if position > 0 {
-                let _ = writeln!(out, "    adamas_drop_value({callee});");
-            }
         }
         let last = described.parameters.len().saturating_sub(1);
         let _ = writeln!(
@@ -1524,9 +1524,8 @@ fn body(
 /// Трамплин: замыкание отдаёт слоты позиционно, функция берёт их аргументами.
 ///
 /// Слоты принадлежат замыканию, а функция берёт аргументы **владением**, отсюда
-/// `adamas_dup` на каждый: своё замыкание дропает применение
-/// ([`perceus`](crate::perceus)), и без дублирования оно унесло бы слоты с
-/// собой. Последний аргумент приходит владением уже от `adamas_apply`.
+/// `adamas_dup` на каждый: замыкание пришло владением и отпускается трамплином
+/// до вызова (волна 8 Фазы 9), и без дублирования оно унесло бы слоты с собой. Последний аргумент приходит владением уже от `adamas_apply`.
 ///
 /// Скрытые аргументы у самого трамплина есть всегда - граница замыкания
 /// динамическая, - а дальше он передаёт их ровно второй форме. Первой они не
@@ -1554,26 +1553,38 @@ fn wrapper(out: &mut String, function: &Function) {
     // (см. правило позиционного применения в `lower`). Стёртый слот в вызов не
     // идёт, и отдавать его не приходится: понижение кладёт туда `ADAMAS_ERASED`,
     // значение непосредственное, ячейки за ним нет.
+    // Среда читается в локалы, замыкание отпускается, и лишь потом код зовётся
+    // хвостом: `adamas_apply` отдал замыкание владением (волна 8 Фазы 9), и
+    // работа после вызова отняла бы у применения хвостовую позицию.
     let mut taken: Vec<String> = match function.form {
         Form::Stack => Vec::new(),
         Form::Detached => vec![FORWARD.to_owned()],
     };
-    taken.extend(
-        function
-            .live_captured()
-            .enumerate()
-            .map(|(slot, binding)| held(binding.fact.repr, slot)),
-    );
+    for (slot, binding) in function.live_captured().enumerate() {
+        let _ = writeln!(
+            out,
+            "    {} e{slot} = {};",
+            c_type(binding.fact.repr),
+            held(binding.fact.repr, slot)
+        );
+        taken.push(format!("e{slot}"));
+    }
     for (position, parameter) in function.parameters.iter().enumerate() {
         if !parameter.fact.present {
             continue;
         }
-        taken.push(if position + 1 == arity {
-            "arg".to_owned()
+        if position + 1 == arity {
+            taken.push("arg".to_owned());
         } else {
-            format!("adamas_dup(adamas_closure_get(self, {}))", env + position)
-        });
+            let _ = writeln!(
+                out,
+                "    adamas_value a{position} = adamas_dup(adamas_closure_get(self, {}));",
+                env + position
+            );
+            taken.push(format!("a{position}"));
+        }
     }
+    out.push_str("    adamas_drop_value(self);\n");
     let _ = writeln!(
         out,
         "    return fn_{}({});\n}}\n",
@@ -1622,6 +1633,8 @@ fn taker(out: &mut String, function: &Function) {
     };
     taken.extend((0..env.len()).map(|slot| format!("s{slot}")));
     taken.push("arg".to_owned());
+    // Замыкание пришло владением: слоты забраны, отпустить остаётся блок.
+    out.push_str("    adamas_drop_value(self);\n");
     let _ = writeln!(
         out,
         "    return fn_{}({});\n}}\n",
@@ -1866,7 +1879,8 @@ fn builder(out: &mut String, constructor: &Constructor) {
         let _ = writeln!(out, "    adamas_set_field(value, {slot}, {taken});");
         slot += 1;
     }
-    out.push_str("    return value;\n}\n\n");
+    // Замыкание пришло владением (волна 8 Фазы 9): поля взяты `dup`-ом.
+    out.push_str("    adamas_drop_value(self);\n    return value;\n}\n\n");
 }
 
 /// Представления всех связываний функции.
@@ -2353,8 +2367,8 @@ impl Emitter<'_> {
     /// корень не стоит вовсе: пустой стек - два слова на кадре, и пустой цикл.
     fn applying(&mut self, callee: &Expr, argument: &Expr, depth: usize) -> String {
         let pad = Self::pad(depth);
-        // Замыкание **заимствуется** (`adamas.h`), отдаёт его отдельный `Drop`
-        // после применения; аргумент идёт владением.
+        // Замыкание и аргумент уходят владением (`adamas.h`, волна 8 Фазы 9):
+        // после применения отдавать нечего.
         let callee = self.value(callee, depth);
         let argument = self.value(argument, depth);
         let name = self.temp();

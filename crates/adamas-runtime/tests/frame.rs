@@ -98,6 +98,8 @@ unsafe extern "C" fn note(
 ) -> Value {
     unsafe {
         let mark = adamas_imm_get(adamas_closure_get(closure, 0));
+        // Замыкание приходит владением (`adamas.h`, волна 8 Фазы 9).
+        adamas_drop(closure, Some(adamas_closure_release));
         TRACE.with_borrow_mut(|trace| trace.push(mark));
         adamas_drop(argument, None);
         adamas_unit()
@@ -140,6 +142,8 @@ unsafe extern "C" fn probing(
 ) -> Value {
     unsafe {
         let mark = adamas_imm_get(adamas_closure_get(closure, 0));
+        // Замыкание приходит владением (`adamas.h`, волна 8 Фазы 9).
+        adamas_drop(closure, Some(adamas_closure_release));
         adamas_drop(argument, None);
         let deferred = adamas_kont_push(
             kont,
@@ -685,6 +689,8 @@ unsafe extern "C" fn reaching(
 ) -> Value {
     unsafe {
         let mark = adamas_imm_get(adamas_closure_get(closure, 0));
+        // Замыкание приходит владением (`adamas.h`, волна 8 Фазы 9).
+        adamas_drop(closure, Some(adamas_closure_release));
         adamas_drop(argument, None);
         let mut handler: *mut Frame = ptr::null_mut();
         let verdict = adamas_evidence_lookup(evidence, 7, &raw mut handler);
@@ -767,6 +773,7 @@ unsafe extern "C" fn seizing(
 ) -> Value {
     unsafe {
         let _ = adamas_imm_get(adamas_closure_get(closure, 0));
+        adamas_drop(closure, Some(adamas_closure_release));
         adamas_drop(argument, None);
         let mut handler: *mut Frame = ptr::null_mut();
         let verdict = adamas_evidence_lookup(evidence, 7, &raw mut handler);

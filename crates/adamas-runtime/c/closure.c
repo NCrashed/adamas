@@ -5,10 +5,10 @@
  * построению: `adamas_closure_code` отдаёт первый, `adamas_apply` есть второй,
  * и `userdata` для него - само замыкание.
  *
- * Частичное применение копирует замыкание, а не дописывает аргумент на месте:
- * исходное могло быть разделено. Уникальное можно было бы переписать, и это
- * ровно тот же reuse, что у данных, - вставляет его Perceus, поэтому здесь
- * такого пути нет.
+ * Применение замыкание **потребляет** (волна 8 Фазы 9): насыщенное отдаётся
+ * коду, и тот отпускает его, прочитав среду, - после вызова работы не остаётся,
+ * и хвостовая позиция у применения есть. Частичное применение уникального
+ * дописывает аргумент на месте, разделённого - копирует.
  *
  * Слот среды **разнороден** (§4.11, §10 вопрос 158, пересмотр 2026-09-22):
  * плоское значение лежит в нём битами. Границу проводит префикс `counted` -
@@ -135,11 +135,24 @@ adamas_value adamas_apply(adamas_value closure, const adamas_evidence *evidence,
      * продолжения вызывающего: `Apply` - точка приостановки всегда. */
     if (!adamas_is_imm(closure) && adamas_tag(closure) == ADAMAS_TAG_SEGMENT) {
         adamas_kont_resume(kont, closure);
+        /* Ручка уходит владением, как всякое вызываемое: возобновлённая - уже
+         * потрачена, и дроп отдаёт один блок. */
+        adamas_resumption_drop(kont, closure);
         return argument;
     }
     struct closure_block *block = closure_of(closure);
     if (block->applied + 1 == block->arity) {
+        /* Замыкание уходит коду владением (волна 8 Фазы 9): тот читает среду и
+         * отдаёт его до своей работы, и после вызова здесь делать нечего - это
+         * и освобождает хвостовую позицию у применения. */
         return block->code(closure, evidence, kont, argument);
+    }
+    /* Частичное применение. Уникальное замыкание дописывается на месте - его
+     * никто больше не видит, и копия была бы выдачей ради выброса. */
+    if (adamas_is_unique(closure)) {
+        block->slots[(size_t)block->captured + (size_t)block->applied] = argument;
+        block->applied += 1;
+        return closure;
     }
     adamas_value copy = adamas_closure(block->code, block->release, block->arity, block->captured,
                                        block->counted);
@@ -157,5 +170,8 @@ adamas_value adamas_apply(adamas_value closure, const adamas_evidence *evidence,
                                                          : block->slots[index];
     }
     fresh->slots[taken] = argument;
+    /* Разделённое: своя ссылка отдаётся. Последней она может оказаться и здесь
+     * - сосед с другого потока успел отдать свою, - поэтому `release` свой. */
+    adamas_drop(closure, block->release);
     return copy;
 }

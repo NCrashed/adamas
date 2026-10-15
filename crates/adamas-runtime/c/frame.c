@@ -240,7 +240,10 @@ static adamas_value unwind_step(adamas_kont *kont, adamas_frame *frame, adamas_v
          * вместе с ним - возобновление продолжит обе. */
         adamas_evidence *evidence = closing_evidence(kont, next, chain->top);
         unwind_push(kont, chain, held, 1);
+        /* Деструктор уходит владением (`adamas_apply` его потребляет): слот
+         * кадра пустеет, и release кадра его не тронет. */
         adamas_value closer = next->env[0];
+        next->env[0] = adamas_unit();
         adamas_value answer = adamas_apply(closer, evidence, kont, adamas_unit());
         adamas_evidence_drop(evidence);
         frame_free(next, kont);
@@ -383,6 +386,7 @@ adamas_value adamas_kont_run_to(adamas_kont *kont, adamas_frame *floor, adamas_v
                                                     closed_release, 1, 1, NULL);
             closed->env[0] = value;
             adamas_value closer = frame->env[0];
+            frame->env[0] = adamas_unit();
             value = adamas_apply(closer, frame->evidence, kont, adamas_unit());
             frame_free(frame, kont);
             continue;

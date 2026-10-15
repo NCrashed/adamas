@@ -1764,6 +1764,11 @@ impl Module {
             given.push(format!("ptr %s{slot}"));
         }
         given.push("ptr %arg".to_owned());
+        // Замыкание пришло владением (волна 8 Фазы 9): слоты забраны.
+        let _ = writeln!(
+            self.bodies,
+            "  call void @adamas_drop(ptr %self, ptr @{RELEASE_SYMBOL})"
+        );
         let _ = writeln!(
             self.bodies,
             "  %answer = call {CONVENTION} ptr @fn_{}({})",
@@ -1845,6 +1850,11 @@ impl Module {
             let _ = writeln!(self.bodies, "  store ptr {taken}, ptr %p{slot}");
             slot += 1;
         }
+        // Замыкание пришло владением (волна 8 Фазы 9): поля взяты `dup`-ом.
+        let _ = writeln!(
+            self.bodies,
+            "  call void @adamas_drop(ptr %self, ptr @{RELEASE_SYMBOL})"
+        );
         self.bodies.push_str("  ret ptr %value\n}\n\n");
     }
 
@@ -1852,8 +1862,9 @@ impl Module {
     /// аргументами.
     ///
     /// Слоты принадлежат замыканию, а функция берёт аргументы **владением**,
-    /// отсюда `adamas_dup` на каждый: своё замыкание дропает применение
-    /// ([`crate::perceus`]), и без дублирования оно унесло бы слоты с собой.
+    /// отсюда `adamas_dup` на каждый: замыкание пришло владением и отпускается
+    /// трамплином до вызова (волна 8 Фазы 9), и без дублирования оно унесло бы
+    /// слоты с собой.
     /// Последний аргумент приходит владением уже от `adamas_apply`.
     ///
     /// Скрытые аргументы у самого трамплина есть всегда - граница замыкания
@@ -1926,6 +1937,12 @@ impl Module {
         {
             given.push("ptr %arg".to_owned());
         }
+        // Среда прочитана - замыкание отпускается до вызова, и вызов остаётся
+        // хвостовым (волна 8 Фазы 9).
+        let _ = writeln!(
+            self.bodies,
+            "  call void @adamas_drop(ptr %self, ptr @{RELEASE_SYMBOL})"
+        );
         let _ = writeln!(
             self.bodies,
             "  %answer = call {CONVENTION} ptr @fn_{}({})",
@@ -5827,8 +5844,8 @@ impl<'a> Builder<'a> {
     /// Применение значения-функции: форму за указателем решает рантайм.
     ///
     /// Точка приостановки по построению - вызываемое может оказаться второй
-    /// формы, - поэтому только в хвосте куска. Замыкание заимствуется,
-    /// аргумент уходит владением (`adamas.h`).
+    /// формы, - поэтому только в хвосте куска. Замыкание и аргумент уходят
+    /// владением (`adamas.h`, волна 8 Фазы 9).
     fn applying(&mut self, callee: &Expr, argument: &Expr) -> Result<(), LlvmError> {
         let kont = self.kont()?;
         let ev = self.ev()?;

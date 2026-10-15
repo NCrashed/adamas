@@ -744,7 +744,13 @@ type Captured = (Vec<Binding>, Vec<Expr>, Vec<Slot>);
 /// ответа после него - того, чем лямбда отвечает, если параметров у неё
 /// столько. Плоский примитив в обоих местах означает плоское тело: аргумент
 /// и ответ снимает и надевает обёртку тело ([`Lowerer::abstraction`]).
-type Hint = (Repr, Repr);
+///
+/// Третье - чиста ли row этой стрелки: меток с операциями нет, хвоста нет.
+/// Лямбда, чьи стрелки чисты все, понижается первой формой (§10 вопрос 192,
+/// срез 4 волны 8): правило то же, что у [`form`], плюс хвост - row-параметр
+/// неспециализированного определения, о котором в месте постройки неизвестно
+/// ничего.
+type Hint = (Repr, Repr, bool);
 
 /// Какой слот у места, куда уезжает захваченное.
 ///
@@ -1601,14 +1607,10 @@ impl<'a> Lowerer<'a> {
     /// терме не существует, поэтому печатается только payload - пустое имя
     /// узнаёт `print.c`. Дроп обычный: слот плоский, следовать по нему некуда.
     fn prim_wrapper(&mut self, prim: PrimTy) -> Result<CtorId, LowerError> {
-        let fact = Fact::declared(Mult::One).shaped(Repr::Flat(prim));
-        let found = self
-            .constructors
-            .iter()
-            .find(|it| it.name.is_empty() && it.binders == [fact]);
-        if let Some(constructor) = found {
-            return Ok(constructor.tag);
+        if let Some(tag) = Constructor::wrapper(&self.constructors, prim) {
+            return Ok(tag);
         }
+        let fact = Fact::declared(Mult::One).shaped(Repr::Flat(prim));
         let tag = u16::try_from(self.constructors.len())
             .ok()
             .filter(|tag| *tag < TAGS)
@@ -5703,15 +5705,16 @@ impl<'a> Lowerer<'a> {
     /// аргументом `position` определения `name` (§10 вопрос 223).
     ///
     /// Читается тип параметра вызываемого: написан стрелкой - её домены и есть
-    /// типы связываний лямбды. Подсказывается **только запись**: аргумент
-    /// прибывает в замыкание объектом её единообразной формы (его перекладывает
-    /// [`Lowerer::coerced`] в позиции аргумента замыкания, §10 вопрос 235), и
-    /// факт параметра может её назвать. Прочее остаётся указателем, как было. Домен-переменная
-    /// (`apply : (a -> b) -> a -> b`) подсказки не даёт - типа там нет.
+    /// типы связываний лямбды, а row её стрелок - форму ([`Lowerer::hinted`]).
+    /// Row-аргументы места вызова (`instance`) подставляются до чтения: у
+    /// неспециализированного определения row стрелки - его row-параметр, и
+    /// хвост его в месте вызова известен. Домен-переменная (`apply : (a -> b)
+    /// -> a -> b`) подсказки не даёт - типа там нет.
     fn lambda_hints(
         &mut self,
         scope: &Scope,
         name: &Name,
+        instance: &Args,
         position: usize,
         arguments: &[Arg<'_>],
     ) -> Result<Option<Vec<Hint>>, LowerError> {
@@ -5726,7 +5729,8 @@ impl<'a> Lowerer<'a> {
         for level in 0..depth {
             env = env.extend(Value::var(Lvl(level)));
         }
-        let mut ty = eval(&Env::default(), self.declared(name)?);
+        let declared = self.declared(name)?.substitute_rows(instance.row_args());
+        let mut ty = eval(&Env::default(), &declared);
         for argument in &arguments[..position] {
             let Value::Pi(_, _, _, _, codomain) = &*ty else {
                 return Ok(None);
@@ -5864,10 +5868,15 @@ impl<'a> Lowerer<'a> {
         let mut current = &ty;
         let mut depth = depth;
         let mut hints = Vec::new();
-        while let Term::Pi(_, _, inner, _, codomain) = current {
+        while let Term::Pi(_, _, inner, row, codomain) = current {
             let domain = self.repr_of(inner, depth, &Dicts::new())?;
             let answer = self.repr_of(codomain, depth.saturating_add(1), &Dicts::new())?;
-            hints.push((self.closure_repr(domain)?, self.closure_repr(answer)?));
+            let pure = row.tail().is_none()
+                && !row
+                    .labels()
+                    .iter()
+                    .any(|label| performs(self.signature, label));
+            hints.push((self.closure_repr(domain)?, self.closure_repr(answer)?, pure));
             depth = depth.saturating_add(1);
             current = codomain;
         }
@@ -5951,7 +5960,7 @@ impl<'a> Lowerer<'a> {
                 name: name.to_string(),
                 binder: position,
             })?;
-            self.hints = self.lambda_hints(scope, name, position, arguments)?;
+            self.hints = self.lambda_hints(scope, name, instance, position, arguments)?;
             let lowered = self.given(scope, argument, fact.repr, text!("lower-118"));
             self.hints = None;
             given.push(lowered?);
@@ -6454,19 +6463,29 @@ impl<'a> Lowerer<'a> {
         // прибывает обёрткой - граница замыкания говорит указателями, - и тело
         // видит его битами: обёртку снимает разбор на входе (§10 вопрос 192,
         // срез 2 волны 8). Прочее - указатель.
+        // Лямбда, чей ожидаемый тип чист на всех её стрелках, - первой формы
+        // (§10 вопрос 192, срез 4 волны 8): плоское она берёт битами и битами
+        // же отвечает, а обёртку снимает и надевает трамплин `box_`. Деструктор
+        // scope'а зовёт рантайм, и формы он не меняет.
+        let stack = !discard
+            && !parameters.is_empty()
+            && hints.len() >= parameters.len()
+            && hints[..parameters.len()].iter().all(|hint| hint.2);
         let mut bindings: Vec<Binding> = Vec::with_capacity(parameters.len());
         let mut unwrapped: Vec<(LocalId, PrimTy, Binding)> = Vec::new();
         for (at, (mult, name)) in parameters.iter().enumerate() {
             let mut fact = Fact::present(*mult);
-            if let Some((Repr::Record(tag), _)) = hints.get(at) {
-                fact = fact.shaped(Repr::Record(*tag));
+            match hints.get(at) {
+                Some((Repr::Record(tag), _, _)) => fact = fact.shaped(Repr::Record(*tag)),
+                Some((Repr::Flat(prim), _, _)) if stack => fact = fact.shaped(Repr::Flat(*prim)),
+                _ => {}
             }
             let binding = Binding {
                 name: name.clone(),
                 local: nested.fresh(),
                 fact,
             };
-            if let Some((Repr::Flat(prim), _)) = hints.get(at) {
+            if let (Some((Repr::Flat(prim), _, _)), false) = (hints.get(at), stack) {
                 let bits = Binding {
                     name: name.clone(),
                     local: nested.fresh(),
@@ -6484,9 +6503,15 @@ impl<'a> Lowerer<'a> {
             .checked_sub(1)
             .and_then(|last| hints.get(last))
         {
-            Some((_, Repr::Flat(prim))) if !discard => Repr::Flat(*prim),
+            Some((_, Repr::Flat(prim), _)) if !discard => Repr::Flat(*prim),
+            Some((_, Repr::Record(tag), _)) if stack => Repr::Record(*tag),
             _ => Repr::Boxed,
         };
+        // Обёртку ответа первой формы надевает трамплин, и тег ему нужен
+        // заведённым.
+        if let (Repr::Flat(prim), true) = (answer, stack) {
+            self.prim_wrapper(prim)?;
+        }
 
         let function = FuncId(self.functions.len());
         self.functions.push(Function {
@@ -6496,34 +6521,27 @@ impl<'a> Lowerer<'a> {
             // написанного типа. Свой спан был бы у выражения, а спанов на
             // выражениях ядро не носит вовсе.
             position: None,
-            // Вторая форма у всякой лямбды, и это **не** обход решения 1
-            // волны 4, а его единственное применение к случаю без row: у
-            // связывания лямбды написанного типа в ядре нет вовсе - там же,
-            // где нет и его представления (см. шапку модуля). Row её живёт в
-            // ожидаемом типе позиции, а типов понижение по выражениям не
-            // носит; выбрать первую форму значило бы выбрать её **угадав**, и
-            // угаданная лямбда под `handle` операции произвести не может.
-            //
-            // Цена этого выбора - ноль, и это единственный довод, которым он
-            // отличается от произвола. Прямого вызова у лямбды не бывает: зовут
-            // её через `adamas_apply`, а граница замыкания несёт оба скрытых
-            // аргумента всегда - какая из форм за указателем, место вызова не
-            // знает (`adamas.h`, `adamas_code`). Первая форма поэтому не теряет
-            // ни одного прямого вызова, а вторая получает два аргумента, за
-            // которые уже заплачено трамплином.
-            form: Form::Detached,
+            // Форму решает row ожидаемого типа, как у определения решает row
+            // написанного ([`form`]). Без подсказки - вторая: row неизвестна, и
+            // выбрать первую значило бы выбрать её **угадав**, а угаданная
+            // лямбда под `handle` операции произвести не может. Граница
+            // замыкания несёт оба скрытых аргумента всегда (`adamas_code`), и
+            // первой форме их не передаёт трамплин.
+            form: if stack { Form::Stack } else { Form::Detached },
             captured,
             parameters: bindings,
             // Ответ замыкания приходит через `adamas_apply`, а он говорит
-            // указателями: подсказанный плоский ответ тело считает битами и
-            // запаковывает в конце (§10 вопрос 192, срез 2 волны 8).
-            result: Repr::Boxed,
+            // указателями: подсказанный плоский ответ тело второй формы
+            // считает битами и запаковывает в конце (§10 вопрос 192, срез 2
+            // волны 8), а первой - отдаёт как есть, запаковывает `box_`.
+            result: if stack { answer } else { Repr::Boxed },
             body: Expr::Erased,
         });
-        let outer = std::mem::replace(&mut self.detached, true);
+        let outer = std::mem::replace(&mut self.detached, !stack);
         let body = self.shaped(&mut nested, &current, answer, text!("lower-131"));
         self.detached = outer;
-        let body = self.framed(&mut nested, body?, discard, answer, unwrapped)?;
+        let wrapped = if stack { Repr::Boxed } else { answer };
+        let body = self.framed(&mut nested, body?, discard, wrapped, unwrapped)?;
         self.functions[function.0].body = body;
         Ok((
             Expr::Closure {

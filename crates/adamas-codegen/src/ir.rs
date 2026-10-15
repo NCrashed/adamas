@@ -623,6 +623,18 @@ pub struct Constructor {
 }
 
 impl Constructor {
+    /// Обёртка плоского примитива: безымянный конструктор с одним плоским
+    /// полем, которым плоское значение пересекает границу замыкания (§10
+    /// вопросы 158, 192). `None` - понижение её не заводило.
+    #[must_use]
+    pub fn wrapper(constructors: &[Self], prim: PrimTy) -> Option<CtorId> {
+        let fact = Fact::declared(Mult::One).shaped(Repr::Flat(prim));
+        constructors
+            .iter()
+            .find(|it| it.name.is_empty() && it.binders == [fact])
+            .map(|it| it.tag)
+    }
+
     /// Слот в объекте рантайма, если связывание до него доживает.
     #[must_use]
     pub fn slot(&self, binder: usize) -> Option<u32> {

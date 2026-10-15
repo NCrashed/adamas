@@ -267,7 +267,7 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
             return Err(failure);
         }
         if boxed.contains(&function.id) {
-            wrapper(&mut bodies, function);
+            wrapper(&mut bodies, &program.constructors, function);
         }
         if taken.contains(&function.id) {
             taker(&mut bodies, function);
@@ -1536,7 +1536,7 @@ fn body(
 /// биты числа, счётчика у них нет, и владения при чтении не возникает - функция
 /// берёт их своим C-типом. Читается он `from_word`, то есть той же парой, какой
 /// плоское значение достаётся из слота кадра.
-fn wrapper(out: &mut String, function: &Function) {
+fn wrapper(out: &mut String, constructors: &[Constructor], function: &Function) {
     let env = function.live_captured().count();
     let arity = function.parameters.len();
     let _ = writeln!(
@@ -1585,11 +1585,67 @@ fn wrapper(out: &mut String, function: &Function) {
         }
     }
     out.push_str("    adamas_drop_value(self);\n");
+    if function.form == Form::Detached {
+        let _ = writeln!(
+            out,
+            "    return fn_{}({});\n}}\n",
+            function.id.0,
+            taken.join(", ")
+        );
+        return;
+    }
+    // Первая форма (лямбда с чистым ожидаемым типом, срез 4 волны 8): граница
+    // говорит указателями, а код берёт и отдаёт плоское битами. Обёртку снимает
+    // и надевает трамплин; ячейку последнего аргумента он отдаёт ответу, как
+    // отдал бы её Perceus внутри тела.
+    let answer = match function.result {
+        Repr::Flat(prim) => Constructor::wrapper(constructors, prim).map(|tag| (prim, tag)),
+        _ => None,
+    };
+    let mut cell = "NULL";
+    for (position, parameter) in function.parameters.iter().enumerate() {
+        let Repr::Flat(prim) = parameter.fact.repr else {
+            continue;
+        };
+        if !parameter.fact.present {
+            continue;
+        }
+        let last = position + 1 == arity;
+        let boxed = if last {
+            "arg".to_owned()
+        } else {
+            format!("a{position}")
+        };
+        let _ = writeln!(
+            out,
+            "    {} u{position} = adamas_bits_{}(adamas_slot_bits({boxed}, 0));",
+            scalar(Repr::Flat(prim)),
+            prim.name()
+        );
+        if last && answer.is_some() {
+            out.push_str("    adamas_value cell = adamas_reclaim_value(arg);\n");
+            cell = "cell";
+        } else {
+            let _ = writeln!(out, "    adamas_drop_value({boxed});");
+        }
+        if let Some(at) = taken.iter().position(|it| *it == boxed) {
+            taken[at] = format!("u{position}");
+        }
+    }
+    let invoked = format!("fn_{}({})", function.id.0, taken.join(", "));
+    let Some((prim, tag)) = answer else {
+        let _ = writeln!(out, "    return {invoked};\n}}\n");
+        return;
+    };
     let _ = writeln!(
         out,
-        "    return fn_{}({});\n}}\n",
-        function.id.0,
-        taken.join(", ")
+        "    {} answer = {invoked};\n\
+         \x20   adamas_value out = adamas_reuse({cell}, {}u, 1u);\n\
+         \x20   adamas_slot_write(out, 0, adamas_word_{}(answer));\n\
+         \x20   return out;\n}}\n",
+        scalar(Repr::Flat(prim)),
+        tag.0,
+        prim.name()
     );
 }
 

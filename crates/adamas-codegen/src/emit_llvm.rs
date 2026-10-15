@@ -551,7 +551,7 @@ pub fn emit(program: &Program) -> Result<Artefacts, LlvmError> {
         module.taker(&program.functions[function.0]);
     }
     for function in boxing(program) {
-        module.boxer(&program.functions[function.0]);
+        module.boxer(&program.constructors, &program.functions[function.0]);
     }
     // Сборщики - последними: отвергнуть конструктор значением обязано тело
     // ([`Builder::building`]), и до этой строки отказ уже вернулся бы.
@@ -607,9 +607,14 @@ fn boundaries(program: &Program, suspending: &Suspension) -> Result<(), LlvmErro
     }
     // Замыкание отвечает словом наравне с ними, но форма у него своя: значением
     // бывает и первая - ей трамплин скрытых аргументов просто не передаёт.
+    // Плоский ответ первой формы (срез 4 волны 8) законен, когда обёртка ему
+    // заведена: надевает её трамплин (`Module::unwrapping`).
     for boxed in boxing(program) {
         let function = &program.functions[boxed.0];
-        if crossing(program, suspending, boxed).as_deref() != Some("ptr") {
+        let wrapped = function.form == Form::Stack
+            && matches!(function.result, Repr::Flat(prim)
+                if Constructor::wrapper(&program.constructors, prim).is_some());
+        if !wrapped && crossing(program, suspending, boxed).as_deref() != Some("ptr") {
             return Err(LlvmError::Shape {
                 function: function.name.clone(),
                 place: adamas_l10n::tr!("emit_llvm-7").to_owned(),
@@ -1870,7 +1875,7 @@ impl Module {
     /// Скрытые аргументы у самого трамплина есть всегда - граница замыкания
     /// динамическая, - а дальше он передаёт их ровно второй форме. Первой они не
     /// передаются вовсе: у неё их нет в сигнатуре.
-    fn boxer(&mut self, function: &Function) {
+    fn boxer(&mut self, constructors: &[Constructor], function: &Function) {
         let env = function.live_captured().count();
         let arity = function.parameters.len();
         let _ = writeln!(
@@ -1943,13 +1948,125 @@ impl Module {
             self.bodies,
             "  call void @adamas_drop(ptr %self, ptr @{RELEASE_SYMBOL})"
         );
+        if function.form == Form::Detached {
+            let _ = writeln!(
+                self.bodies,
+                "  %answer = call {CONVENTION} ptr @fn_{}({})",
+                function.id.0,
+                given.join(", ")
+            );
+            self.bodies.push_str("  ret ptr %answer\n}\n\n");
+            return;
+        }
+        self.unwrapping(constructors, function, env, &mut given);
+    }
+
+    /// Хвост трамплина первой формы (лямбда с чистым ожидаемым типом, срез 4
+    /// волны 8): плоские аргументы снимаются с обёрток, плоский ответ
+    /// надевается на ячейку последнего аргумента - тот же текст, что у
+    /// `emit_c::wrapper`.
+    fn unwrapping(
+        &mut self,
+        constructors: &[Constructor],
+        function: &Function,
+        env: usize,
+        given: &mut [String],
+    ) {
+        let arity = function.parameters.len();
+        let answer = match function.result {
+            Repr::Flat(prim) => Constructor::wrapper(constructors, prim).map(|tag| (prim, tag)),
+            _ => None,
+        };
+        let mut cell = "null";
+        for (position, parameter) in function.parameters.iter().enumerate() {
+            let Repr::Flat(prim) = parameter.fact.repr else {
+                continue;
+            };
+            if !parameter.fact.present {
+                continue;
+            }
+            let last = position + 1 == arity;
+            let boxed = if last {
+                "%arg".to_owned()
+            } else {
+                format!("%d{}", env + position)
+            };
+            let _ = writeln!(
+                self.bodies,
+                "  %up{position} = getelementptr i8, ptr {boxed}, i64 {HEADER_BYTES}\n\
+                 \x20 %uw{position} = load i64, ptr %up{position}"
+            );
+            let mut current = format!("%uw{position}");
+            if prim.size() * 8 != 64 {
+                let _ = writeln!(
+                    self.bodies,
+                    "  %ut{position} = trunc i64 {current} to {}",
+                    word(prim)
+                );
+                current = format!("%ut{position}");
+            }
+            if prim.floating() {
+                let _ = writeln!(
+                    self.bodies,
+                    "  %uf{position} = bitcast {} {current} to {}",
+                    word(prim),
+                    machine(prim)
+                );
+                current = format!("%uf{position}");
+            }
+            if last && answer.is_some() {
+                let _ = writeln!(
+                    self.bodies,
+                    "  %cell = call ptr @adamas_drop_reuse(ptr %arg, ptr @{RELEASE_SYMBOL})"
+                );
+                cell = "%cell";
+            } else {
+                let _ = writeln!(
+                    self.bodies,
+                    "  call void @adamas_drop(ptr {boxed}, ptr @{RELEASE_SYMBOL})"
+                );
+            }
+            let pointer = format!("ptr {boxed}");
+            if let Some(at) = given.iter().position(|it| *it == pointer) {
+                given[at] = format!("{} {current}", machine(prim));
+            }
+        }
+        let result = match function.result {
+            Repr::Flat(prim) => machine(prim),
+            _ => "ptr",
+        };
         let _ = writeln!(
             self.bodies,
-            "  %answer = call {CONVENTION} ptr @fn_{}({})",
+            "  %answer = call {CONVENTION} {result} @fn_{}({})",
             function.id.0,
             given.join(", ")
         );
-        self.bodies.push_str("  ret ptr %answer\n}\n\n");
+        let Some((prim, tag)) = answer else {
+            let _ = writeln!(self.bodies, "  ret {result} %answer\n}}\n");
+            return;
+        };
+        let mut current = "%answer";
+        if prim.floating() {
+            let _ = writeln!(
+                self.bodies,
+                "  %ab = bitcast {} %answer to {}",
+                machine(prim),
+                word(prim)
+            );
+            current = "%ab";
+        }
+        if prim.size() * 8 != 64 {
+            let _ = writeln!(self.bodies, "  %aw = zext {} {current} to i64", word(prim));
+            current = "%aw";
+        }
+        let _ = writeln!(
+            self.bodies,
+            "  %out = call ptr @adamas_reuse(ptr {cell}, i16 {}, i64 1)\n\
+             \x20 %op = getelementptr i8, ptr %out, i64 {HEADER_BYTES}\n\
+             \x20 store i64 {current}, ptr %op\n\
+             \x20 ret ptr %out\n}}\n",
+            tag.0
+        );
     }
 
     /// Складывает модуль: шапка, объявления, константы, тела, метаданные.

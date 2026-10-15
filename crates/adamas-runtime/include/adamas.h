@@ -1165,6 +1165,21 @@ adamas_value adamas_closure_get(adamas_value closure, size_t index);
 /** Указатель на код - им же берётся голый C-указатель для §5.3. */
 adamas_code adamas_closure_code(adamas_value closure);
 
+/**
+ * Типизированный вход замыкания (§10 вопрос 192, срез 4 волны 8): код, берущий
+ * сразу все аргументы в их представлениях - плоское битами - и само замыкание
+ * владением первым. Ставит его построивший, пока замыкание ещё его одного.
+ * Форма у входа первая: заводится он только у замыкания чистого типа.
+ */
+void adamas_closure_set_typed(adamas_value closure, void *entry);
+
+/**
+ * Вход для применения сразу к `count` аргументам либо `NULL`: входа нет,
+ * замыкание уже частично применено или ждёт другого числа. `NULL` значит
+ * обобщённый путь - `adamas_apply` по аргументу за раз.
+ */
+void *adamas_closure_entry(adamas_value closure, uint32_t count);
+
 /** Сколько аргументов замыкание ещё ждёт. */
 uint32_t adamas_closure_missing(adamas_value closure);
 

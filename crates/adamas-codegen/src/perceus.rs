@@ -125,6 +125,7 @@ pub fn insert(program: Program) -> Program {
         foreigns,
         exports,
         callbacks,
+        entries,
         entry,
         source,
     } = program;
@@ -141,6 +142,7 @@ pub fn insert(program: Program) -> Program {
         foreigns,
         exports,
         callbacks,
+        entries,
         entry,
         source,
     }
@@ -460,6 +462,7 @@ impl Pass<'_> {
             // Чужой вызов (§5.3) идёт тем же путём, что свой; едущие аргументы
             // плоские, и RC по ним не идёт сам собой - см. `self.flat`.
             Expr::Call { .. } | Expr::Foreign { .. } => self.applied_to(expr, owned),
+            expr @ Expr::Enter { .. } => self.entering(expr, owned),
             Expr::Closure { function, captured } => {
                 let (captured, spare) = self.sequence(captured, owned);
                 drops(spare, Expr::Closure { function, captured })
@@ -508,6 +511,34 @@ impl Pass<'_> {
                 expr
             }
         }
+    }
+
+    /// Применение через типизированный вход ([`Expr::Enter`]): владение то же,
+    /// что у цепочки [`Expr::Apply`] - вызываемое и аргументы уходят вызову, и
+    /// после него дропать нечего.
+    fn entering(&mut self, expr: Expr, owned: &BTreeSet<LocalId>) -> Expr {
+        let Expr::Enter {
+            callee,
+            arguments,
+            params,
+            result,
+        } = expr
+        else {
+            return expr;
+        };
+        let mut parts = vec![*callee];
+        parts.extend(arguments);
+        let (mut parts, spare) = self.sequence(parts, owned);
+        let callee = Box::new(parts.remove(0));
+        drops(
+            spare,
+            Expr::Enter {
+                callee,
+                arguments: parts,
+                params,
+                result,
+            },
+        )
     }
 
     /// Вызов - свой либо чужой (§5.3): аргументы по порядку, лишнее дропается.
@@ -1492,6 +1523,11 @@ impl Pass<'_> {
             Expr::Apply { callee, argument } => {
                 self.plans(callee, slots) || self.plans(argument, slots)
             }
+            Expr::Enter {
+                callee, arguments, ..
+            } => std::iter::once(&**callee)
+                .chain(arguments)
+                .any(|it| self.plans(it, slots)),
             // Точку приостановки придержанный блок не переживает: он сырой -
             // ни заголовка, ни счётчика, - а слот кадра держит **значения**.
             // Тот же консерватизм, что у хендлера и операции ниже, и цена та
@@ -1606,6 +1642,10 @@ impl Pass<'_> {
     /// Договор ровно один и он сильнее, чем «где-то поставил»: вернув `true`,
     /// обход обязан оставить выражение таким, что **всякий** путь через него
     /// либо занимает ячейку под конструктор, либо отдаёт её [`Expr::Discard`].
+    #[allow(
+        clippy::too_many_lines,
+        reason = "разбор узлов - одна таблица, и делить её значило бы прятать её половину"
+    )]
     fn attach(&self, expr: &mut Expr, slots: usize, token: LocalId) -> bool {
         match expr {
             Expr::Construct {
@@ -1635,6 +1675,11 @@ impl Pass<'_> {
             Expr::Apply { callee, argument } => {
                 self.attach(callee, slots, token) || self.attach(argument, slots, token)
             }
+            Expr::Enter {
+                callee, arguments, ..
+            } => std::iter::once(&mut **callee)
+                .chain(arguments)
+                .any(|it| self.attach(it, slots, token)),
             // Обход тот же, что у [`Pass::plans`], и граница та же.
             Expr::Bind { value, body, .. } => {
                 self.attach(value, slots, token)

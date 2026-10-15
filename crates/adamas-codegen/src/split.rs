@@ -164,7 +164,8 @@ fn suspends(expr: &Expr, known: &BTreeSet<FuncId>, quiet: bool) -> bool {
         // Селекция по целям замыканий, названная там следующей ступенью
         // вопроса 74, не понадобилась: форму за указателем решает трамплин
         // замыкания, и решает статически.
-        | Expr::Apply { .. } => true,
+        | Expr::Apply { .. }
+        | Expr::Enter { .. } => true,
         Expr::Call { function, .. } => known.contains(function),
         _ => false,
     };
@@ -190,6 +191,7 @@ pub fn prepare(program: Program) -> Program {
         foreigns,
         exports,
         callbacks,
+        entries,
         entry,
         source,
     } = program;
@@ -217,6 +219,7 @@ pub fn prepare(program: Program) -> Program {
         foreigns,
         exports,
         callbacks,
+        entries,
         entry,
         source,
     }
@@ -236,6 +239,7 @@ fn extracted(program: Program) -> Program {
         foreigns,
         exports,
         callbacks,
+        entries,
         entry,
         source,
     } = program;
@@ -261,6 +265,7 @@ fn extracted(program: Program) -> Program {
         foreigns,
         exports,
         callbacks,
+        entries,
         entry,
         source,
     }
@@ -403,6 +408,9 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
             vec![left, right]
         }
         Expr::Apply { callee, argument } => vec![callee, argument],
+        Expr::Enter {
+            callee, arguments, ..
+        } => [&mut **callee].into_iter().chain(arguments).collect(),
         Expr::Bind { value, body, .. } => vec![value, body],
         Expr::Match {
             scrutinee, arms, ..
@@ -550,6 +558,7 @@ impl Anf<'_> {
             Expr::Local(local) => self.locals.get(local).copied().unwrap_or(Repr::Boxed),
             Expr::Literal { ty, .. } | Expr::Primitive { ty, .. } => Repr::Flat(*ty),
             Expr::Convert { cast, .. } => Repr::Flat(cast.to),
+            Expr::Enter { result, .. } => *result,
             Expr::Call { function, .. } => {
                 self.results.get(function.0).copied().unwrap_or(Repr::Boxed)
             }

@@ -23,6 +23,9 @@ struct closure_block {
     adamas_header header;
     adamas_code code;
     adamas_release release;
+    /* Типизированный вход (§10 вопрос 192, срез 4 волны 8): `NULL` - его нет.
+     * Прототип знают построивший и место вызова, рантайм его не читает. */
+    void *typed;
     uint32_t arity;
     uint32_t applied;
     uint32_t captured;
@@ -32,7 +35,7 @@ struct closure_block {
     adamas_value slots[];
 };
 
-_Static_assert(offsetof(struct closure_block, slots) == 40, "closure slots start at byte 40");
+_Static_assert(offsetof(struct closure_block, slots) == 48, "closure slots start at byte 48");
 
 static struct closure_block *closure_of(adamas_value value) {
     if (adamas_is_imm(value) || adamas_tag(value) != ADAMAS_TAG_CLOSURE) {
@@ -68,6 +71,7 @@ adamas_value adamas_closure(adamas_code code, adamas_release release, uint32_t a
     struct closure_block *block = (struct closure_block *)(void *)value;
     block->code = code;
     block->release = release;
+    block->typed = NULL;
     block->arity = arity;
     block->applied = 0;
     block->captured = captured;
@@ -89,6 +93,28 @@ adamas_value adamas_closure_get(adamas_value closure, size_t index) {
         adamas_fail("closure slot out of bounds");
     }
     return block->slots[index];
+}
+
+void adamas_closure_set_typed(adamas_value closure, void *entry) {
+    closure_of(closure)->typed = entry;
+}
+
+/* Вход отдаётся только целому замыканию и только на полный набор: частичное
+ * применение копирует блок без входа, а иная арность значит иной прототип.
+ * Тип места вызова от этого не страдает - он тот же, что у построившего.
+ *
+ * Значение стрелочного типа бывает и не замыканием: резумпция применяется
+ * значением (`adamas_apply`, ветка `SEGMENT`). Входа у неё нет, и путь ей -
+ * обобщённый. */
+void *adamas_closure_entry(adamas_value closure, uint32_t count) {
+    if (adamas_is_imm(closure) || adamas_tag(closure) != ADAMAS_TAG_CLOSURE) {
+        return NULL;
+    }
+    struct closure_block *block = closure_of(closure);
+    if (block->typed == NULL || block->applied != 0 || block->arity != count) {
+        return NULL;
+    }
+    return block->typed;
 }
 
 adamas_code adamas_closure_code(adamas_value closure) {

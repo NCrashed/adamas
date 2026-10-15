@@ -53,9 +53,10 @@ use adamas_core::mult::Mult;
 
 /// Чистая функция, применяющая значение: `forEach` без единой метки в типе.
 ///
-/// Лямбда получает вторую форму **всегда** (`ir::Form`), значит за указателем
-/// здесь именно она - и всё же кадра не кладётся ни одного: тело её ничем не
-/// приостанавливается, и трамплин `box_N` зовёт его напрямую.
+/// Применение здесь - [`Expr::Enter`] (срез 4 волны 8 Фазы 9): тип `f` чист, и
+/// лямбда за указателем первой формы с типизированным входом. Свидетель
+/// смотрит на обобщённый путь того же узла - корень, `adamas_apply`, докрутку, -
+/// и кадра не кладётся и там: за указателем бывает и замыкание без входа.
 const PURE_APPLY: &str = "\
 data Unit where
   MkUnit : Unit
@@ -118,7 +119,7 @@ fn a_pure_segment_applies_without_a_heap_frame() {
         .filter(|function| {
             let mut found = false;
             harness::walk(&function.body, &mut |expr| {
-                found |= matches!(expr, Expr::Apply { .. });
+                found |= matches!(expr, Expr::Apply { .. } | Expr::Enter { .. });
             });
             found
         })
@@ -377,6 +378,7 @@ fn a_second_form_behind_the_pointer_fails_loudly() {
         foreigns: Vec::new(),
         exports: Vec::new(),
         callbacks: Vec::new(),
+        entries: Vec::new(),
         functions: vec![entry, produces],
         entry: FuncId(0),
         source: None,

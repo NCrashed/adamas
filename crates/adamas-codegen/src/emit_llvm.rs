@@ -553,6 +553,9 @@ pub fn emit(program: &Program) -> Result<Artefacts, LlvmError> {
     for function in boxing(program) {
         module.boxer(&program.constructors, &program.functions[function.0]);
     }
+    for id in &program.entries {
+        module.typed(program, &program.functions[id.0])?;
+    }
     // Сборщики - последними: отвергнуть конструктор значением обязано тело
     // ([`Builder::building`]), и до этой строки отказ уже вернулся бы.
     for constructor in builders(program) {
@@ -1961,6 +1964,69 @@ impl Module {
         self.unwrapping(constructors, function, env, &mut given);
     }
 
+    /// Типизированный вход лямбды первой формы (§10 вопрос 192, срез 4 волны
+    /// 8): само замыкание владением, затем параметры в своих представлениях.
+    /// Среда читается так же, как её читает `box_`, замыкание отпускается, и
+    /// код зовётся без обёрток - тот же текст, что у `emit_c::entry`.
+    fn typed(&mut self, program: &Program, function: &Function) -> Result<(), LlvmError> {
+        let result = slot_or(
+            function,
+            adamas_l10n::text!("emit_llvm-20"),
+            function.result,
+            &program.packings,
+        )?;
+        let mut parameters = vec!["ptr %self".to_owned()];
+        let mut given = Vec::new();
+        for (position, parameter) in function.parameters.iter().enumerate() {
+            let ty = slot_or(
+                function,
+                &adamas_l10n::tr!("emit_llvm-parameter", name = parameter.name),
+                parameter.fact.repr,
+                &program.packings,
+            )?;
+            parameters.push(format!("{ty} %x{position}"));
+            given.push(format!("{ty} %x{position}"));
+        }
+        let _ = writeln!(
+            self.bodies,
+            "; `{}` входом: аргументы в своих представлениях",
+            function.name
+        );
+        let _ = writeln!(
+            self.bodies,
+            "define internal {CONVENTION} {result} @typed_{}({}) {DEFINITION_ATTRIBUTES} {{",
+            function.id.0,
+            parameters.join(", ")
+        );
+        self.bodies.push_str("entry:\n");
+        let mut taken = Vec::new();
+        for (slot, binding) in function.live_captured().enumerate() {
+            let _ = writeln!(
+                self.bodies,
+                "  %s{slot} = call ptr @adamas_closure_get(ptr %self, i64 {slot})"
+            );
+            if binding.fact.repr.primitive().is_some() {
+                taken.push(unslotted(&mut self.bodies, binding.fact.repr, slot));
+                continue;
+            }
+            let _ = writeln!(
+                self.bodies,
+                "  %d{slot} = call ptr @adamas_dup(ptr %s{slot})"
+            );
+            taken.push(format!("ptr %d{slot}"));
+        }
+        taken.extend(given);
+        let _ = writeln!(
+            self.bodies,
+            "  call void @adamas_drop(ptr %self, ptr @{RELEASE_SYMBOL})\n\
+             \x20 %answer = call {CONVENTION} {result} @fn_{}({})\n\
+             \x20 ret {result} %answer\n}}\n",
+            function.id.0,
+            taken.join(", ")
+        );
+        Ok(())
+    }
+
     /// Хвост трамплина первой формы (лямбда с чистым ожидаемым типом, срез 4
     /// волны 8): плоские аргументы снимаются с обёрток, плоский ответ
     /// надевается на ячейку последнего аргумента - тот же текст, что у
@@ -2204,6 +2270,8 @@ fn second_form(out: &mut String, program: &Program) {
             "declare void @adamas_closure_set(ptr, i64, ptr)\n",
             "declare ptr @adamas_closure_get(ptr, i64)\n",
             "declare ptr @adamas_apply(ptr, ptr, ptr, ptr)\n",
+            "declare void @adamas_closure_set_typed(ptr, ptr)\n",
+            "declare ptr @adamas_closure_entry(ptr, i32)\n",
             "\n",
         ));
         // Применение в чистом отрезке заводит **свой** корень трамплина
@@ -2958,6 +3026,7 @@ impl<'a> Builder<'a> {
             Expr::Literal { ty, .. } | Expr::Primitive { ty, .. } => Repr::Flat(*ty),
             Expr::Convert { cast, .. } => Repr::Flat(cast.to),
             Expr::Call { function, .. } => self.program.functions[function.0].result,
+            Expr::Enter { result, .. } => *result,
             // Чужой вызов (§5.3): ответ его берётся из таблицы символов.
             Expr::Foreign { function, .. } => self.program.foreigns[function.0].result.repr(),
             Expr::Bind { body, .. }
@@ -3282,6 +3351,12 @@ impl<'a> Builder<'a> {
             // ([`Self::applied`]); во второй форме её выносит дробление и
             // печатает [`Self::applying`].
             Expr::Apply { callee, argument } => self.applied(callee, argument),
+            Expr::Enter {
+                callee,
+                arguments,
+                params,
+                result,
+            } => self.entered(callee, arguments, params, *result),
             Expr::Pack { .. } | Expr::Unpack { .. } => self.packed(expr),
             Expr::Layout { size, align } => Ok(descriptor(*size, *align)),
             Expr::LayoutField { descriptor, align } => self.descriptor_field(*descriptor, *align),
@@ -6072,6 +6147,167 @@ impl<'a> Builder<'a> {
         Ok(driven)
     }
 
+    /// Применение через типизированный вход ([`Expr::Enter`]): вход есть и
+    /// арность совпала - он, иначе обобщённый путь ([`Self::roundabout`]). Два
+    /// пути сходятся `phi`.
+    fn entered(
+        &mut self,
+        callee: &Expr,
+        arguments: &[Expr],
+        params: &[Repr],
+        result: Repr,
+    ) -> Result<String, LlvmError> {
+        if self.kont.is_some() || self.ev.is_some() {
+            // Узел ставится только в первой форме (`lower`, `applied_value`).
+            return Err(self.node(adamas_l10n::text!("emit_llvm-53")));
+        }
+        let callee = self.value(callee)?;
+        let mut given = Vec::with_capacity(arguments.len());
+        let mut kinds = Vec::with_capacity(arguments.len());
+        for (argument, repr) in arguments.iter().zip(params) {
+            given.push(self.value(argument)?);
+            kinds.push(self.entry_slot(*repr)?);
+        }
+        let answer = self.entry_slot(result)?;
+        let at = self.matches;
+        self.matches += 1;
+        let straight = format!("e{at}.straight");
+        let around = format!("e{at}.around");
+        let join = format!("e{at}.join");
+        let entry = self.temp();
+        self.instruction(
+            &format!(
+                "{entry} = call ptr @adamas_closure_entry(ptr {callee}, i32 {})",
+                given.len()
+            ),
+            self.here(),
+        );
+        let present = self.temp();
+        self.instruction(
+            &format!("{present} = icmp ne ptr {entry}, null"),
+            self.here(),
+        );
+        self.instruction(
+            &format!("br i1 {present}, label %{straight}, label %{around}"),
+            self.here(),
+        );
+
+        self.start(&straight);
+        let passed: Vec<String> = std::iter::once(format!("ptr {callee}"))
+            .chain(
+                kinds
+                    .iter()
+                    .zip(&given)
+                    .map(|(ty, value)| format!("{ty} {value}")),
+            )
+            .collect();
+        let direct = self.temp();
+        self.instruction(
+            &format!(
+                "{direct} = call {CONVENTION} {answer} {entry}({})",
+                passed.join(", ")
+            ),
+            self.here(),
+        );
+        let from_straight = self.block.clone();
+        self.instruction(&format!("br label %{join}"), self.here());
+
+        self.start(&around);
+        let unwrapped = self.roundabout(callee, &given, params, result)?;
+        let from_around = self.block.clone();
+        self.instruction(&format!("br label %{join}"), self.here());
+
+        self.start(&join);
+        let name = self.temp();
+        self.instruction(
+            &format!(
+                "{name} = phi {answer} [ {direct}, %{from_straight} ], [ {unwrapped}, %{from_around} ]"
+            ),
+            self.here(),
+        );
+        Ok(name)
+    }
+
+    /// Тип слота представления у входа; не слово - отказ.
+    fn entry_slot(&self, repr: Repr) -> Result<String, LlvmError> {
+        slot(repr, &self.program.packings).ok_or_else(|| LlvmError::Shape {
+            function: self.function.name.clone(),
+            place: adamas_l10n::tr!("emit_llvm-7").to_owned(),
+            shape: describe(repr),
+        })
+    }
+
+    /// Обобщённый путь [`Expr::Enter`]: обёртки плоского и `adamas_apply` по
+    /// аргументу за раз со своим корнем трамплина, как у [`Self::applied`].
+    fn roundabout(
+        &mut self,
+        callee: String,
+        given: &[String],
+        params: &[Repr],
+        result: Repr,
+    ) -> Result<String, LlvmError> {
+        let mut current = callee;
+        for (value, repr) in given.iter().zip(params) {
+            let boxed = if let Repr::Flat(prim) = repr {
+                // Обёртку заводит понижение, ставя узел (`lower`, `entry_hints`).
+                let tag = Constructor::wrapper(&self.program.constructors, *prim)
+                    .ok_or_else(|| self.node(adamas_l10n::text!("emit_llvm-53")))?;
+                let wrapped = self.temp();
+                self.instruction(
+                    &format!("{wrapped} = call ptr @adamas_alloc(i16 {}, i64 1)", tag.0),
+                    self.here(),
+                );
+                let word = self.widen(*prim, value);
+                let field = self.temp();
+                self.instruction(
+                    &format!("{field} = getelementptr i8, ptr {wrapped}, i64 {HEADER_BYTES}"),
+                    self.here(),
+                );
+                self.instruction(&format!("store i64 {word}, ptr {field}"), self.here());
+                wrapped
+            } else {
+                value.clone()
+            };
+            let root = format!("%k{}", self.frames);
+            self.frames += 1;
+            let _ = writeln!(self.head, "  {root} = alloca ptr");
+            self.instruction(
+                &format!("call void @adamas_kont_init(ptr {root})"),
+                self.here(),
+            );
+            let applied = self.temp();
+            self.instruction(
+                &format!(
+                    "{applied} = call ptr @adamas_apply(ptr {current}, ptr null, ptr {root}, \
+                     ptr {boxed})"
+                ),
+                self.here(),
+            );
+            let driven = self.temp();
+            self.instruction(
+                &format!("{driven} = call ptr @adamas_kont_run(ptr {root}, ptr {applied})"),
+                self.here(),
+            );
+            current = driven;
+        }
+        let Repr::Flat(prim) = result else {
+            return Ok(current);
+        };
+        let field = self.temp();
+        self.instruction(
+            &format!("{field} = getelementptr i8, ptr {current}, i64 {HEADER_BYTES}"),
+            self.here(),
+        );
+        let word = self.temp();
+        self.instruction(&format!("{word} = load i64, ptr {field}"), self.here());
+        let bits = self.narrow(prim, &word);
+        self.instruction(
+            &format!("call void @adamas_drop(ptr {current}, ptr @{RELEASE_SYMBOL})"),
+            self.here(),
+        );
+        Ok(bits)
+    }
+
     /// Замыкание деструктора: код забирающего трамплина плюс среда по слотам.
     fn holding(&mut self, function: FuncId, captured: &[Expr]) -> Result<String, LlvmError> {
         self.captured(function, captured, "take")
@@ -6131,6 +6367,15 @@ impl<'a> Builder<'a> {
         for (at, (capture, _)) in taken.iter().enumerate() {
             self.instruction(
                 &format!("call void @adamas_closure_set(ptr {name}, i64 {at}, ptr {capture})"),
+                self.here(),
+            );
+        }
+        if code == "box" && self.program.entries.contains(&function) {
+            self.instruction(
+                &format!(
+                    "call void @adamas_closure_set_typed(ptr {name}, ptr @typed_{})",
+                    function.0
+                ),
                 self.here(),
             );
         }

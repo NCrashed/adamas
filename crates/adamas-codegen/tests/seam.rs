@@ -152,7 +152,9 @@ fn the_uniqueness_pass_does_not_read_core_terms() {
 /// плоского аргумента трамплин снимает (`adamas_drop_value({boxed})` у
 /// накопленного, `adamas_reclaim_value(arg)` у последнего), а ответ надевает на
 /// ячейку последнего (`adamas_reuse({cell}`). Обёртки этой в IR нет вовсе: её
-/// заводит граница, а не узел.
+/// заводит граница, а не узел. Той же границей ходит обобщённый путь
+/// [`adamas_codegen::ir::Expr::Enter`] с другой стороны: обёртку ответа он
+/// снимает (`adamas_drop_value({current})`).
 ///
 /// Шестого места быть не должно: оно означало бы собственное мнение
 /// эмиттера о владении, и LLVM-эмиттер Фазы 7 остался бы без него.
@@ -189,6 +191,7 @@ fn the_c_emitter_does_not_invent_reference_counting() {
         "adamas_drop_value({boxed})",
         "adamas_reclaim_value(arg)",
         "adamas_reuse({cell}",
+        "adamas_drop_value({current})",
     ];
     for line in EMITTER.lines() {
         for called in counting {

@@ -915,6 +915,8 @@ struct Lowerer<'a> {
     /// нет, а у параметра вызываемого он написан. Ставит [`Lowerer::called`]
     /// перед написанной лямбдой, забирает [`Lowerer::abstraction`] первым делом.
     hints: Option<Vec<Hint>>,
+    /// Лямбды с типизированным входом ([`Program::entries`]).
+    entries: Vec<FuncId>,
     /// Кто первым запросил каждое имя очереди. По этой цепочке отказ внутри
     /// прелюдии называет определение автора, до него дотянувшееся (§10
     /// вопрос 217): словарь `Add#Int32` сам по себе автору ничего не говорит.
@@ -987,6 +989,7 @@ impl<'a> Lowerer<'a> {
             pending: VecDeque::new(),
             current: None,
             hints: None,
+            entries: Vec::new(),
             requesters: HashMap::new(),
             detached: false,
             tainted: false,
@@ -1054,6 +1057,7 @@ impl<'a> Lowerer<'a> {
             foreigns: self.foreigns,
             exports: self.exports,
             callbacks: self.callbacks,
+            entries: self.entries,
             entry: entry_id,
             source: self.file.map(|file| split_path(file.name())),
         })
@@ -6279,6 +6283,32 @@ impl<'a> Lowerer<'a> {
         head: &Term,
         arguments: &[Arg<'_>],
     ) -> Result<(Expr, Repr), LowerError> {
+        if let Some(hints) = self.entry_hints(scope, head, arguments.len())? {
+            let callee = self.shaped(scope, head, Repr::Boxed, text!("lower-124"))?;
+            let params: Vec<Repr> = hints.iter().map(|hint| hint.0).collect();
+            let result = hints.last().map_or(Repr::Boxed, |hint| hint.1);
+            let mut given = Vec::with_capacity(arguments.len());
+            for (argument, repr) in arguments.iter().zip(&params) {
+                // Запись приходит в замыкание объектом единообразной формы, и
+                // перекладывает её туда позиция аргумента замыкания (§10 вопрос
+                // 235) - спрашивается поэтому указатель, как у обобщённого пути.
+                let want = if let Repr::Record(_) = repr {
+                    Repr::Boxed
+                } else {
+                    *repr
+                };
+                given.push(self.given(scope, argument, want, text!("lower-125"))?);
+            }
+            return Ok((
+                Expr::Enter {
+                    callee: Box::new(callee),
+                    arguments: given,
+                    params,
+                    result,
+                },
+                result,
+            ));
+        }
         let mut value = self.shaped(scope, head, Repr::Boxed, text!("lower-124"))?;
         for argument in arguments {
             let argument = self.given(scope, argument, Repr::Boxed, text!("lower-125"))?;
@@ -6288,6 +6318,56 @@ impl<'a> Lowerer<'a> {
             };
         }
         Ok((value, Repr::Boxed))
+    }
+
+    /// Подсказки применения через типизированный вход ([`Expr::Enter`], §10
+    /// вопрос 192, срез 4 волны 8) либо `None` - путь обобщённый.
+    ///
+    /// Вход берётся в первой форме, когда тип вызываемого известен и он -
+    /// стрелка, чистая на всех `count` позициях и без стёртых связываний.
+    /// Представления выводит тот же [`Lowerer::hinted`], что даёт лямбде её
+    /// форму и прототип входа: разойдись они - вход звался бы чужим прототипом.
+    fn entry_hints(
+        &mut self,
+        scope: &Scope,
+        head: &Term,
+        count: usize,
+    ) -> Result<Option<Vec<Hint>>, LowerError> {
+        if self.detached || count == 0 {
+            return Ok(None);
+        }
+        let Some(ty) = self.term_type(scope, head) else {
+            return Ok(None);
+        };
+        let depth = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
+        let written = quote(depth, &adamas_core::conv::whnf(self.signature, &ty));
+        let mut current = unaliased(self.signature, &written);
+        for _ in 0..count {
+            let Term::Pi(binder, _, _, _, codomain) = current else {
+                return Ok(None);
+            };
+            if binder.mult == Mult::Zero {
+                return Ok(None);
+            }
+            current = codomain;
+        }
+        let Some(mut hints) = self.hinted(&written, depth)? else {
+            return Ok(None);
+        };
+        hints.truncate(count);
+        if hints.len() < count || !hints.iter().all(|hint| hint.2) {
+            return Ok(None);
+        }
+        // Обобщённый путь надевает обёртку плоскому, и тег ей нужен заведённым.
+        for hint in &hints {
+            if let Repr::Flat(prim) = hint.0 {
+                self.prim_wrapper(prim)?;
+            }
+        }
+        if let Some((_, Repr::Flat(prim), _)) = hints.last() {
+            self.prim_wrapper(*prim)?;
+        }
+        Ok(Some(hints))
     }
 
     /// Ветвь, у которой поля сняты не все: оставшиеся поля применяются
@@ -6543,6 +6623,14 @@ impl<'a> Lowerer<'a> {
         let wrapped = if stack { Repr::Boxed } else { answer };
         let body = self.framed(&mut nested, body?, discard, wrapped, unwrapped)?;
         self.functions[function.0].body = body;
+        if stack
+            && self.functions[function.0]
+                .parameters
+                .iter()
+                .all(|parameter| parameter.fact.present)
+        {
+            self.entries.push(function);
+        }
         Ok((
             Expr::Closure {
                 function,

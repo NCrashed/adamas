@@ -267,7 +267,7 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
             return Err(failure);
         }
         if boxed.contains(&function.id) {
-            wrapper(&mut bodies, &program.constructors, function);
+            wrapper(&mut bodies, program, function);
         }
         if taken.contains(&function.id) {
             taker(&mut bodies, function);
@@ -283,6 +283,9 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
     }
     for id in &boxed {
         let _ = writeln!(out, "{};", trampoline(&format!("box_{}", id.0)));
+        if program.entries.contains(id) {
+            let _ = writeln!(out, "{};", entry_signature(&program.functions[id.0]));
+        }
     }
     for id in &taken {
         let _ = writeln!(out, "{};", trampoline(&format!("take_{}", id.0)));
@@ -1536,7 +1539,12 @@ fn body(
 /// биты числа, счётчика у них нет, и владения при чтении не возникает - функция
 /// берёт их своим C-типом. Читается он `from_word`, то есть той же парой, какой
 /// плоское значение достаётся из слота кадра.
-fn wrapper(out: &mut String, constructors: &[Constructor], function: &Function) {
+fn wrapper(out: &mut String, program: &Program, function: &Function) {
+    // Типизированный вход - второй трамплин того же замыкания (срез 4 волны 8).
+    if program.entries.contains(&function.id) {
+        entry(out, function);
+    }
+    let constructors = &program.constructors;
     let env = function.live_captured().count();
     let arity = function.parameters.len();
     let _ = writeln!(
@@ -1594,10 +1602,20 @@ fn wrapper(out: &mut String, constructors: &[Constructor], function: &Function) 
         );
         return;
     }
-    // Первая форма (лямбда с чистым ожидаемым типом, срез 4 волны 8): граница
-    // говорит указателями, а код берёт и отдаёт плоское битами. Обёртку снимает
-    // и надевает трамплин; ячейку последнего аргумента он отдаёт ответу, как
-    // отдал бы её Perceus внутри тела.
+    unwrapping(out, constructors, function, taken);
+}
+
+/// Хвост трамплина первой формы (лямбда с чистым ожидаемым типом, срез 4
+/// волны 8): граница говорит указателями, а код берёт и отдаёт плоское
+/// битами. Обёртку снимает и надевает трамплин; ячейку последнего аргумента
+/// он отдаёт ответу, как отдал бы её Perceus внутри тела.
+fn unwrapping(
+    out: &mut String,
+    constructors: &[Constructor],
+    function: &Function,
+    mut taken: Vec<String>,
+) {
+    let arity = function.parameters.len();
     let answer = match function.result {
         Repr::Flat(prim) => Constructor::wrapper(constructors, prim).map(|tag| (prim, tag)),
         _ => None,
@@ -1646,6 +1664,59 @@ fn wrapper(out: &mut String, constructors: &[Constructor], function: &Function) 
         scalar(Repr::Flat(prim)),
         tag.0,
         prim.name()
+    );
+}
+
+/// Прототип типизированного входа (§10 вопрос 192, срез 4 волны 8): само
+/// замыкание владением, затем параметры в своих представлениях - плоское
+/// битами. Тот же прототип выводит место вызова ([`Emitter::entering`]) из
+/// того же типа.
+fn entry_signature(function: &Function) -> String {
+    let parameters: Vec<String> = std::iter::once("adamas_value self".to_owned())
+        .chain(
+            function
+                .parameters
+                .iter()
+                .enumerate()
+                .map(|(position, parameter)| {
+                    format!("{} x{position}", c_type(parameter.fact.repr))
+                }),
+        )
+        .collect();
+    format!(
+        "static {} typed_{}({})",
+        c_type(function.result),
+        function.id.0,
+        parameters.join(", ")
+    )
+}
+
+/// Типизированный вход лямбды первой формы: среда читается так же, как её
+/// читает `box_`, замыкание отпускается, и код зовётся без обёрток.
+fn entry(out: &mut String, function: &Function) {
+    let _ = writeln!(
+        out,
+        "/* `{}` входом: аргументы в своих представлениях. */",
+        escaped(&function.name)
+    );
+    let _ = writeln!(out, "{} {{", entry_signature(function));
+    let mut taken = Vec::new();
+    for (slot, binding) in function.live_captured().enumerate() {
+        let _ = writeln!(
+            out,
+            "    {} e{slot} = {};",
+            c_type(binding.fact.repr),
+            held(binding.fact.repr, slot)
+        );
+        taken.push(format!("e{slot}"));
+    }
+    taken.extend((0..function.parameters.len()).map(|position| format!("x{position}")));
+    out.push_str("    adamas_drop_value(self);\n");
+    let _ = writeln!(
+        out,
+        "    return fn_{}({});\n}}\n",
+        function.id.0,
+        taken.join(", ")
     );
 }
 
@@ -2018,6 +2089,7 @@ impl Emitter<'_> {
             Expr::Literal { ty, .. } | Expr::Primitive { ty, .. } => Repr::Flat(*ty),
             Expr::Convert { cast, .. } => Repr::Flat(cast.to),
             Expr::Call { function, .. } => self.program.functions[function.0].result,
+            Expr::Enter { result, .. } => *result,
             // Чужой вызов (§5.3): ответ его берётся из таблицы символов.
             Expr::Foreign { function, .. } => self.program.foreigns[function.0].result.repr(),
             // Ответ scope'а есть ответ его тела: деструктор отвечает мимо.
@@ -2234,6 +2306,12 @@ impl Emitter<'_> {
                 unreachable!("точка приостановки в чистом отрезке: дробление её не сняло")
             }
             Expr::Apply { callee, argument } => self.applying(callee, argument, depth),
+            Expr::Enter {
+                callee,
+                arguments,
+                params,
+                result,
+            } => self.entering(callee, arguments, params, *result, depth),
             Expr::Match {
                 scrutinee, arms, ..
             } => self.analysis(scrutinee, arms, depth),
@@ -2443,6 +2521,103 @@ impl Emitter<'_> {
             "{pad}adamas_value {name} = adamas_apply({callee}, NULL, &{root}, {argument});"
         );
         let _ = writeln!(self.out, "{pad}{name} = adamas_kont_run(&{root}, {name});");
+        name
+    }
+
+    /// Применение через типизированный вход ([`Expr::Enter`]): вход есть и
+    /// арность совпала - он, иначе обобщённый путь с обёртками плоского, как у
+    /// цепочки [`Expr::Apply`].
+    fn entering(
+        &mut self,
+        callee: &Expr,
+        arguments: &[Expr],
+        params: &[Repr],
+        result: Repr,
+        depth: usize,
+    ) -> String {
+        let pad = Self::pad(depth);
+        let inner = Self::pad(depth + 1);
+        let callee = self.value(callee, depth);
+        let given: Vec<String> = arguments
+            .iter()
+            .map(|argument| self.value(argument, depth))
+            .collect();
+        let entry = self.temp();
+        let name = self.temp();
+        let prototype: Vec<String> = std::iter::once("adamas_value".to_owned())
+            .chain(params.iter().map(|repr| c_type(*repr)))
+            .collect();
+        let _ = writeln!(
+            self.out,
+            "{pad}void *{entry} = adamas_closure_entry({callee}, {}u);\n\
+             {pad}{} {name};\n\
+             {pad}if ({entry} != NULL) {{\n\
+             {inner}{name} = (({} (*)({}))({entry}))({callee}, {});\n\
+             {pad}}} else {{",
+            given.len(),
+            c_type(result),
+            c_type(result),
+            prototype.join(", "),
+            given.join(", ")
+        );
+        let mut current = callee;
+        for (value, repr) in given.iter().zip(params) {
+            let boxed = match repr {
+                Repr::Flat(prim) => {
+                    let wrapped = self.temp();
+                    // Обёртку заводит понижение, ставя узел; не заведена - ошибка
+                    // понижения, и прогон обрывается названной, а не пишет биты
+                    // под чужой тег.
+                    let Some(CtorId(tag)) = Constructor::wrapper(&self.program.constructors, *prim)
+                    else {
+                        let _ = writeln!(
+                            self.out,
+                            "{inner}adamas_fail(\"no wrapper for a flat closure argument\");"
+                        );
+                        continue;
+                    };
+                    let _ = writeln!(
+                        self.out,
+                        "{inner}adamas_value {wrapped} = adamas_alloc({tag}u, 1u);\n\
+                         {inner}adamas_slot_write({wrapped}, 0, adamas_word_{}({value}));",
+                        prim.name()
+                    );
+                    wrapped
+                }
+                _ => value.clone(),
+            };
+            let step = self.temp();
+            if self.hidden {
+                let _ = writeln!(
+                    self.out,
+                    "{inner}adamas_value {step} = adamas_apply({current}, {FORWARD}, {boxed});"
+                );
+            } else {
+                let root = self.temp();
+                let _ = writeln!(
+                    self.out,
+                    "{inner}adamas_kont {root};\n\
+                     {inner}adamas_kont_init(&{root});\n\
+                     {inner}adamas_value {step} = adamas_apply({current}, NULL, &{root}, {boxed});\n\
+                     {inner}{step} = adamas_kont_run(&{root}, {step});"
+                );
+            }
+            current = step;
+        }
+        match result {
+            Repr::Flat(prim) => {
+                let _ = writeln!(
+                    self.out,
+                    "{inner}{name} = adamas_bits_{}(adamas_slot_bits({current}, 0));\n\
+                     {inner}adamas_drop_value({current});",
+                    prim.name()
+                );
+            }
+            _ => {
+                let _ = writeln!(self.out, "{inner}{name} = {current};");
+            }
+        }
+        let _ = writeln!(self.out, "{pad}}}");
         name
     }
 
@@ -3633,6 +3808,13 @@ impl Emitter<'_> {
             let _ = writeln!(
                 self.out,
                 "{pad}adamas_closure_set({name}, {slot}, {stored});"
+            );
+        }
+        if code == "box" && self.program.entries.contains(&function) {
+            let _ = writeln!(
+                self.out,
+                "{pad}adamas_closure_set_typed({name}, (void *)typed_{});",
+                function.0
             );
         }
         name

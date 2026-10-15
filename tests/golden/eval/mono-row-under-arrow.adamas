@@ -1,0 +1,26 @@
+-- Row стрелки под связыванием при специализации (§4.11, §3.4, находка
+-- 2026-10-15).
+--
+-- `each` специализируется по словарю `Eq a`, и `a` подставляется в тип. Row
+-- `{Yield a}` стоит под связыванием `u`, как кодомен, а подстановка шла по ней
+-- на глубине домена: `a` указывал мимо, и производное определение
+-- отвергалось - «эффекты `{Yield UInt64}` не погашены: вокруг разрешено
+-- `{Yield #3}`». `adamas eval` специализации не делает и ответ давал; без
+-- именованного параметра под row дефект не виден.
+
+effect Yield a where
+  yield : a -> Unit
+
+each : {Eq a} => List a -> (u : Unit) -> {Yield a} Unit
+each Nil _u = MkUnit
+each (Cons x xs) u =
+  let _done : Unit = yield x
+  each xs u
+
+collect : ({Yield a} Unit) -> List a
+collect prod = handle prod with
+  yield x -> Cons x (resume MkUnit)
+  return _v -> Nil
+
+main : List UInt64
+main = collect (each [1, 2, 3] MkUnit)

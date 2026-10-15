@@ -811,7 +811,10 @@ fn substituted(term: &Term, subst: &Substitution<'_>, depth: u32) -> Term {
             *binder,
             Rc::clone(name),
             here(domain),
-            rowed(row),
+            // Row стрелки - эффект тела, и стоит она под связыванием, как
+            // кодомен (`Term::instantiate`): `(x : Unit) -> {Yield a} Unit`
+            // видит `a` на индекс дальше, чем домен.
+            row.map(|argument| substituted(argument, subst, depth + 1)),
             under(codomain),
         ),
         Term::Let(mult, name, ty, value, body) => {

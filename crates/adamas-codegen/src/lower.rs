@@ -740,6 +740,12 @@ enum Arg<'a> {
 /// Захват среды: связывания, их значения на месте и среда вложенного тела.
 type Captured = (Vec<Binding>, Vec<Expr>, Vec<Slot>);
 
+/// Подсказка параметра лямбды (§10 вопросы 223, 192): представление домена и
+/// ответа после него - того, чем лямбда отвечает, если параметров у неё
+/// столько. Плоский примитив в обоих местах означает плоское тело: аргумент
+/// и ответ снимает и надевает обёртку тело ([`Lowerer::abstraction`]).
+type Hint = (Repr, Repr);
+
 /// Какой слот у места, куда уезжает захваченное.
 ///
 /// Мест два, и слот у них разный - [`Lowerer::capturing`] общая у обоих.
@@ -902,7 +908,7 @@ struct Lowerer<'a> {
     /// она уходит аргументом (§10 вопрос 223): у связывания лямбды типа в ядре
     /// нет, а у параметра вызываемого он написан. Ставит [`Lowerer::called`]
     /// перед написанной лямбдой, забирает [`Lowerer::abstraction`] первым делом.
-    hints: Option<Vec<Repr>>,
+    hints: Option<Vec<Hint>>,
     /// Кто первым запросил каждое имя очереди. По этой цепочке отказ внутри
     /// прелюдии называет определение автора, до него дотянувшееся (§10
     /// вопрос 217): словарь `Add#Int32` сам по себе автору ничего не говорит.
@@ -5708,7 +5714,7 @@ impl<'a> Lowerer<'a> {
         name: &Name,
         position: usize,
         arguments: &[Arg<'_>],
-    ) -> Result<Option<Vec<Repr>>, LowerError> {
+    ) -> Result<Option<Vec<Hint>>, LowerError> {
         let Some(Arg::Written(Term::Lam(..))) = arguments.get(position) else {
             return Ok(None);
         };
@@ -5843,8 +5849,14 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Подсказка по написанному типу-стрелке: домены по порядку, запись -
-    /// единообразной формой, прочее - указателем. Не стрелка - подсказки нет.
-    fn hinted(&mut self, ty: &Term, depth: u32) -> Result<Option<Vec<Repr>>, LowerError> {
+    /// единообразной формой, плоский примитив - битами, прочее - указателем;
+    /// рядом с каждым доменом - ответ после него. Не стрелка - подсказки нет.
+    ///
+    /// Плоский примитив подсказывается с волны 8 Фазы 9 (§10 вопрос 192, срез
+    /// 2): тело лямбды считает плоским, обёртку аргумента снимает и ответа
+    /// надевает само ([`Lowerer::abstraction`]). Плоский не примитив - агрегат, блок - остаётся
+    /// указателем: обёртки у него нет.
+    fn hinted(&mut self, ty: &Term, depth: u32) -> Result<Option<Vec<Hint>>, LowerError> {
         let ty = unaliased(self.signature, ty).clone();
         let Term::Pi(..) = ty else {
             return Ok(None);
@@ -5853,18 +5865,26 @@ impl<'a> Lowerer<'a> {
         let mut depth = depth;
         let mut hints = Vec::new();
         while let Term::Pi(_, _, inner, _, codomain) = current {
-            let repr = self.repr_of(inner, depth, &Dicts::new())?;
-            // Аргумент замыкания - голый указатель, и запись прибывает туда
-            // единообразной формой (§10 вопрос 235).
-            let hint = match self.record_labels(repr) {
-                Some(labels) => Repr::Record(self.uniform_shape(&labels)?),
-                None => Repr::Boxed,
-            };
-            hints.push(hint);
+            let domain = self.repr_of(inner, depth, &Dicts::new())?;
+            let answer = self.repr_of(codomain, depth.saturating_add(1), &Dicts::new())?;
+            hints.push((self.closure_repr(domain)?, self.closure_repr(answer)?));
             depth = depth.saturating_add(1);
             current = codomain;
         }
         Ok(Some(hints))
+    }
+
+    /// Представление на границе замыкания: запись - единообразной формой
+    /// (аргумент прибывает туда голым указателем, §10 вопрос 235), плоский
+    /// примитив - битами, прочее - указателем.
+    fn closure_repr(&mut self, repr: Repr) -> Result<Repr, LowerError> {
+        if let Some(labels) = self.record_labels(repr) {
+            return Ok(Repr::Record(self.uniform_shape(&labels)?));
+        }
+        Ok(match repr {
+            Repr::Flat(prim) => Repr::Flat(prim),
+            _ => Repr::Boxed,
+        })
     }
 
     /// замыкание.
@@ -6430,22 +6450,43 @@ impl<'a> Lowerer<'a> {
         // Лямбда получает значение всегда: стирает машина по типу глобального
         // имени, а здесь имени нет.
         // Подсказанная запись называет единообразную форму: объект этой формы
-        // и прибывает (§10 вопросы 223, 235). Прочее - указатель.
+        // и прибывает (§10 вопросы 223, 235). Подсказанный плоский примитив
+        // прибывает обёрткой - граница замыкания говорит указателями, - и тело
+        // видит его битами: обёртку снимает разбор на входе (§10 вопрос 192,
+        // срез 2 волны 8). Прочее - указатель.
         let mut bindings: Vec<Binding> = Vec::with_capacity(parameters.len());
+        let mut unwrapped: Vec<(LocalId, PrimTy, Binding)> = Vec::new();
         for (at, (mult, name)) in parameters.iter().enumerate() {
             let mut fact = Fact::present(*mult);
-            if let Some(Repr::Record(tag)) = hints.get(at) {
+            if let Some((Repr::Record(tag), _)) = hints.get(at) {
                 fact = fact.shaped(Repr::Record(*tag));
             }
-            bindings.push(Binding {
+            let binding = Binding {
                 name: name.clone(),
                 local: nested.fresh(),
                 fact,
-            });
+            };
+            if let Some((Repr::Flat(prim), _)) = hints.get(at) {
+                let bits = Binding {
+                    name: name.clone(),
+                    local: nested.fresh(),
+                    fact: Fact::present(Mult::Many).shaped(Repr::Flat(*prim)),
+                };
+                nested.push(Slot::Bound(bits.local, bits.fact));
+                unwrapped.push((binding.local, *prim, bits));
+            } else {
+                nested.push(Slot::Bound(binding.local, binding.fact));
+            }
+            bindings.push(binding);
         }
-        for binding in &bindings {
-            nested.push(Slot::Bound(binding.local, binding.fact));
-        }
+        let answer = match parameters
+            .len()
+            .checked_sub(1)
+            .and_then(|last| hints.get(last))
+        {
+            Some((_, Repr::Flat(prim))) if !discard => Repr::Flat(*prim),
+            _ => Repr::Boxed,
+        };
 
         let function = FuncId(self.functions.len());
         self.functions.push(Function {
@@ -6474,14 +6515,36 @@ impl<'a> Lowerer<'a> {
             captured,
             parameters: bindings,
             // Ответ замыкания приходит через `adamas_apply`, а он говорит
-            // указателями: плоский ответ ему не отдать.
+            // указателями: подсказанный плоский ответ тело считает битами и
+            // запаковывает в конце (§10 вопрос 192, срез 2 волны 8).
             result: Repr::Boxed,
             body: Expr::Erased,
         });
         let outer = std::mem::replace(&mut self.detached, true);
-        let body = self.shaped(&mut nested, &current, Repr::Boxed, text!("lower-131"));
+        let body = self.shaped(&mut nested, &current, answer, text!("lower-131"));
         self.detached = outer;
-        let mut body = body?;
+        let body = self.framed(&mut nested, body?, discard, answer, unwrapped)?;
+        self.functions[function.0].body = body;
+        Ok((
+            Expr::Closure {
+                function,
+                captured: taken,
+            },
+            Repr::Boxed,
+        ))
+    }
+
+    /// Обвязка тела лямбды: отброшенный ответ деструктора, запаковка плоского
+    /// ответа и разборы обёрток плоских параметров - снаружи тела, в порядке
+    /// параметров ([`Lowerer::abstraction`]).
+    fn framed(
+        &mut self,
+        nested: &mut Scope,
+        mut body: Expr,
+        discard: bool,
+        answer: Repr,
+        unwrapped: Vec<(LocalId, PrimTy, Binding)>,
+    ) -> Result<Expr, LowerError> {
         if discard {
             let held = Binding {
                 name: "ответ_деструктора".to_owned(),
@@ -6499,14 +6562,36 @@ impl<'a> Lowerer<'a> {
                 }),
             };
         }
-        self.functions[function.0].body = body;
-        Ok((
-            Expr::Closure {
-                function,
-                captured: taken,
-            },
-            Repr::Boxed,
-        ))
+        if let Repr::Flat(prim) = answer {
+            let held = Binding {
+                name: "ответ".to_owned(),
+                local: nested.fresh(),
+                fact: Fact::present(Mult::One).shaped(answer),
+            };
+            let local = held.local;
+            body = Expr::Bind {
+                binding: held,
+                value: Box::new(body),
+                body: Box::new(Expr::Construct {
+                    constructor: self.prim_wrapper(prim)?,
+                    reuse: None,
+                    arguments: vec![Expr::Local(local)],
+                }),
+            };
+        }
+        // Разборы обёрток - снаружи тела, в порядке параметров.
+        for (boxed, prim, bits) in unwrapped.into_iter().rev() {
+            body = Expr::Match {
+                scrutinee: Box::new(Expr::Local(boxed)),
+                consumed: Mult::One,
+                arms: vec![Arm {
+                    constructor: self.prim_wrapper(prim)?,
+                    fields: vec![bits],
+                    body,
+                }],
+            };
+        }
+        Ok(body)
     }
 }
 

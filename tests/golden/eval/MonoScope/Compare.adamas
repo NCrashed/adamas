@@ -1,0 +1,7 @@
+-- Подключаемая половина `mono-file-scope`: сравнение здесь отвечает
+-- прелюдной `Bool`, потому что своей у файла нет.
+
+smaller : {Eq a} => a -> UInt64 -> UInt64 -> UInt64
+smaller _w x y = case ltUInt64 x y of
+  True -> x
+  False -> y

@@ -909,11 +909,17 @@ fn declare(
             .fold(Group::of(member(&made[*first])), |group, at| {
                 group.and(member(&made[*at]))
             });
-        signature
-            .declare(metas, &group)
-            .map_err(|error| MonoError::Refused {
-                error: Box::new(error),
-            })?;
+        // Проверяется производное в области файла, откуда взят оригинал (§10
+        // вопрос 195): соглашения вроде `Bool` у сравнения ядро ищет областью,
+        // и тело подключённого файла, проверенное в области входного, читало
+        // бы чужую `Bool` - ту, что входной объявил сам.
+        let home = signature.scope_of(&made[*first].origin).clone();
+        let outer = signature.set_scope(home);
+        let declared = signature.declare(metas, &group);
+        signature.set_scope(outer);
+        declared.map_err(|error| MonoError::Refused {
+            error: Box::new(error),
+        })?;
     }
     // Позиция наследуется от того, от кого произведено: написанного текста у
     // специализации нет вовсе, а показать отладчику её строку надо - ту же,

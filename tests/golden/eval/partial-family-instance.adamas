@@ -1,0 +1,40 @@
+-- Инстанс над частично применённым семейством (§10 вопрос 255).
+--
+-- `instance Wrap (Tagged t)` - класс над конструктором типов, а голова
+-- инстанса - семейство двух параметров, применённое к одному. Объявлялось это
+-- и раньше; не решалось **употребление**: `wrap 5 : Tagged Bool UInt64` и
+-- `rewrap f (tag x)` требуют `?f ?a ≡ Tagged Bool UInt64`, а имитация (вопрос
+-- 91) выравнивала аргументы константы по хвосту спайна дырки и константе с
+-- лишним ведущим аргументом ответа не находила. Теперь ведущий аргумент уходит
+-- в решение: `?f := Tagged Bool`, `?a ≡ UInt64`.
+--
+-- Вторая половина - то же **в функции с параметром** (`relabel`): там спайн
+-- дырки несёт контекст, и граница контекста берётся из телескопа дырки, а не
+-- из длины спайна.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Tagged (t : Type) (a : Type) where
+  Tag : t -> a -> Tagged t a
+
+class Wrap (f : Type -> Type) where
+  wrap : a -> f a
+  rewrap : (a -> b) -> f a -> f b
+
+instance Wrap (Tagged Bool) where
+  wrap x = Tag True x
+  rewrap g (Tag t x) = Tag t (g x)
+
+payload : Tagged t a -> a
+payload (Tag _t x) = x
+
+boxed : Tagged Bool UInt64
+boxed = wrap 5
+
+relabel : UInt64 -> Tagged Bool UInt64
+relabel n = rewrap (\x -> x + n) boxed
+
+main : UInt64
+main = payload (relabel 37)

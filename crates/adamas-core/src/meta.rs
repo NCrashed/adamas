@@ -162,6 +162,9 @@ enum Slot {
         ty: Rc<Value>,
         /// Решение, когда оно найдено.
         solution: Option<Rc<Value>>,
+        /// Сколько ведущих позиций спайна - контекст места заведения; дальше
+        /// идёт то, к чему дырку применили. Читает имитация (`solve::headed`).
+        scope: u32,
     },
 }
 
@@ -432,7 +435,12 @@ impl Metas {
     /// `levels` обязан идти по возрастанию: спайн читается снаружи внутрь.
     pub fn fresh_term_over(&mut self, ty: Rc<Value>, levels: &[u32], size: u32) -> Term {
         let meta = TermMeta(self.limit());
-        self.slots.push(Slot::Term { ty, solution: None });
+        let scope = u32::try_from(levels.len()).unwrap_or(u32::MAX);
+        self.slots.push(Slot::Term {
+            ty,
+            solution: None,
+            scope,
+        });
         // Аргументы идут от внешнего связывания к внутреннему: уровень 0 -
         // самый внешний, а индекс до него из контекста размера `size` равен
         // `size - 1`.
@@ -466,6 +474,22 @@ impl Metas {
     pub fn term_type(&self, meta: TermMeta) -> &Rc<Value> {
         match &self.slots[self.offset(meta.0)] {
             Slot::Term { ty, .. } => ty,
+            Slot::Level(_) | Slot::Row(_) | Slot::Mult { .. } => {
+                unreachable!("?{} - дырка не терма", meta.0)
+            }
+        }
+    }
+
+    /// Сколько ведущих позиций спайна метапеременной терма - контекст места,
+    /// где её завели; остальное - то, к чему её применили.
+    ///
+    /// # Panics
+    ///
+    /// Те же случаи, что у [`Metas::term_solution`].
+    #[must_use]
+    pub fn term_scope(&self, meta: TermMeta) -> u32 {
+        match &self.slots[self.offset(meta.0)] {
+            Slot::Term { scope, .. } => *scope,
             Slot::Level(_) | Slot::Row(_) | Slot::Mult { .. } => {
                 unreachable!("?{} - дырка не терма", meta.0)
             }
@@ -752,7 +776,7 @@ impl Metas {
         let saved = self.slots.clone();
         for slot in &mut self.slots {
             match slot {
-                Slot::Term { ty, solution } => {
+                Slot::Term { ty, solution, .. } => {
                     *ty = regraded(ty, arguments);
                     if let Some(found) = solution {
                         *found = regraded(found, arguments);

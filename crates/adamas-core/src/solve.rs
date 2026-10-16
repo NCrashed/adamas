@@ -292,6 +292,32 @@ fn headed(
     let (Some(mine), Some(theirs)) = (applied(spine), applied(other)) else {
         return false;
     };
+    if aligned(sig, metas, size, meta, head, &mine, &theirs) {
+        return true;
+    }
+    // Константе досталось больше аргументов, чем дырку применили: `?f ?a ≡
+    // Result e a`. Выравнивание по хвосту такую задачу не берёт - ведущие
+    // аргументы константы ему некуда деть, - и решается она частичным
+    // применением (§10 вопрос 255). После, а не до: эта-короткую форму, которую
+    // даёт выравнивание (`?m a ≡ List a` - `List`, а не `λx. List x`), здесь
+    // не получить, а по голове читает поиск инстанса.
+    let scope = usize::try_from(metas.term_scope(meta))
+        .unwrap_or(usize::MAX)
+        .min(mine.len());
+    theirs.len() > mine.len() - scope
+        && partial(sig, metas, size, meta, spine, scope, head, &theirs)
+}
+
+/// Выравнивание по хвосту спайна - прежнее правило [`headed`].
+fn aligned(
+    sig: &Signature,
+    metas: &mut Metas,
+    size: u32,
+    meta: TermMeta,
+    head: &Head,
+    mine: &[Rc<Value>],
+    theirs: &[Rc<Value>],
+) -> bool {
     let Some(skipped) = mine.len().checked_sub(theirs.len()) else {
         return false;
     };
@@ -315,7 +341,7 @@ fn headed(
     }
     if !mine[skipped..]
         .iter()
-        .zip(&theirs)
+        .zip(theirs)
         .all(|(mine, theirs)| crate::conv::convertible(sig, metas, size, mine, theirs))
     {
         return false;
@@ -327,6 +353,83 @@ fn headed(
     true
 }
 
+/// Решает `?m ū ā ≡ C v̄ w̄` **частичным применением**: `?m := λx⃗. C v̄`,
+/// где `ū` - контекст места заведения дырки, `ā` - то, к чему её применили, а
+/// `w̄` - столько же последних аргументов константы; `ā ≡ w̄` попарно.
+///
+/// Это та же имитация Юэ, что у [`aligned`], с другого конца: там константе
+/// аргументов досталось не больше, чем дырку применили, здесь - больше, и
+/// лишние ведущие уходят в решение. Догадка и названа так же (§10 вопрос
+/// 255): `?f ?a ≡ Result e a` решается и `?f := Result e`, и `?f := λ_.
+/// Result e a`, и выбирается структурное - то, которое имел в виду автор
+/// `instance Monad (Result e)`. Неверная догадка даёт отказ, а не принятую
+/// программу: решение проходит проверку типом.
+///
+/// Граница контекста берётся из телескопа дырки ([`Metas::term_scope`]), а не
+/// из длины спайна: в функции с параметрами спайн несёт контекст, и
+/// выравнивание по хвосту сводило бы параметр с ведущим аргументом константы.
+/// Контекстная часть обязана быть паттерном - ведущие аргументы читаются ею
+/// ([`read`]).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "та же задача, что у `headed`, плюс граница контекста"
+)]
+fn partial(
+    sig: &Signature,
+    metas: &mut Metas,
+    size: u32,
+    meta: TermMeta,
+    spine: &[Elim],
+    scope: usize,
+    head: &Head,
+    theirs: &[Rc<Value>],
+) -> bool {
+    let Some(mine) = applied(spine) else {
+        return false;
+    };
+    let given = mine.len() - scope;
+    let Some(lead) = theirs.len().checked_sub(given) else {
+        return false;
+    };
+    let Some(renaming) = pattern(&spine[..scope]) else {
+        return false;
+    };
+    let arity = u32::try_from(scope).unwrap_or(u32::MAX);
+    let Some(constant) = rigid(head, &mine[..scope]) else {
+        return false;
+    };
+    let mut body = constant;
+    for argument in &theirs[..lead] {
+        let Some(read) = read(metas, meta, &renaming, size, arity, 0, argument) else {
+            return false;
+        };
+        body = Term::App(Rc::new(body), Rc::new(read));
+    }
+    let mults = multiplicities(metas, meta, arity);
+    let solution = (0..arity).fold(body, |body, index| {
+        let depth = usize::try_from(arity - 1 - index).unwrap_or(0);
+        Term::Lam(
+            mults.get(depth).copied().unwrap_or(Mult::Many),
+            format!("m{index}").into(),
+            Rc::new(body),
+        )
+    });
+    if !well_typed(sig, metas, meta, &solution) {
+        return false;
+    }
+    if !mine[scope..]
+        .iter()
+        .zip(&theirs[lead..])
+        .all(|(mine, theirs)| crate::conv::convertible(sig, metas, size, mine, theirs))
+    {
+        return false;
+    }
+    metas.solve_term(
+        meta,
+        crate::eval::eval(&crate::value::Env::default(), &solution),
+    );
+    true
+}
 /// Аргументы спайна, если он состоит из одних применений.
 fn applied(spine: &[Elim]) -> Option<Vec<Rc<Value>>> {
     spine

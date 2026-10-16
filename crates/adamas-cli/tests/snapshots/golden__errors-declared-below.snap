@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: declared-below.adamas:11:8: имя `twice` объявлено ниже: определение видит только написанное выше по тексту - поднимите объявление выше либо соберите оба в `mutual`
+  main = twice 21
+         ^^^^^

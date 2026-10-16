@@ -11,6 +11,7 @@ warn-discarded-result = a result of type `{ $ty }` is discarded; if that is inte
 warn-abandoned-function = a field of `{ $constructor }` - an effectful function - is dropped without `unwind`: if it is a resumption, its segment unwinds only at the nearest suspension point, and the order of its destructor effects is unspecified; write `unwind`
 warn-unused-import = `{ $name }` is imported from `{ $module }`, but never used
 elab-unknown-name = name `{ $name }` not found
+elab-declared-below = `{ $name }` is declared further down: a definition sees only what is written above it - move the declaration up or put both in a `mutual` block
 elab-foreign-abi = ABI { $abi } is not supported: level 1 FFI knows only "C"
 elab-foreign-label = `extern` marks the call with the `Foreign` effect, and the label is not declared: write `effect Foreign`
 elab-foreign-type = { $why }

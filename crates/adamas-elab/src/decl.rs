@@ -792,7 +792,7 @@ fn members_into(
     let decls = lifted.as_slice();
     let mut postulated: HashMap<Symbol, Span> = HashMap::new();
     let mut pending: Option<Pending<'_>> = None;
-    for decl in decls {
+    for (at, decl) in decls.iter().enumerate() {
         let outcome = member(
             decl,
             within,
@@ -812,7 +812,7 @@ fn members_into(
         let Err(error) = outcome else {
             continue;
         };
-        refusals.refused(error, recover::declares(decl));
+        refusals.refused(below(error, &decls[at + 1..]), recover::declares(decl));
     }
     // Последняя сигнатура без клауз - постулат, и отказать он вправе так же,
     // как всякое другое объявление. Имя его при этом известно: восстановлению
@@ -821,6 +821,27 @@ fn members_into(
     let closed = postulate(signature, metas, instances, owned, pending, &mut postulated);
     if let Err(error) = closed {
         refusals.refused(error, last.into_iter().collect());
+    }
+}
+
+/// Ненайденное имя, объявленное **ниже** по тексту, называется так (§4.8).
+///
+/// Ordered scoping - решение, и отказ остаётся отказом; меняется только то,
+/// что он говорит. «Имя не найдено» у вспомогательной функции, написанной
+/// под вызывающей, читается как опечатка, а исправление у него другое -
+/// поднять объявление либо собрать оба в `mutual`. Смотрятся объявления
+/// **того же** уровня после отвергнутого: импорт и вложенный модуль своих
+/// имён этому уровню не дают.
+fn below(error: ElabError, later: &[ast::Decl]) -> ElabError {
+    match error {
+        ElabError::UnknownName { name, span }
+            if later
+                .iter()
+                .any(|decl| recover::declares(decl).contains(&name)) =>
+        {
+            ElabError::DeclaredBelow { name, span }
+        }
+        other => other,
     }
 }
 

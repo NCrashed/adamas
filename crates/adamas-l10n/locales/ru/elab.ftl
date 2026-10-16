@@ -11,6 +11,7 @@ warn-discarded-result = результат типа `{ $ty }` отбрасыва
 warn-abandoned-function = поле конструктора `{ $constructor }` - эффектная функция - брошено без `unwind`: если это резумпция, её сегмент размотается лишь в ближайшей точке приостановки, и порядок эффектов её деструкторов не определён; напишите `unwind`
 warn-unused-import = `{ $name }` импортировано из `{ $module }`, но нигде не употребляется
 elab-unknown-name = имя `{ $name }` не найдено
+elab-declared-below = имя `{ $name }` объявлено ниже: определение видит только написанное выше по тексту - поднимите объявление выше либо соберите оба в `mutual`
 elab-foreign-abi = ABI { $abi } не поддержан: уровень 1 FFI знает только "C"
 elab-foreign-label = `extern` помечает вызов эффектом `Foreign`, а метка не объявлена: напишите `effect Foreign`
 elab-foreign-type = { $why }

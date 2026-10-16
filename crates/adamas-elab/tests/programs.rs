@@ -4182,24 +4182,27 @@ used = NatCounting.drain (Succ Zero) Zero
 fn a_functor_argument_is_checked() {
     // Параметр несёт сигнатуру, и модуль, ей не удовлетворяющий, отвергается
     // там же, где написан - применение функтора есть обычное применение.
+    //
+    // Функтор объявлен **выше** применения. Прежняя редакция ставила его ниже,
+    // и отказ приходил от ordered scoping (§4.8) - «имя `Counting` не
+    // найдено», - а проверка аргумента до дела не доходила: свидетель принимал
+    // `UnknownName` и оставался зелёным, ничего не проверяя. Вскрыл это отказ
+    // `DeclaredBelow` (2026-10-16).
     let error = refused(&format!(
         "{BASE}{EQV}
 module Empty where
   flag : Bool
   flag = True
 
-module Broken = Counting Empty
-
 module Counting (Key : Eqv) where
   same : Key.T -> Bool
   same a = True
+
+module Broken = Counting Empty
 "
     ));
     assert!(
-        matches!(
-            error,
-            ElabError::Core { .. } | ElabError::UnknownName { .. }
-        ),
+        matches!(error, ElabError::Core { .. }),
         "получено {error:?}"
     );
 }

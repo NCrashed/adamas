@@ -110,6 +110,18 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Имя не найдено, а объявлено оно **ниже** по тексту того же файла
+    /// (ordered scoping, §4.8). Отдельно от [`Self::UnknownName`], потому что
+    /// исправление у него другое и называется оно точно: поднять объявление
+    /// выше либо собрать оба в `mutual`.
+    #[error("{}", adamas_l10n::tr!("elab-declared-below", name = .name))]
+    DeclaredBelow {
+        /// Имя.
+        name: Symbol,
+        /// Где написано употребление.
+        span: Span,
+    },
+
     /// ABI, которого уровень 1 FFI не знает (§5.3).
     ///
     /// Написанное дословно, вместе с кавычками: спутать `"C"` с `"c"` легко, и
@@ -1637,6 +1649,7 @@ impl ElabError {
         match self {
             Self::ModuleBody { errors, span } => errors.first().map_or(*span, Self::span),
             Self::UnknownName { span, .. }
+            | Self::DeclaredBelow { span, .. }
             | Self::ForeignAbi { span, .. }
             | Self::ForeignLabel { span }
             | Self::ForeignType { span, .. }

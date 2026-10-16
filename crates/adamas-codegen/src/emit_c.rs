@@ -276,16 +276,13 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
 
     out.push_str("/* Объявления: рекурсия и взаимная рекурсия видят друг друга. */\n");
     for function in &program.functions {
-        let _ = writeln!(out, "{};", signature(function));
+        let _ = writeln!(out, "{};", signature(program, function));
     }
     for tag in &built {
         let _ = writeln!(out, "{};", trampoline(&format!("make_{}", tag.0)));
     }
     for id in &boxed {
         let _ = writeln!(out, "{};", trampoline(&format!("box_{}", id.0)));
-        if program.entries.contains(id) {
-            let _ = writeln!(out, "{};", entry_signature(&program.functions[id.0]));
-        }
     }
     for id in &taken {
         let _ = writeln!(out, "{};", trampoline(&format!("take_{}", id.0)));
@@ -429,7 +426,7 @@ fn stranded(program: &Program, expr: &Expr, hidden: bool) -> Option<String> {
 /// формы препроцессором.
 fn answer(out: &mut String, program: &Program) {
     let entry = &program.functions[program.entry.0];
-    let _ = writeln!(out, "#define ADAMAS_ENTRY fn_{}", program.entry.0);
+    let _ = writeln!(out, "#define ADAMAS_ENTRY() fn_{}(NULL)", program.entry.0);
     if let Some(ty) = entry.result.primitive() {
         let _ = writeln!(out, "#define ADAMAS_ANSWER_FLAT adamas_word_{}", ty.name());
         let _ = writeln!(out, "#define ADAMAS_ANSWER_TYPE {}", c_type(entry.result));
@@ -838,18 +835,18 @@ fn exported_signature(export: &Export) -> String {
 fn exported_bodies(out: &mut String, program: &Program) {
     for export in &program.exports {
         let given: Vec<String> = (0..export.parameters.len())
-            .map(|at| format!("a{at}"))
+            .map(|at| format!(", a{at}"))
             .collect();
         // Чужая сторона зовёт колбэк в своём режиме плавающей арифметики:
         // внутри считается в нашем, на выходе ей возвращается её (§4.3).
         let _ = writeln!(
             out,
-            "{} {{\n    uint64_t mode = adamas_fpu_enter();\n    {} answer = fn_{}({});\n    \
+            "{} {{\n    uint64_t mode = adamas_fpu_enter();\n    {} answer = fn_{}(NULL{});\n    \
              adamas_fpu_leave(mode);\n    return answer;\n}}\n",
             exported_signature(export),
             scalar(Repr::Flat(export.result)),
             export.function.0,
-            given.join(", ")
+            given.concat()
         );
     }
 }
@@ -1378,22 +1375,24 @@ const FORWARD: &str = "ev, kont";
 /// затем ручка стека, как в `adamas_lowered_second`. Захваченная среда сюда
 /// приходит обычными параметрами - трамплин достаёт её из слотов замыкания и
 /// передаёт явно.
-fn signature(function: &Function) -> String {
+fn signature(program: &Program, function: &Function) -> String {
+    // Первой форме первым идёт указатель среды (соглашение со средой, срез 5
+    // волны 8): владеющая средой берёт в нём своё замыкание и захват читает из
+    // него сама, прочим он приходит пустым.
     let mut live: Vec<String> = match function.form {
-        Form::Stack => Vec::new(),
+        Form::Stack if program.owns_env(function) => vec!["adamas_value self".to_owned()],
+        Form::Stack => vec!["adamas_value env".to_owned()],
         Form::Detached => vec![HIDDEN.to_owned()],
     };
+    let captured = function
+        .live_captured()
+        .filter(|_| function.form == Form::Detached);
     live.extend(
-        function
-            .live_captured()
+        captured
             .chain(function.live_parameters())
             .map(|binding| format!("{} v{}", c_type(binding.fact.repr), binding.local.0)),
     );
-    let taken = if live.is_empty() {
-        "void".to_owned()
-    } else {
-        live.join(", ")
-    };
+    let taken = live.join(", ");
     format!(
         "static {} fn_{}({taken})",
         c_type(function.result),
@@ -1416,13 +1415,20 @@ fn signature(function: &Function) -> String {
 /// оба, на всех трёх уровнях оптимизации (проба `mt.c`, 2026-09-22).
 fn prototype(function: &Function) -> Vec<String> {
     let mut shape = vec![c_type(function.result)];
-    if function.form == Form::Detached {
-        shape.push(HIDDEN.to_owned());
+    match function.form {
+        Form::Stack => shape.push("adamas_value".to_owned()),
+        Form::Detached => {
+            shape.push(HIDDEN.to_owned());
+            shape.extend(
+                function
+                    .live_captured()
+                    .map(|binding| c_type(binding.fact.repr)),
+            );
+        }
     }
     shape.extend(
         function
-            .live_captured()
-            .chain(function.live_parameters())
+            .live_parameters()
             .map(|binding| c_type(binding.fact.repr)),
     );
     shape
@@ -1502,7 +1508,7 @@ fn body(
         out.push_str(chunk);
     }
     let _ = writeln!(out, "/* {} */", escaped(&function.name));
-    let _ = writeln!(out, "{} {{", signature(function));
+    let _ = writeln!(out, "{} {{", signature(program, function));
     for binding in function.live_captured().chain(function.live_parameters()) {
         let _ = writeln!(
             out,
@@ -1510,6 +1516,20 @@ fn body(
             binding.local.0,
             escaped(&binding.name)
         );
+    }
+    // Владеющая средой читает захват из своего замыкания так же, как читал его
+    // трамплин `box_`, и отпускает замыкание до тела (срез 5 волны 8).
+    if program.owns_env(function) {
+        for (slot, binding) in function.live_captured().enumerate() {
+            let _ = writeln!(
+                out,
+                "    {} v{} = {};",
+                c_type(binding.fact.repr),
+                binding.local.0,
+                held(binding.fact.repr, slot)
+            );
+        }
+        out.push_str("    adamas_drop_value(self);\n");
     }
     out.push_str(&emitter.out);
     match answer {
@@ -1540,10 +1560,6 @@ fn body(
 /// берёт их своим C-типом. Читается он `from_word`, то есть той же парой, какой
 /// плоское значение достаётся из слота кадра.
 fn wrapper(out: &mut String, program: &Program, function: &Function) {
-    // Типизированный вход - второй трамплин того же замыкания (срез 4 волны 8).
-    if program.entries.contains(&function.id) {
-        entry(out, function);
-    }
     let constructors = &program.constructors;
     let env = function.live_captured().count();
     let arity = function.parameters.len();
@@ -1564,11 +1580,15 @@ fn wrapper(out: &mut String, program: &Program, function: &Function) {
     // Среда читается в локалы, замыкание отпускается, и лишь потом код зовётся
     // хвостом: `adamas_apply` отдал замыкание владением (волна 8 Фазы 9), и
     // работа после вызова отняла бы у применения хвостовую позицию.
+    // Владеющей средой замыкание уходит само: захват она читает из него и
+    // отпускает его сама (соглашение со средой, срез 5 волны 8).
+    let owns = program.owns_env(function);
     let mut taken: Vec<String> = match function.form {
-        Form::Stack => Vec::new(),
+        Form::Stack if owns => vec!["self".to_owned()],
+        Form::Stack => vec!["NULL".to_owned()],
         Form::Detached => vec![FORWARD.to_owned()],
     };
-    for (slot, binding) in function.live_captured().enumerate() {
+    for (slot, binding) in function.live_captured().enumerate().filter(|_| !owns) {
         let _ = writeln!(
             out,
             "    {} e{slot} = {};",
@@ -1592,7 +1612,9 @@ fn wrapper(out: &mut String, program: &Program, function: &Function) {
             taken.push(format!("a{position}"));
         }
     }
-    out.push_str("    adamas_drop_value(self);\n");
+    if !owns {
+        out.push_str("    adamas_drop_value(self);\n");
+    }
     if function.form == Form::Detached {
         let _ = writeln!(
             out,
@@ -1667,59 +1689,6 @@ fn unwrapping(
     );
 }
 
-/// Прототип типизированного входа (§10 вопрос 192, срез 4 волны 8): само
-/// замыкание владением, затем параметры в своих представлениях - плоское
-/// битами. Тот же прототип выводит место вызова ([`Emitter::entering`]) из
-/// того же типа.
-fn entry_signature(function: &Function) -> String {
-    let parameters: Vec<String> = std::iter::once("adamas_value self".to_owned())
-        .chain(
-            function
-                .parameters
-                .iter()
-                .enumerate()
-                .map(|(position, parameter)| {
-                    format!("{} x{position}", c_type(parameter.fact.repr))
-                }),
-        )
-        .collect();
-    format!(
-        "static {} typed_{}({})",
-        c_type(function.result),
-        function.id.0,
-        parameters.join(", ")
-    )
-}
-
-/// Типизированный вход лямбды первой формы: среда читается так же, как её
-/// читает `box_`, замыкание отпускается, и код зовётся без обёрток.
-fn entry(out: &mut String, function: &Function) {
-    let _ = writeln!(
-        out,
-        "/* `{}` входом: аргументы в своих представлениях. */",
-        escaped(&function.name)
-    );
-    let _ = writeln!(out, "{} {{", entry_signature(function));
-    let mut taken = Vec::new();
-    for (slot, binding) in function.live_captured().enumerate() {
-        let _ = writeln!(
-            out,
-            "    {} e{slot} = {};",
-            c_type(binding.fact.repr),
-            held(binding.fact.repr, slot)
-        );
-        taken.push(format!("e{slot}"));
-    }
-    taken.extend((0..function.parameters.len()).map(|position| format!("x{position}")));
-    out.push_str("    adamas_drop_value(self);\n");
-    let _ = writeln!(
-        out,
-        "    return fn_{}({});\n}}\n",
-        function.id.0,
-        taken.join(", ")
-    );
-}
-
 /// Трамплин деструктора scope'а: слоты **забираются**, а не дублируются.
 ///
 /// Зовут такое замыкание ровно раз и тут же дропают - кадр `CLOSING` его
@@ -1755,7 +1724,7 @@ fn taker(out: &mut String, function: &Function) {
         }
     }
     let mut taken: Vec<String> = match function.form {
-        Form::Stack => Vec::new(),
+        Form::Stack => vec!["NULL".to_owned()],
         Form::Detached => vec![FORWARD.to_owned()],
     };
     taken.extend((0..env.len()).map(|slot| format!("s{slot}")));
@@ -2311,7 +2280,7 @@ impl Emitter<'_> {
                 arguments,
                 params,
                 result,
-            } => self.entering(callee, arguments, params, *result, depth),
+            } => self.entering(callee, arguments, params, *result, depth, false),
             Expr::Match {
                 scrutinee, arms, ..
             } => self.analysis(scrutinee, arms, depth),
@@ -2534,6 +2503,7 @@ impl Emitter<'_> {
         params: &[Repr],
         result: Repr,
         depth: usize,
+        tail: bool,
     ) -> String {
         let pad = Self::pad(depth);
         let inner = Self::pad(depth + 1);
@@ -2552,13 +2522,18 @@ impl Emitter<'_> {
             "{pad}void *{entry} = adamas_closure_entry({callee}, {}u);\n\
              {pad}{} {name};\n\
              {pad}if ({entry} != NULL) {{\n\
-             {inner}{name} = (({} (*)({}))({entry}))({callee}, {});\n\
+             {inner}{name_or_return}(({} (*)({}))({entry}))({callee}, {});\n\
              {pad}}} else {{",
             given.len(),
             c_type(result),
             c_type(result),
             prototype.join(", "),
-            given.join(", ")
+            given.join(", "),
+            name_or_return = if tail {
+                "ADAMAS_MUSTTAIL return ".to_owned()
+            } else {
+                format!("{name} = ")
+            }
         );
         let mut current = callee;
         for (value, repr) in given.iter().zip(params) {
@@ -3559,7 +3534,9 @@ impl Emitter<'_> {
             .map(|(position, _)| position)
             .collect();
         let mut given: Vec<String> = match form {
-            Form::Stack => Vec::new(),
+            // Среда прямого вызова пуста: владеющую средой функцию зовут только
+            // через замыкание (срез 5 волны 8).
+            Form::Stack => vec!["NULL".to_owned()],
             Form::Detached => vec![FORWARD.to_owned()],
         };
         for position in &present {
@@ -3813,7 +3790,7 @@ impl Emitter<'_> {
         if code == "box" && self.program.entries.contains(&function) {
             let _ = writeln!(
                 self.out,
-                "{pad}adamas_closure_set_typed({name}, (void *)typed_{});",
+                "{pad}adamas_closure_set_typed({name}, (void *)fn_{});",
                 function.0
             );
         }
@@ -4400,6 +4377,16 @@ impl Emitter<'_> {
     /// хотя прототип у пары дословно один. Замер, которым прежнее правило
     /// обосновывалось, мерил **несовпадающие** прототипы (2 параметра против
     /// 16) и к этой паре отношения не имел.
+    /// Берёт ли применение через вход приставку `musttail` (§6, срез 5 волны
+    /// 8): прототип входа - замыкание, затем аргументы, - совпал с прототипом
+    /// вызывающего дословно. Совпадает он по построению всякий раз, когда
+    /// совпали типы аргументов: у обеих первой форма первым идёт среда.
+    fn enterable(&self, params: &[Repr], result: Repr) -> bool {
+        let mut shape = vec![c_type(result), "adamas_value".to_owned()];
+        shape.extend(params.iter().map(|repr| c_type(*repr)));
+        !self.hidden && returnable(result) && shape == self.proto
+    }
+
     fn jumpable(&self, function: FuncId) -> bool {
         let called = &self.program.functions[function.0];
         returnable(called.result) && prototype(called) == self.proto
@@ -4434,6 +4421,7 @@ impl Emitter<'_> {
                     && arms.iter().any(|arm| self.tail_jumping(&arm.body))
             }
             Expr::Call { function, .. } => self.jumpable(*function),
+            Expr::Enter { params, result, .. } => self.enterable(params, *result),
             _ => false,
         }
     }
@@ -4472,6 +4460,17 @@ impl Emitter<'_> {
                     function.0,
                     given.join(", ")
                 );
+            }
+            // Хвост через указатель (§6, срез 5 волны 8): вход зовётся под
+            // приставкой, обобщённый путь отвечает обычным возвратом.
+            Expr::Enter {
+                callee,
+                arguments,
+                params,
+                result,
+            } if self.enterable(params, *result) => {
+                let answer = self.entering(callee, arguments, params, *result, depth, true);
+                let _ = writeln!(self.out, "{pad}return {answer};");
             }
             other => {
                 let answer = self.value(other, depth);

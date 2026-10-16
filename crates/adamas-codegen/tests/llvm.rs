@@ -840,8 +840,8 @@ fn a_broken_emitter_changes_the_printed_answer() {
             "переставленные аргументы вызова",
             swapped(
                 &artefacts.ll,
-                "call tailcc i64 @fn_1(i64 %t0, i64 0)",
-                "call tailcc i64 @fn_1(i64 0, i64 %t0)",
+                "call tailcc i64 @fn_1(ptr null, i64 %t0, i64 0)",
+                "call tailcc i64 @fn_1(ptr null, i64 0, i64 %t0)",
             ),
         ),
         (

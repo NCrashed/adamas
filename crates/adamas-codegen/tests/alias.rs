@@ -959,9 +959,10 @@ fn dereferenceable_on_a_boxed_parameter_is_a_fault() {
         "{name}: честный прогон оставил блоки живыми"
     );
 
-    let promised = artefacts
-        .ll
-        .replace("@fn_6(ptr %v0", "@fn_6(ptr dereferenceable(24) align 8 %v0");
+    let promised = artefacts.ll.replace(
+        "@fn_6(ptr %env, ptr %v0",
+        "@fn_6(ptr %env, ptr dereferenceable(24) align 8 %v0",
+    );
     assert_ne!(promised, artefacts.ll, "{name}: обещание не дописалось");
     let broken = ran(
         &format!("{name}.promised"),

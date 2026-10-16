@@ -65,6 +65,16 @@ fn link_flags() -> Vec<String> {
     flags
 }
 
+/// Чужие библиотеки корпуса - загруженными до рабочих потоков.
+///
+/// Машина идёт в процессе теста, и `dlopen` в рабочем потоке гоняет
+/// инициализаторы библиотеки рядом с `Command::spawn` соседей: sdl2-compat
+/// зовёт там `setenv`, мимо замка окружения Rust (`Linkage::preload`). Зовёт
+/// это [`crate::parallel::across`] до того, как заведёт потоки.
+pub(crate) fn preload() {
+    linkage().preload();
+}
+
 /// Связывание, каким его видит машина: тот же список, что у компоновщика.
 fn linkage() -> adamas_interp::Linkage {
     let link = linked();

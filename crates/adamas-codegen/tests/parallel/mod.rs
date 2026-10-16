@@ -14,6 +14,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 /// не берут. Стек потока - умолчательный, как у потока теста: глубину
 /// рекурсии компилятора это не меняет.
 pub(crate) fn across<T: Sync, R: Send>(items: &[T], each: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    // Чужие библиотеки корпуса грузятся здесь, на вызывающем потоке, до
+    // рабочих: их инициализаторы бегут при `dlopen` и гоняются с соседями
+    // (`harness::preload`). Этим копия расходится с `adamas-cli/tests/parallel`:
+    // там машина не идёт.
+    crate::harness::preload();
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
     let workers = std::thread::available_parallelism()

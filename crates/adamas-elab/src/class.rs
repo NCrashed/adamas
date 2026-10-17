@@ -280,6 +280,10 @@ pub fn resolve(
     group: &[(Symbol, u32, Term)],
     span: Span,
 ) -> Result<(), ElabError> {
+    // По зонканному: словарь бывает и внутри **решения** другой дырки -
+    // отложенная лямбда встаёт в спайн дыркой и решается потом (§10 вопрос
+    // 256), - а решённая дырка поиску непрозрачна.
+    let (term, ty) = (&zonk_term(metas, term), &zonk_term(metas, ty));
     if unsolved_term_meta(metas, term).is_none() && unsolved_term_meta(metas, ty).is_none() {
         return Ok(());
     }
@@ -865,6 +869,15 @@ fn from_context(
     // отдельным поиском.
     let mut taken = None;
     for (at, (_, _, domain)) in binders.iter().enumerate() {
+        // Связывание, чей тип - нерешённая дырка, словарём не берётся (§10
+        // вопрос 256): сведение с целью «решило» бы его тип классом, и
+        // параметр `\g -> map g xs` оказывался словарём `Functor List`.
+        if matches!(
+            &*adamas_core::conv::whnf_solved(signature, metas, domain),
+            Value::Neutral(adamas_core::value::Head::Meta(_), _)
+        ) {
+            continue;
+        }
         if adamas_core::conv::convertible(signature, metas, ctx.size(), domain, &goal) {
             taken = Some((at, Vec::new()));
             break;

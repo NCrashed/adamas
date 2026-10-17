@@ -4473,21 +4473,29 @@ impl<'a> Elaborator<'a> {
         Some(hole)
     }
 
-    /// Откладывает голый литерал, стоящий в позиции нерешённой дырки.
+    /// Откладывает голый литерал, стоящий в позиции нерешённой дырки, и
+    /// лямбду, чей домен - дырка, если за ней есть аргументы.
     ///
-    /// Решить его тип нечем, пока спайн не пройден до конца (§10 вопрос 208,
-    /// трек A волны 7). На место его встаёт дырка, а выражение считается
+    /// Решить тип литерала нечем, пока спайн не пройден до конца (§10 вопрос
+    /// 208, трек A волны 7). На место его встаёт дырка, а выражение считается
     /// вторым проходом - когда домен, возможно, уже решён соседом.
+    ///
+    /// Лямбда - тот же случай (§10 вопрос 256): параметр получил бы тип-дырку,
+    /// и решил бы её первый же встречный в теле - словарь класса либо ничто.
+    /// `concatMap (\g -> map g xs) fs` узнаёт тип `g` только из `fs`. Последняя
+    /// в спайне лямбда не откладывается: соседа, который решил бы домен, нет.
     fn postponing<'w>(
         &mut self,
         argument: &'w Expr,
         expected: Option<&Rc<Value>>,
+        later: bool,
         postponed: &mut Vec<(Term, &'w Expr, Rc<Value>)>,
     ) -> Option<Term> {
-        if !matches!(argument.kind, ExprKind::Lit(_)) {
-            return None;
-        }
-        let goal = Rc::clone(expected.filter(|domain| self.flexible(domain))?);
+        let goal = match argument.kind {
+            ExprKind::Lit(_) => Rc::clone(expected.filter(|domain| self.flexible(domain))?),
+            ExprKind::Lam { .. } if later => Rc::clone(expected.filter(|ty| self.loose(ty))?),
+            _ => return None,
+        };
         let hole = self.fresh_meta(&goal);
         postponed.push((hole.clone(), argument, goal));
         Some(hole)
@@ -4499,14 +4507,30 @@ impl<'a> Elaborator<'a> {
     /// наконец знает, чем ему быть. Умолчание §4.3 законно **здесь и только
     /// здесь**: «контекст не задаёт тип» получает верный смысл - спайн пройден
     /// целиком и не задал.
+    ///
+    /// Лямбда в ответе - пара «дырка, терм»: она встаёт в спайн **на место**
+    /// дырки, а не решением её. Решение дырки проверяется её типом в пустой
+    /// окружающей (`solve::well_typed`), и тело, чьи эффекты гасит место
+    /// применения (§10 вопрос 170), такой проверки не проходит - `forEach (\n
+    /// -> emit n) xs` терял лямбду. Сведение с дыркой всё равно пробуется: она
+    /// бывает упомянута в типах соседей.
     fn settled(
         &mut self,
         postponed: Vec<(Term, &Expr, Rc<Value>)>,
         inside: Position,
-    ) -> Result<(), ElabError> {
+    ) -> Result<Vec<(Term, Term)>, ElabError> {
+        let mut placed = Vec::new();
         for (hole, written, goal) in postponed {
-            self.awaited = Some(Rc::clone(&goal));
-            let value = self.aside(|it| it.placed(inside, |it| it.expr(written, Mult::Many)))?;
+            let lambda = matches!(written.kind, ExprKind::Lam { .. });
+            let value = if lambda {
+                self.argument_term(written, Some(&goal), inside)?
+            } else {
+                self.awaited = Some(Rc::clone(&goal));
+                self.aside(|it| it.placed(inside, |it| it.expr(written, Mult::Many)))?
+            };
+            if lambda {
+                placed.push((hole.clone(), value.clone()));
+            }
             // Дырка решается **унификацией**, а не присваиванием: она стоит под
             // спайном контекста, и решением ей служит функция над ним, которую
             // строит решатель. Присваивание голого значения давало терм, где
@@ -4519,7 +4543,7 @@ impl<'a> Elaborator<'a> {
                 self.metas.rollback(mark);
             }
         }
-        Ok(())
+        Ok(placed)
     }
 
     /// Стоит ли головой терма член объявляемой группы - имя, которого
@@ -4541,6 +4565,14 @@ impl<'a> Elaborator<'a> {
             &*whnf_solved(self.signature, self.metas, ty),
             Value::Neutral(Head::Meta(_), _)
         )
+    }
+
+    /// Стрелка с доменом-дыркой: форма лямбды известна, тип параметра - нет.
+    fn loose(&mut self, ty: &Rc<Value>) -> bool {
+        match &*whnf_solved(self.signature, self.metas, ty) {
+            Value::Pi(_, _, domain, _, _) => self.flexible(domain),
+            _ => false,
+        }
     }
 
     /// Сводит домен связывания с типом написанного аргумента досрочно.
@@ -5708,7 +5740,9 @@ impl<'a> Elaborator<'a> {
             // Ожидаемый тип аргумента - домен того связывания, к которому он
             // приписывается; исполнение по нему и решается (§3.4).
             let expected = ty.as_deref().and_then(domain_of);
-            if let Some(hole) = self.postponing(argument, expected.as_ref(), &mut postponed) {
+            if let Some(hole) =
+                self.postponing(argument, expected.as_ref(), position > 0, &mut postponed)
+            {
                 ty = ty.and_then(|it| self.stepped(&it, &hole));
                 term = Term::App(Rc::new(term), Rc::new(hole.clone()));
                 given.push(hole);
@@ -5780,7 +5814,14 @@ impl<'a> Elaborator<'a> {
             term = Term::App(Rc::new(term), Rc::new(argument.clone()));
             given.push(argument);
         }
-        self.settled(postponed, inside)?;
+        for (hole, lambda) in self.settled(postponed, inside)? {
+            term = respined(&term, &hole, &lambda);
+            for argument in &mut given {
+                if *argument == hole {
+                    argument.clone_from(&lambda);
+                }
+            }
+        }
         // Умолчания хвостовых параметров - дописанные аргументы, и ничем от
         // написанных не отличаются: вставка имплиситов перед ними та же.
         if let Some(head) = named {
@@ -10632,6 +10673,26 @@ fn arity(binding: &Binding) -> usize {
         ExprKind::Lam { params, .. } => params.len(),
         _ => 1,
     }
+}
+
+/// Спайн применения, где аргумент `hole` заменён на `with` (§10 вопрос 256).
+fn respined(term: &Term, hole: &Term, with: &Term) -> Term {
+    let mut arguments = Vec::new();
+    let mut head = term;
+    while let Term::App(callee, argument) = head {
+        arguments.push(if **argument == *hole {
+            Rc::new(with.clone())
+        } else {
+            Rc::clone(argument)
+        });
+        head = callee;
+    }
+    arguments
+        .into_iter()
+        .rev()
+        .fold(head.clone(), |callee, argument| {
+            Term::App(Rc::new(callee), argument)
+        })
 }
 
 /// Аргументы спайна применения по порядку.

@@ -1,0 +1,44 @@
+-- Лямбда до аргумента, определяющего её домен (§10 вопрос 256).
+--
+-- `concatMap (\g -> map g xs) fs`: аргументы идут слева направо, а тип `g`
+-- знает только `fs`, стоящий после лямбды. Лямбда, чей ожидаемый тип -
+-- стрелка с доменом-дыркой, откладывается до конца спайна, как голый литерал
+-- (§10 вопрос 208); последняя в спайне - нет, соседа у неё нет.
+--
+-- Прежде два исхода. С методом класса словарь `Functor List` брался из
+-- контекста **параметром** `g`, чей тип был дыркой, и отказ звучал «ожидался
+-- `Int -> _`, получен `Functor List`». С обычной функцией - «ожидался
+-- `(ω _ : ?1) -> … ?2`, получен `?3`».
+
+concatMap : (a -> List b) -> List a -> List b
+concatMap f Nil = Nil
+concatMap f (Cons x rest) = f x ++ concatMap f rest
+
+mapList : (a -> b) -> List a -> List b
+mapList f Nil = Nil
+mapList f (Cons x rest) = Cons (f x) (mapList f rest)
+
+-- Метод класса в теле: словарь ищется внутри отложенной лямбды.
+twist : List (Int -> Int) -> List Int -> List Int
+twist fs xs = concatMap (\g -> map g xs) fs
+
+-- Обычная функция в теле.
+twistList : List (Int -> Int) -> List Int -> List Int
+twistList fs xs = concatMap (\g -> mapList g xs) fs
+
+-- Операция класса над параметром: `+` получает словарь по типу, решённому соседом.
+apply : (a -> b) -> a -> b
+apply f x = f x
+
+inc : Int -> Int
+inc x = x + 1
+
+double : Int -> Int
+double x = x * 2
+
+main : (List Int, List Int, Int)
+main =
+  ( twist [inc, double] [1, 2]
+  , twistList [double] [5]
+  , apply (\x -> x + 1) (41 : Int)
+  )

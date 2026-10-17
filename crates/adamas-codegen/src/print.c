@@ -102,6 +102,208 @@ static void adamas_print_spine(uint16_t tag, adamas_value value, uint16_t k, lon
     adamas_print_slot(tag, value, (size_t)(k - 1), depth + 1, 1);
 }
 
+/* Формы литерала (§4.4, решение 2026-10-17): значение прелюдии печатается так,
+ * как пишется, - `[1, 2]`, `(1, True)`, `"hi"`, `2`. Номера раздаёт эмиттер
+ * (`emit_c::Literal`), и совпадение проверяет тест `the_forms_match_the_printer`.
+ * Узнаёт их машина по полному имени конструктора, здесь - по таблице
+ * `adamas_con_form`, которую понижение заполняет по тому же имени. */
+#define ADAMAS_FORM_PLAIN 0u
+#define ADAMAS_FORM_NIL 1u
+#define ADAMAS_FORM_CONS 2u
+#define ADAMAS_FORM_ZERO 3u
+#define ADAMAS_FORM_SUCC 4u
+#define ADAMAS_FORM_TEXT 5u
+#define ADAMAS_FORM_TUPLE 6u
+
+static uint8_t adamas_form_of(adamas_value value) {
+    uint16_t tag = adamas_tag(value);
+    if (!adamas_is_imm(value) && tag == ADAMAS_TAG_ARRAY) {
+        return ADAMAS_FORM_PLAIN;
+    }
+    if ((size_t)tag >= ADAMAS_CONSTRUCTORS) {
+        return ADAMAS_FORM_PLAIN;
+    }
+    return adamas_con_form[tag];
+}
+
+/* Строгий UTF-8: тот же, что у `String::from_utf8` Rust'а, - без длинных
+ * форм, суррогатов и кодов за `U+10FFFF`. Не UTF-8 - строка печатается
+ * конструктором, как и у машины. */
+static int adamas_utf8_valid(const uint8_t *bytes, size_t count) {
+    size_t at = 0;
+    while (at < count) {
+        uint8_t lead = bytes[at];
+        size_t need;
+        size_t step;
+        uint32_t code;
+        uint32_t least;
+        if (lead < 0x80u) {
+            at += 1;
+            continue;
+        }
+        if (lead >= 0xC2u && lead <= 0xDFu) {
+            need = 1;
+            code = lead & 0x1Fu;
+            least = 0x80u;
+        } else if (lead >= 0xE0u && lead <= 0xEFu) {
+            need = 2;
+            code = lead & 0x0Fu;
+            least = 0x800u;
+        } else if (lead >= 0xF0u && lead <= 0xF4u) {
+            need = 3;
+            code = lead & 0x07u;
+            least = 0x10000u;
+        } else {
+            return 0;
+        }
+        if (count - at - 1 < need) {
+            return 0;
+        }
+        for (step = 1; step <= need; step += 1) {
+            uint8_t next = bytes[at + step];
+            if ((next & 0xC0u) != 0x80u) {
+                return 0;
+            }
+            code = (code << 6) | (next & 0x3Fu);
+        }
+        if (code < least || code > 0x10FFFFu || (code >= 0xD800u && code <= 0xDFFFu)) {
+            return 0;
+        }
+        at += need + 1;
+    }
+    return 1;
+}
+
+/* `"…"`: экранирования те же, что у символа (`adamas_show_Char`), кавычка -
+ * двойная. Ответ 0 - печатать нечем, строка идёт конструктором. */
+static int adamas_print_text(uint16_t tag, adamas_value value) {
+    uint64_t length;
+    adamas_value array;
+    const uint8_t *bytes;
+    size_t at;
+    if (adamas_con_slots[tag] != 2 ||
+        adamas_slot_kind[adamas_con_slot0[tag]] != ADAMAS_FLAT_UINT64 ||
+        adamas_slot_kind[adamas_con_slot0[tag] + 1] != ADAMAS_FLAT_BOXED) {
+        return 0;
+    }
+    length = adamas_slot_bits(value, 0);
+    array = adamas_field(value, 1);
+    if (adamas_is_imm(array) || adamas_tag(array) != ADAMAS_TAG_ARRAY ||
+        adamas_array_stride(array) != 1 || adamas_array_count(array) < length) {
+        return 0;
+    }
+    bytes = length > 0 ? (const uint8_t *)adamas_array_at(array, 0) : NULL;
+    if (!adamas_utf8_valid(bytes, (size_t)length)) {
+        return 0;
+    }
+    putchar('"');
+    for (at = 0; at < (size_t)length; at += 1) {
+        uint8_t byte = bytes[at];
+        switch (byte) {
+        case '\n':
+            fputs("\\n", stdout);
+            break;
+        case '\t':
+            fputs("\\t", stdout);
+            break;
+        case '\r':
+            fputs("\\r", stdout);
+            break;
+        case 0:
+            fputs("\\0", stdout);
+            break;
+        case '\\':
+            fputs("\\\\", stdout);
+            break;
+        case '"':
+            fputs("\\\"", stdout);
+            break;
+        default:
+            if (byte < 0x20u || byte == 0x7Fu) {
+                printf("\\u{%x}", (unsigned)byte);
+            } else {
+                putchar((int)byte);
+            }
+        }
+    }
+    putchar('"');
+    return 1;
+}
+
+/* Список `[a, b]`. Элемент `i` стоит на глубине `depth + 1 + i` - там, где
+ * стояла голова `i`-го `Cons` цепочки, - и за срезом печатается `…`, а дальше
+ * не идёт ни один: так режет и машина. Цепочка, кончающаяся не `Nil`,
+ * печатается конструкторами - сперва она проверяется целиком. */
+static int adamas_print_list(adamas_value value, long depth) {
+    adamas_value at = value;
+    long index = 0;
+    while (adamas_form_of(at) == ADAMAS_FORM_CONS) {
+        at = adamas_field(at, 1);
+    }
+    if (adamas_form_of(at) != ADAMAS_FORM_NIL) {
+        return 0;
+    }
+    printf("[");
+    for (at = value; adamas_form_of(at) == ADAMAS_FORM_CONS; at = adamas_field(at, 1)) {
+        if (index > 0) {
+            printf(", ");
+        }
+        if (depth + 1 + index > ADAMAS_PRINT_DEPTH) {
+            printf("…");
+            break;
+        }
+        adamas_print_slot(adamas_tag(at), at, 0, depth + 1 + index, 0);
+        index += 1;
+    }
+    printf("]");
+    return 1;
+}
+
+/* Натуральное `2` из `Succ (Succ Zero)`. */
+static int adamas_print_number(adamas_value value) {
+    adamas_value at = value;
+    unsigned long long count = 0;
+    while (adamas_form_of(at) == ADAMAS_FORM_SUCC) {
+        at = adamas_field(at, 0);
+        count += 1;
+    }
+    if (adamas_form_of(at) != ADAMAS_FORM_ZERO) {
+        return 0;
+    }
+    printf("%llu", count);
+    return 1;
+}
+
+/* Кортеж `(a, b)`: запись `{_1 = a, _2 = b}` без меток. Глубина полей та же,
+ * что у записи. */
+static void adamas_print_tuple(uint16_t tag, adamas_value value, uint16_t slots, long depth) {
+    size_t index;
+    printf("(");
+    for (index = 0; index < (size_t)slots; index += 1) {
+        if (index > 0) {
+            printf(", ");
+        }
+        adamas_print_slot(tag, value, index, depth + 1, 0);
+    }
+    printf(")");
+}
+
+/* Литерал, если значение его имеет. Ответ 0 - печатать конструктором. */
+static int adamas_print_literal(uint16_t tag, adamas_value value, long depth) {
+    switch (adamas_con_form[tag]) {
+    case ADAMAS_FORM_NIL:
+    case ADAMAS_FORM_CONS:
+        return adamas_print_list(value, depth);
+    case ADAMAS_FORM_ZERO:
+    case ADAMAS_FORM_SUCC:
+        return adamas_print_number(value);
+    case ADAMAS_FORM_TEXT:
+        return adamas_print_text(tag, value);
+    default:
+        return 0;
+    }
+}
+
 static void adamas_print_at(adamas_value value, int nested, long depth) {
     uint16_t tag;
     uint16_t slots;
@@ -125,6 +327,9 @@ static void adamas_print_at(adamas_value value, int nested, long depth) {
         printf("?%u", (unsigned)tag);
         return;
     }
+    if (adamas_print_literal(tag, value, depth)) {
+        return;
+    }
     slots = adamas_con_slots[tag];
     if (adamas_con_name[tag][0] == '\0' && slots == 1) {
         /* Обёртка примитива (§4.11, §10 вопросы 158/159): у машины её в терме
@@ -144,6 +349,10 @@ static void adamas_print_at(adamas_value value, int nested, long depth) {
              * запись значило бы разойтись с `adamas eval`, который печатает
              * все поля, - поэтому обрыв, а не молча укороченный ответ. */
             adamas_fail("printing a record with an erased field is not implemented (§4.2)");
+        }
+        if (adamas_con_form[tag] == ADAMAS_FORM_TUPLE) {
+            adamas_print_tuple(tag, value, slots, depth);
+            return;
         }
         if (nested) {
             printf("(");

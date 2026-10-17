@@ -2,4 +2,4 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Cons Zero (Cons (Succ Zero) Nil)
+Cons 0 (Cons 1 Nil)

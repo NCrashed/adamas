@@ -121,7 +121,7 @@ fn an_abandoned_resumption_runs_its_destructors_under_the_caller() {
     let source = format!("{SHAPE}{EFFECTFUL}");
     assert_eq!(
         harness::printed(&source),
-        "{_1 = 3, _2 = Cons 7 Nil}",
+        "(3, [7])",
         "машина посчитала не то"
     );
     let stderr = harness::agreed("unwind-effectful", &source)
@@ -145,7 +145,7 @@ fn a_silently_dropped_resumption_unwinds_under_the_caller() {
         .replace("letGo (Kept k) = unwind k", "letGo (Kept _k) = MkUnit");
     assert_eq!(
         harness::printed(&source),
-        "{_1 = 3, _2 = Cons 7 Nil}",
+        "(3, [7])",
         "машина посчитала не то"
     );
     let stderr = harness::agreed("unwind-silent", &source)

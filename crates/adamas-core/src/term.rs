@@ -1314,7 +1314,8 @@ impl Pos {
         let atomic = matches!(
             term,
             Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Const(..)
-        ) || matches!(term, Term::Prim(prim) if !prim.negative());
+        ) || matches!(term, Term::Prim(prim) if !prim.negative())
+            || literal(term).is_some();
         match self {
             Self::Free | Self::Codomain => false,
             Self::Callee => (!atomic && !matches!(term, Term::App(..))) || infix(term).is_some(),
@@ -1424,6 +1425,21 @@ fn emit<'a>(
         pending.push(Piece::Text(")".into()));
     }
     let inner = depth + 1;
+    if let Some(literal) = literal(term) {
+        return literally(f, literal, inner, limit, pending);
+    }
+    node(f, term, pos, inner, pending)
+}
+
+/// Узел без литерала: голова печатается, дети откладываются на глубину
+/// `inner`.
+fn node<'a>(
+    f: &mut fmt::Formatter<'_>,
+    term: &'a Term,
+    pos: Pos,
+    inner: usize,
+    pending: &mut Vec<Piece<'a>>,
+) -> fmt::Result {
     match term {
         // Имя не печатается: одно и то же имя может быть у разных связываний, а
         // индекс однозначен.
@@ -1586,6 +1602,184 @@ fn infixed(term: &Term, inner: usize) -> Vec<Piece<'_>> {
             Piece::Term(right, Pos::Atom, inner),
         ]
     })
+}
+
+/// Значение прелюдии, у которого есть литерал (§4.4, решение 2026-10-17):
+/// печатается так, как пишется.
+///
+/// Узнаётся по полному имени конструктора, поэтому свой `List` программы
+/// печатается конструкторами, как написан. Литерал - только у значения
+/// целиком: список, чей хвост не `Nil`, и `Succ` над переменной печатаются
+/// конструкторами. Ту же форму печатает собранная программа (`print.c` в
+/// `adamas-codegen`), и ответ трёх вычислителей сверяется строкой.
+enum Literal<'a> {
+    /// `[a, b]` из `Cons a (Cons b Nil)`.
+    List(Vec<&'a Term>),
+    /// `(a, b)` из записи `{_1 = a, _2 = b}`.
+    Tuple(&'a [(Name, Rc<Term>)]),
+    /// `"hi"` из `MkString 2 (arrayBytes "hi" 2)`.
+    Text(String),
+    /// `2` из `Succ (Succ Zero)`.
+    Number(u64),
+}
+
+/// Конструктор прелюдии и его аргументы. `None` - голова не конструктор
+/// прелюдии.
+fn prelude_spine(term: &Term) -> Option<(&str, Vec<&Term>)> {
+    let mut arguments = Vec::new();
+    let mut at = term;
+    while let Term::App(callee, argument) = at {
+        arguments.push(&**argument);
+        at = callee;
+    }
+    let Term::Const(name, ..) = at else {
+        return None;
+    };
+    let short = name
+        .strip_prefix(crate::prim::PRELUDE)
+        .and_then(|rest| rest.strip_prefix('.'))?;
+    arguments.reverse();
+    Some((short, arguments))
+}
+
+fn literal(term: &Term) -> Option<Literal<'_>> {
+    if let Term::Object(fields) = term {
+        let numbered = fields.len() >= 2
+            && fields
+                .iter()
+                .enumerate()
+                .all(|(at, (name, _))| **name == *format!("_{}", at + 1));
+        return numbered.then_some(Literal::Tuple(fields));
+    }
+    let (head, arguments) = prelude_spine(term)?;
+    match (head, arguments.as_slice()) {
+        ("Nil" | "Cons", _) => {
+            let mut items = Vec::new();
+            let mut at = term;
+            loop {
+                match prelude_spine(at)? {
+                    ("Nil", rest) if rest.is_empty() => return Some(Literal::List(items)),
+                    ("Cons", rest) if rest.len() == 2 => {
+                        items.push(rest[0]);
+                        at = rest[1];
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        ("Zero" | "Succ", _) => {
+            let mut count = 0u64;
+            let mut at = term;
+            loop {
+                match prelude_spine(at)? {
+                    ("Zero", rest) if rest.is_empty() => return Some(Literal::Number(count)),
+                    ("Succ", rest) if rest.len() == 1 => {
+                        count += 1;
+                        at = rest[0];
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        ("MkString", [length, bytes]) => text(length, bytes).map(Literal::Text),
+        _ => None,
+    }
+}
+
+/// Текст строки в кавычках: `n` байт массива, если они - UTF-8.
+///
+/// Массив длиннее строки бывает - `MkString` берёт его начало, - а байт у
+/// литерала `arrayBytes` бывает меньше длины массива: остаток - нули (§4.11).
+fn text(length: &Term, bytes: &Term) -> Option<String> {
+    use std::fmt::Write as _;
+
+    use crate::prim::{ArrayOp, Prim};
+
+    let Term::Prim(Prim::Lit(_, length)) = length else {
+        return None;
+    };
+    let Term::App(array, count) = bytes else {
+        return None;
+    };
+    let (Term::Prim(Prim::Over(ArrayOp::Bytes(content))), Term::Prim(Prim::Lit(_, count))) =
+        (&**array, &**count)
+    else {
+        return None;
+    };
+    if length > count {
+        return None;
+    }
+    let length = usize::try_from(*length).ok()?;
+    let written: Vec<u8> = content
+        .iter()
+        .copied()
+        .chain(std::iter::repeat(0))
+        .take(length)
+        .collect();
+    let decoded = String::from_utf8(written).ok()?;
+    let mut shown = String::from("\"");
+    for ch in decoded.chars() {
+        match ch {
+            '\n' => shown.push_str("\\n"),
+            '\t' => shown.push_str("\\t"),
+            '\r' => shown.push_str("\\r"),
+            '\0' => shown.push_str("\\0"),
+            '\\' => shown.push_str("\\\\"),
+            '"' => shown.push_str("\\\""),
+            _ if ch < ' ' || ch == '\u{7F}' => {
+                let _ = write!(shown, "\\u{{{:x}}}", u32::from(ch));
+            }
+            _ => shown.push(ch),
+        }
+    }
+    shown.push('"');
+    Some(shown)
+}
+
+/// Печать литерала. Элемент списка `i` стоит на глубине `inner + i`, как
+/// голова `i`-го `Cons` в цепочке: срез режет длинный список там же, где
+/// резал цепочку, и дальше не печатает ни одного элемента.
+fn literally<'a>(
+    f: &mut fmt::Formatter<'_>,
+    literal: Literal<'a>,
+    inner: usize,
+    limit: Option<usize>,
+    pending: &mut Vec<Piece<'a>>,
+) -> fmt::Result {
+    match literal {
+        Literal::Number(count) => write!(f, "{count}"),
+        Literal::Text(text) => f.write_str(&text),
+        Literal::Tuple(fields) => {
+            f.write_str("(")?;
+            let mut pieces = Vec::new();
+            for (at, (_, value)) in fields.iter().enumerate() {
+                if at > 0 {
+                    pieces.push(Piece::Text(", ".into()));
+                }
+                pieces.push(Piece::Term(value, Pos::Free, inner));
+            }
+            pieces.push(Piece::Text(")".into()));
+            queued(pending, pieces);
+            Ok(())
+        }
+        Literal::List(items) => {
+            f.write_str("[")?;
+            let mut pieces = Vec::new();
+            for (at, item) in items.into_iter().enumerate() {
+                if at > 0 {
+                    pieces.push(Piece::Text(", ".into()));
+                }
+                if limit.is_some_and(|limit| inner + at > limit) {
+                    pieces.push(Piece::Text(ELIDED.into()));
+                    break;
+                }
+                pieces.push(Piece::Term(item, Pos::Free, inner + at));
+            }
+            pieces.push(Piece::Text("]".into()));
+            queued(pending, pieces);
+            Ok(())
+        }
+    }
 }
 
 /// Стрелка: что пишется до домена, что после и в какой позиции стоит домен.

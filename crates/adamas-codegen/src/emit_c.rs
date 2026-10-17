@@ -1294,6 +1294,81 @@ pub(crate) fn table(out: &mut String, program: &Program) {
         );
     }
     out.push_str("    0u\n};\n\n");
+
+    // Форма литерала (§4.4, решение 2026-10-17): значение прелюдии печатается
+    // так, как пишется, - ровно как печатает его машина.
+    out.push_str(concat!(
+        "/* Форма литерала по тегу: `ADAMAS_FORM_PLAIN` - конструктором. */\n",
+        "static const uint8_t adamas_con_form[] = {\n"
+    ));
+    for constructor in &program.constructors {
+        let _ = writeln!(out, "    {}u,", form(constructor) as u8);
+    }
+    out.push_str("    0u\n};\n\n");
+}
+
+/// Литерал, которым печатается значение конструктора. Номера совпадают с
+/// `ADAMAS_FORM_*` в `print.c`, и совпадение проверяет
+/// `the_forms_match_the_printer`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Literal {
+    Plain = 0,
+    Nil = 1,
+    Cons = 2,
+    Zero = 3,
+    Succ = 4,
+    Text = 5,
+    Tuple = 6,
+}
+
+impl Literal {
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 7] = [
+        Self::Plain,
+        Self::Nil,
+        Self::Cons,
+        Self::Zero,
+        Self::Succ,
+        Self::Text,
+        Self::Tuple,
+    ];
+}
+
+/// Форма по семейству и имени: узнаётся конструктор **прелюдии**, а свой
+/// `List` программы печатается конструкторами, как и у машины.
+fn form(constructor: &Constructor) -> Literal {
+    if let Some(labels) = &constructor.labels {
+        let numbered = labels.len() >= 2
+            && labels
+                .iter()
+                .enumerate()
+                .all(|(at, label)| *label == format!("_{}", at + 1));
+        return if numbered {
+            Literal::Tuple
+        } else {
+            Literal::Plain
+        };
+    }
+    let Some(data) = constructor
+        .data
+        .strip_prefix(adamas_core::prim::PRELUDE)
+        .and_then(|rest| rest.strip_prefix('.'))
+    else {
+        return Literal::Plain;
+    };
+    let name = constructor
+        .name
+        .strip_prefix(adamas_core::prim::PRELUDE)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .unwrap_or(&constructor.name);
+    match (data, name) {
+        ("List", "Nil") => Literal::Nil,
+        ("List", "Cons") => Literal::Cons,
+        ("Nat", "Zero") => Literal::Zero,
+        ("Nat", "Succ") => Literal::Succ,
+        ("String", "MkString") => Literal::Text,
+        _ => Literal::Plain,
+    }
 }
 
 /// Метка живого слота: стёртое поле слота не занимает.
@@ -4999,7 +5074,24 @@ fn octal(bytes: &[u8]) -> String {
 mod tests {
     use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
 
-    use super::{FLAT, comparison, kind, operation};
+    use super::{FLAT, Literal, PRINTER, comparison, kind, operation};
+
+    /// Формы литерала у эмиттера и у `print.c` одни: число формы пишет
+    /// таблица, а читает `switch` печати.
+    #[test]
+    fn the_forms_match_the_printer() {
+        for form in Literal::ALL {
+            let written = format!(
+                "#define ADAMAS_FORM_{} {}u",
+                format!("{form:?}").to_uppercase(),
+                form as u8
+            );
+            assert!(
+                PRINTER.contains(&written),
+                "`print.c` не объявляет `{written}`: форма разъехалась с эмиттером"
+            );
+        }
+    }
 
     /// Сорта слотов и имена операций у эмиттера и у `flat.c` одни.
     ///

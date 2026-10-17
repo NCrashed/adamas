@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+("tab\there \"quoted\" \\ né", [[1, -2], []], (2, Some [True, False]), [3, 2, 1], "")

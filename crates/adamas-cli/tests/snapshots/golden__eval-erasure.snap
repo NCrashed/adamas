@@ -2,4 +2,4 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-MkBoth (VCons Zero (VCons (Succ Zero) VNil)) (MkSome (Succ Zero))
+MkBoth (VCons 0 (VCons 1 VNil)) (MkSome 1)

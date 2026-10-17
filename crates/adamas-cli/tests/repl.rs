@@ -70,7 +70,7 @@ fn declarations_accumulate_and_expressions_are_answered() {
          \n\
          map double [1, 2]\n",
     );
-    assert_eq!(out, "3\n42\n6\n5\nCons 2 (Cons 4 Nil)\n");
+    assert_eq!(out, "3\n42\n6\n5\n[2, 4]\n");
     assert_eq!(err, "", "предупреждений сессия не печатает");
 }
 

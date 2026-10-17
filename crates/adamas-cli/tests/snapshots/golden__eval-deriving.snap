@@ -2,4 +2,4 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-{_1 = True, _2 = False, _3 = GT, _4 = GT, _5 = True, _6 = True, _7 = True, _8 = True, _9 = False}
+(True, False, GT, GT, True, True, True, True, False)

@@ -2,4 +2,4 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-{_1 = 140, _2 = Cons 2 (Cons 1 Nil)}
+(140, [2, 1])

@@ -2,4 +2,4 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-{_1 = 37, _2 = Cons 5 Nil}
+(37, [5])

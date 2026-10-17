@@ -1162,3 +1162,24 @@ linesFrom (Cons c rest) current = if c == '\n' then Cons (fromChars (reverse cur
 -- середине - пустая строка ответа, перевод в конце новой строки не даёт.
 lines : String -> List String
 lines s = linesFrom (chars s) Nil
+
+-- Есть ли среди символов пробел.
+spaced : List Char -> Bool
+spaced Nil = False
+spaced (Cons c rest) = c == ' ' || spaced rest
+
+-- Открывает ли символ запись, которой скобки не нужны: список, запись,
+-- кортеж, текст, символ.
+opening : Char -> Bool
+opening c = c == '(' || c == '[' || c == '{' || c == '"' || c == '\''
+
+-- | Текст аргумента конструктора для выведенного `Show` (§4.6): составной - в
+-- скобках, как печатает `adamas eval`. Составным считается текст с пробелом и
+-- отрицательное число, если не начинаются они скобкой либо кавычкой:
+-- `Cons 1 (Cons 2 Nil)`, `At (-3)`, но `Some [1, 2]` и `Some 'a'`.
+showArg : {Show a} => a -> String
+showArg x =
+  let shown : String = show x
+  case chars shown of
+    Nil -> shown
+    Cons c rest -> if opening c then shown else if c == '-' || spaced rest then "(" <> shown <> ")" else shown

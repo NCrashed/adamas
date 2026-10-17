@@ -52,6 +52,7 @@ mod carrier;
 pub mod class;
 pub mod cursor;
 mod decl;
+mod derive;
 mod diag;
 mod error;
 mod expr;

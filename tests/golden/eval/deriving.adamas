@@ -1,0 +1,35 @@
+-- `deriving (Eq, Ord, Show)` последней строкой блока `data` (§4.6, решения
+-- владельца 2026-10-17).
+--
+-- Вывод встроенный: элаборация ставит за семейством обычное объявление
+-- инстанса, собранное из конструкторов, и проверяет его как написанное
+-- руками. `Eq` - структурное равенство; `Ord` - порядок конструкторов в
+-- объявлении, затем поля лексикографически; `Show` - текст, который печатает
+-- `adamas eval`: составной аргумент и отрицательное число - в скобках. На
+-- каждом типовом параметре - констрейнт того же класса: `instance {Ord a} =>
+-- Ord (Tree a)`.
+--
+-- Текст сверяется `==`, а не печатается: печать строки внутри значения у
+-- собранной программы не поддержана (§4.11), а свидетель идёт тремя
+-- вычислителями.
+
+data Color where
+  Red : Color
+  Green : Color
+  Blue : Color
+  deriving (Eq, Ord, Show)
+
+data Tree (a : Type) where
+  Leaf : Tree a
+  Node : Tree a -> a -> Tree a -> Tree a
+  deriving (Eq, Ord, Show)
+
+data Pixel where
+  At : UInt64 -> Int64 -> Color -> Pixel
+  deriving (Eq, Show)
+
+small : Tree UInt64
+small = Node Leaf 1 (Node Leaf 2 Leaf)
+
+main : (Bool, Bool, Ordering, Ordering, Bool, Bool, Bool, Bool, Bool)
+main = (Red == Red, Red == Blue, compare Green Red, compare small (Node Leaf 1 Leaf), show Blue == "Blue", show small == "Node Leaf 1 (Node Leaf 2 Leaf)", show (At 7 (-3) Green) == "At 7 (-3) Green", At 1 2 Red == At 1 2 Red, small < Node Leaf 1 Leaf)

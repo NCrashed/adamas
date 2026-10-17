@@ -221,6 +221,7 @@ impl Slot {
             | TokenKind::Extern
             | TokenKind::Export
             | TokenKind::Coherent
+            | TokenKind::Deriving
             | TokenKind::Infix
             | TokenKind::Infixl
             | TokenKind::Infixr => Self::Face(Face::Keyword),

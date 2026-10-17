@@ -1,0 +1,11 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: deriving-mutual.adamas:11:14: `deriving Eq` не выводится: внутри `mutual` инстансы взаимных семейств ссылаются друг на друга, напишите их ниже блока руками
+      deriving Eq
+               ^^
+
+deriving-mutual.adamas:7:1: определение `Ping` уже существует
+  mutual
+  ^^^^^^

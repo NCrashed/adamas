@@ -1,0 +1,11 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: deriving-erased.adamas:8:12: `deriving Show` не выводится: у конструктора стёртое поле, его не с чем сравнить и нечего печатать; инстанс пишется руками
+    deriving Show
+             ^^^^
+
+deriving-erased.adamas:6:1: определение `Sized` уже существует
+  data Sized where
+  ^^^^^^^^^^^^^^^^

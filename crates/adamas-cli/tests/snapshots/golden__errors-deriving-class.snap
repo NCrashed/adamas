@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: deriving-class.adamas:9:17: `deriving Functor` не выводится: выводятся `Eq`, `Ord` и `Show`, инстанс прочих классов пишется руками
+    deriving (Eq, Functor)
+                  ^^^^^^^

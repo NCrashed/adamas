@@ -89,6 +89,8 @@ pub enum TokenKind {
     Export,
     /// `coherent` - маркер глобальной уникальности инстансов (§3.5)
     Coherent,
+    /// `deriving` - последней строкой блока `data` (§4.6).
+    Deriving,
     /// `infix`
     Infix,
     /// `infixl`
@@ -199,6 +201,7 @@ impl TokenKind {
             Self::Extern => Face::Spelled("extern"),
             Self::Export => Face::Spelled("export"),
             Self::Coherent => Face::Spelled("coherent"),
+            Self::Deriving => Face::Spelled("deriving"),
             Self::Infix => Face::Spelled("infix"),
             Self::Infixl => Face::Spelled("infixl"),
             Self::Infixr => Face::Spelled("infixr"),
@@ -319,6 +322,7 @@ pub fn keyword(text: &str) -> Option<TokenKind> {
         "extern" => TokenKind::Extern,
         "export" => TokenKind::Export,
         "coherent" => TokenKind::Coherent,
+        "deriving" => TokenKind::Deriving,
         "infix" => TokenKind::Infix,
         "infixl" => TokenKind::Infixl,
         "infixr" => TokenKind::Infixr,
@@ -501,6 +505,7 @@ mod tests {
         TokenKind::Extern,
         TokenKind::Export,
         TokenKind::Coherent,
+        TokenKind::Deriving,
         TokenKind::Infix,
         TokenKind::Infixl,
         TokenKind::Infixr,

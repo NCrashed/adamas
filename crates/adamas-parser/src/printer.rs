@@ -660,9 +660,23 @@ impl<'a> Printer<'a> {
         }
         // Без конструкторов `where` не пишется: пустого блока layout не делает,
         // а семейство без конструкторов - законный пустой тип.
-        if !data.constructors.is_empty() {
+        if !data.constructors.is_empty() || !data.deriving.is_empty() {
             self.push(" where");
             self.block_of(&data.constructors, Self::constructor);
+        }
+        // `deriving` - последняя строка того же блока (§4.6).
+        if let Some(first) = data.deriving.first() {
+            self.nested(STEP, |printer| {
+                printer.comments_before(first.span.start());
+                printer.line();
+                printer.push("deriving ");
+                if data.deriving.len() == 1 {
+                    printer.push(&first.text);
+                } else {
+                    let names: Vec<&str> = data.deriving.iter().map(|it| &*it.text).collect();
+                    printer.push(&format!("({})", names.join(", ")));
+                }
+            });
         }
     }
 

@@ -785,6 +785,18 @@ fn members_into(
     // ними, - не «нет сигнатуры», а сигнатура не рядом.
     // Локальные определения поднимаются до объявлений (§4.1): дальше их
     // видят обычными определениями верхнего уровня.
+    // `deriving` раскрывается первым (§4.6): порождённый инстанс встаёт сразу
+    // за семейством и дальше - обычное объявление.
+    let derived = crate::derive::expanded(decls);
+    let decls = match &derived {
+        Some((expanded, failed)) => {
+            for error in failed {
+                refusals.refused(error.clone(), Vec::new());
+            }
+            expanded.as_slice()
+        }
+        None => decls,
+    };
     let (lifted, failed) = crate::lift::lifted(decls);
     for error in failed {
         refusals.refused(error, Vec::new());
@@ -6303,6 +6315,7 @@ fn declare_resource(
         params: resource.params.clone(),
         kind: None,
         constructors,
+        deriving: Vec::new(),
     };
     declare_data(
         signature, metas, owned, fixities, warnings, within, &data, span,

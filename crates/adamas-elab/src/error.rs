@@ -122,6 +122,17 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Инстанс, написанный в `deriving`, не выводится (§4.6).
+    #[error("{}", adamas_l10n::tr!("elab-deriving", class = .class, why = .why))]
+    Deriving {
+        /// Класс, как его написали.
+        class: Symbol,
+        /// Почему.
+        why: &'static str,
+        /// Где класс написан в `deriving`.
+        span: Span,
+    },
+
     /// ABI, которого уровень 1 FFI не знает (§5.3).
     ///
     /// Написанное дословно, вместе с кавычками: спутать `"C"` с `"c"` легко, и
@@ -1650,6 +1661,7 @@ impl ElabError {
             Self::ModuleBody { errors, span } => errors.first().map_or(*span, Self::span),
             Self::UnknownName { span, .. }
             | Self::DeclaredBelow { span, .. }
+            | Self::Deriving { span, .. }
             | Self::ForeignAbi { span, .. }
             | Self::ForeignLabel { span }
             | Self::ForeignType { span, .. }

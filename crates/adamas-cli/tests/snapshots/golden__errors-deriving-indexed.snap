@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: deriving-indexed.adamas:10:12: `deriving Eq` не выводится: у семейства с индексами конструктор отвечает не самим семейством над параметрами, инстанс пишется руками
+    deriving Eq
+             ^^

@@ -1,0 +1,23 @@
+-- Выведенный инстанс в программе со своей `Bool` (§4.6).
+--
+-- Порождённое тело ссылается на прелюдию полными именами и ветвится `case`,
+-- а не `if`: голое `True` и `if` по соглашению о `Bool` связались бы со
+-- своей `Bool` программы (так она объявлена и в `eval/zlib`), и равенство
+-- отвечало бы не тем типом, которого ждёт класс.
+
+data Bool where
+  Yes : Bool
+  No : Bool
+
+data Coin where
+  Heads : Coin
+  Tails : Coin
+  deriving (Eq, Ord)
+
+pick : Prelude.Bool -> UInt64
+pick b = case b of
+  Prelude.True -> 1
+  Prelude.False -> 0
+
+main : UInt64
+main = pick (Heads == Heads) * 100 + pick (Heads == Tails) * 10 + pick (Heads < Tails)

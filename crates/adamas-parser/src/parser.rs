@@ -1052,18 +1052,29 @@ impl<'a> Parser<'a> {
         }
         let mut end = kind.as_ref().map_or(name.span, |kind| kind.span);
         let mut constructors = Vec::new();
+        let mut deriving = Vec::new();
         if self.eat(TokenKind::Where).is_some() {
             self.expect(TokenKind::Open)?;
             loop {
+                // `deriving` - последняя строка блока (§4.6): после неё блок
+                // обязан закрыться.
+                if self.at(TokenKind::Deriving) {
+                    let (classes, span) = self.deriving()?;
+                    deriving = classes;
+                    end = span;
+                    self.eat(TokenKind::Sep);
+                    break;
+                }
                 constructors.push(self.constructor()?);
+                // Последний конструктор, а не `Close`: тот стоит в позиции
+                // токена, который блок закрыл, то есть уже следующего
+                // объявления.
+                end = constructors.last().map_or(end, |last| last.span);
                 if self.eat(TokenKind::Sep).is_none() {
                     break;
                 }
             }
             self.expect(TokenKind::Close)?;
-            // Последний конструктор, а не `Close`: тот стоит в позиции токена,
-            // который блок закрыл, то есть уже следующего объявления.
-            end = constructors.last().map_or(end, |last| last.span);
         }
 
         Ok(Decl {
@@ -1073,9 +1084,27 @@ impl<'a> Parser<'a> {
                 params,
                 kind,
                 constructors,
+                deriving,
             }),
             span: start.merge(end),
         })
+    }
+
+    /// `deriving Eq` либо `deriving (Eq, Show)` (§4.6). Отдаёт классы и спан
+    /// всей строки.
+    fn deriving(&mut self) -> Result<(Vec<Name>, Span), ParseError> {
+        let start = self.bump().span;
+        if self.eat(TokenKind::LParen).is_none() {
+            let class = self.ident()?;
+            let span = start.merge(class.span);
+            return Ok((vec![class], span));
+        }
+        let mut classes = vec![self.ident()?];
+        while self.eat(TokenKind::Comma).is_some() {
+            classes.push(self.ident()?);
+        }
+        let close = self.expect(TokenKind::RParen)?;
+        Ok((classes, start.merge(close.span)))
     }
 
     fn constructor(&mut self) -> Result<Constructor, ParseError> {

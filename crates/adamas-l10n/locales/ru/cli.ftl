@@ -63,5 +63,23 @@ cli-help-eval = Проверить и исполнить определение 
 cli-help-eval-path = Путь к файлу `.adamas`, каталогу проекта или его `adamas.toml`
 cli-help-eval-name = Что вычислять. По умолчанию `main`
 cli-help-eval-full = Печатать ответ целиком, без среза по глубине
+cli-help-repl = Читать объявления и выражения строка за строкой
+cli-help-repl-path = Файл `.adamas`, каталог проекта или его `adamas.toml`: с них сессия начинается
+cli-repl-banner = Adamas { $version }: `:help` - команды, `:quit` - выход
+cli-repl-help =
+    Объявление дописывается к сессии, если она с ним проходит проверку.
+    Выражение вычисляется машиной и печатается.
+    Пустая строка кончает ввод в несколько строк.
+
+    :type ИМЯ|ВЫРАЖЕНИЕ   тип (:t)
+    :load ПУТЬ            начать сессию с файла или проекта (:l)
+    :reset                вернуться к загруженному (:r)
+    :help                 эта справка (:h)
+    :quit                 выход (:q)
+cli-repl-session = сессия
+cli-repl-input = ввод
+cli-repl-started-empty = { $name } не проходит: сессия начата с пустого текста
+cli-repl-unknown = команды `:{ $command }` нет: их перечисляет `:help`
+cli-repl-argument = `:{ $command }` ждёт аргумента: его называет `:help`
 cli-error = Ошибка: { $error }
 cli-caused-by = Причина:

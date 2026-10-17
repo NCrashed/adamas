@@ -5,10 +5,11 @@
 //! предмета у неё пока нет, потому что разновидности «док» у комментария в
 //! языке не заведено. Сверх семи есть `eval`: он старше `run` и отличается от
 //! него вычислителем - считает машина (`adamas-interp`), а не собранный код.
+//! Тою же машиной отвечает `repl`.
 //!
 //! Что где: [`project`] - какая это программа (вход, корни модулей, каталог
 //! артефактов), [`scaffold`] - `new`, [`compile`] - `build` и `run`,
-//! [`suite`] - `test`, [`fmt`] - `fmt`.
+//! [`suite`] - `test`, [`fmt`] - `fmt`, [`repl`] - `repl`.
 //!
 //! # `check --type`
 //!
@@ -23,6 +24,7 @@ mod compile;
 mod doc;
 mod fmt;
 mod project;
+mod repl;
 mod scaffold;
 mod suite;
 
@@ -109,6 +111,12 @@ enum Command {
         #[arg(long)]
         full: bool,
     },
+    /// Читать объявления и выражения строка за строкой (§7.1).
+    Repl {
+        /// Файл `.adamas`, каталог проекта или его `adamas.toml`: с них
+        /// сессия начинается.
+        path: Option<PathBuf>,
+    },
 }
 
 /// Код возврата, а не `anyhow::Result`: у `run` он приходит от запущенной
@@ -193,6 +201,10 @@ fn dispatch(command: Command) -> anyhow::Result<ExitCode> {
         }
         Command::Eval { path, name, full } => {
             evaluate(&path, &name, full)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Repl { path } => {
+            repl::run(path.as_deref())?;
             Ok(ExitCode::SUCCESS)
         }
     }
@@ -296,6 +308,7 @@ const HELP: &[(&str, &[&str])] = &[
     ("doc", &["path"]),
     ("test", &["path"]),
     ("eval", &["path", "name", "full"]),
+    ("repl", &["path"]),
 ];
 
 /// Разбор аргументов со справкой на языке процесса.

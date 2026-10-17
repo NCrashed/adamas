@@ -101,6 +101,7 @@ adamas run . --backend llvm # the same through the LLVM pipeline instead of gene
 adamas test .               # every test* definition of type Bool must give True
 adamas build .              # only build; the path to the binary is printed on stderr
 adamas doc Std.IO           # the interface of a built-in module
+adamas repl .               # a session over the project: declarations and expressions
 ```
 
 `eval` and `run` print the same thing:

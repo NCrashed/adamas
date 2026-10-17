@@ -31,6 +31,7 @@ adamas-parser.workspace = true
 adamas-pkg.workspace = true
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+rustyline = { version = "15", default-features = false, features = ["with-file-history"] }
 
 [dev-dependencies]
 # Только ради `tests/lsp.rs`: сверка «текст в редакторе = текст в терминале»

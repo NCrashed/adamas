@@ -81,5 +81,23 @@ cli-help-eval = Check and evaluate a definition with the machine
 cli-help-eval-path = Path to an `.adamas` file, a project directory or its `adamas.toml`
 cli-help-eval-name = What to evaluate. Defaults to `main`
 cli-help-eval-full = Print the result in full, without cutting at depth
+cli-help-repl = Read declarations and expressions line by line
+cli-help-repl-path = An `.adamas` file, a project directory or its `adamas.toml` to start the session from
+cli-repl-banner = Adamas { $version }: `:help` lists commands, `:quit` exits
+cli-repl-help =
+    A declaration is added to the session if the session still checks with it.
+    An expression is evaluated by the machine and printed.
+    An empty line ends multi-line input.
+
+    :type NAME|EXPRESSION   type (:t)
+    :load PATH              start the session from a file or project (:l)
+    :reset                  return to what was loaded (:r)
+    :help                   this help (:h)
+    :quit                   exit (:q)
+cli-repl-session = session
+cli-repl-input = input
+cli-repl-started-empty = { $name } does not check: the session starts from empty text
+cli-repl-unknown = there is no command `:{ $command }`: `:help` lists them
+cli-repl-argument = `:{ $command }` needs an argument: see `:help`
 cli-error = Error: { $error }
 cli-caused-by = Caused by:

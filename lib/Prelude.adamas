@@ -957,6 +957,44 @@ instance Functor Option where
   map g None = None
   map g (Some x) = Some (g x)
 
+instance Functor (Result e) where
+  map g (Err e) = Err e
+  map g (Ok x) = Ok (g x)
+
+-- | Значение в контексте и применение функции из контекста (§4.1).
+class Applicative f when Functor f where
+  pure : a -> f a
+  ap : f (a -> b) -> f a -> f b
+
+-- | Цепочка вычислений в контексте (§3.4). Канонический путь в Adamas -
+-- эффекты; класс - для интеропа и для действия на самой структуре (`List` как
+-- недетерминизм). Do-нотации нет: цепочка пишется `>>=`.
+class Monad m when Applicative m where
+  bind : m a -> (a -> m b) -> m b
+
+infixl 1 >>=
+-- | `bind` оператором: `Some 40 >>= half >>= half`.
+(>>=) : {Monad m} => m a -> (a -> m b) -> m b
+(>>=) x k = bind x k
+
+instance Applicative Option where
+  pure x = Some x
+  ap None _x = None
+  ap (Some g) x = map g x
+
+instance Monad Option where
+  bind None _k = None
+  bind (Some x) k = k x
+
+instance Applicative (Result e) where
+  pure x = Ok x
+  ap (Err e) _x = Err e
+  ap (Ok g) x = map g x
+
+instance Monad (Result e) where
+  bind (Err e) _k = Err e
+  bind (Ok x) k = k x
+
 -- | Элементы, для которых условие верно, в прежнем порядке.
 filter : (a -> Bool) -> List a -> List a
 filter p Nil = Nil
@@ -991,6 +1029,17 @@ infixr 5 ++
 (++) : List a -> List a -> List a
 (++) Nil ys = ys
 (++) (Cons x xs) ys = Cons x (xs ++ ys)
+
+-- | Каждая функция ко всем значениям: `ap [f, g] [x, y] = [f x, f y, g x, g y]`.
+instance Applicative List where
+  pure x = Cons x Nil
+  ap Nil xs = Nil
+  ap (Cons g gs) xs = map g xs ++ ap gs xs
+
+-- | Недетерминизм: продолжение для каждого значения, ответы подряд.
+instance Monad List where
+  bind Nil k = Nil
+  bind (Cons x xs) k = k x ++ bind xs k
 
 -- | Значение первой пары с этим ключом.
 lookup : {Eq k} => k -> List (k, v) -> Option v

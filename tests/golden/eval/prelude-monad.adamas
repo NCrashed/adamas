@@ -1,0 +1,32 @@
+-- `Applicative` и `Monad` прелюдии над `Option`, `Result` и `List` (§4.1,
+-- §3.4, §4.4).
+--
+-- Do-нотации нет: цепочка пишется `>>=` (`infixl 1`). `Result e` -
+-- семейство двух параметров, применённое к одному; употребление над ним
+-- решается частичным применением (§10 вопрос 255). `List` - недетерминизм:
+-- продолжение для каждого значения, ответы подряд.
+--
+-- Ошибка `Result` здесь числом: печать строки внутри значения у собранной
+-- программы не поддержана (§4.11), а свидетель обязан идти тремя
+-- вычислителями.
+
+half : UInt64 -> Option UInt64
+half n = if n % 2 == 0 then Some (n / 2) else None
+
+checked : UInt64 -> Result UInt64 UInt64
+checked n = if n > 100 then Err n else Ok n
+
+bump : UInt64 -> Result UInt64 UInt64
+bump n = pure (n + 1)
+
+twice : UInt64 -> List UInt64
+twice x = [x, x * 10]
+
+inc : UInt64 -> UInt64
+inc x = x + 1
+
+dbl : UInt64 -> UInt64
+dbl x = x * 2
+
+main : (Option UInt64, Option UInt64, Result UInt64 UInt64, Result UInt64 UInt64, List UInt64, List UInt64)
+main = (Some 40 >>= half >>= half, Some 6 >>= half >>= half, checked 5 >>= bump, checked 500 >>= bump, [1, 2] >>= twice, ap [inc, dbl] [10, 20])

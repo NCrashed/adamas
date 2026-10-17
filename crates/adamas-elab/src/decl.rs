@@ -2908,6 +2908,19 @@ fn declare_type_member(
         .map_err(fail)
 }
 
+/// Тип под `count` ведущими `Pi`: тело замкнутого телескопа префикса.
+fn beneath(ty: Term, count: usize) -> Term {
+    let mut current = ty;
+    for _ in 0..count {
+        let Term::Pi(_, _, _, _, codomain) = &current else {
+            break;
+        };
+        let inner = Rc::unwrap_or_clone(Rc::clone(codomain));
+        current = inner;
+    }
+    current
+}
+
 /// Члены инстанса - **одной группой**.
 ///
 /// Группа нужна затем, что словарь для собственной цели собирается записью из
@@ -2958,7 +2971,13 @@ fn self_dictionary(
     for index in 0..superclasses {
         let field = format!("#super{index}");
         let (ty, _) = instance_method(signature, metas, prefix, written, &field, &[], span, names)?;
-        super_types.push(over_prefix(ty));
+        // `instance_method` отдаёт тип **замкнутым** - телескопом префикса,
+        // оканчивающимся типом поля: так его ждёт `fresh_term` у объявленного
+        // инстанса. Здесь префикс заводят лямбды, и телескоп снимается: иначе
+        // поле получало тип `{a} -> {Ord a} -> Eq (Pair a)` вместо `Eq (Pair
+        // a)`, и инстанс с контекстом и суперклассом не мог позвать себя.
+        // Индексы под снятыми `Pi` указывают на те же позиции, что и лямбды.
+        super_types.push(over_prefix(beneath(ty, prefix.len())));
     }
     Ok(Declaring {
         class: Rc::clone(&name.text),

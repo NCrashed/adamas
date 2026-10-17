@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+{_1 = LT, _2 = True, _3 = False, _4 = True}

@@ -1,0 +1,28 @@
+-- Инстанс с контекстом и суперклассом зовёт себя (§3.5, находка 2026-10-17).
+--
+-- `instance {Ord a} => Ord (Pair a)` пишет один `compare`, а `lt` и `le`
+-- приходят умолчаниями класса - и умолчания эти зовут `compare` над тем же
+-- `Pair a`, то есть сам объявляемый инстанс. Словарь для такой цели
+-- собирается записью из членов, и поле суперкласса `Eq (Pair a)` получало тип
+-- **с телескопом префикса** внутри лямбд префикса: `{a} -> {Ord a} -> Eq (Pair
+-- a)` вместо `Eq (Pair a)`. Отказ - «ожидалась функция, получено значение типа
+-- `{eq : Pair a -> Pair a -> Bool}`» - падал на объявлении инстанса. Без
+-- контекста префикс пуст, и дефект не виден: `instance Ord Ints` проходил.
+
+data Pair (a : Type) where
+  MkPair : a -> Pair a
+
+instance {Eq a} => Eq (Pair a) where
+  eq (MkPair x) (MkPair y) = x == y
+
+instance {Ord a} => Ord (Pair a) where
+  compare (MkPair x) (MkPair y) = compare x y
+
+one : Pair UInt64
+one = MkPair 1
+
+two : Pair UInt64
+two = MkPair 2
+
+main : (Ordering, Bool, Bool, Bool)
+main = (compare one two, one < two, two <= one, one == one)

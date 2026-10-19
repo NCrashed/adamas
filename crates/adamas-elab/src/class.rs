@@ -132,6 +132,16 @@ pub struct Class {
     /// объявляет инстанс. Раскрывается умолчание поэтому **в инстансе**, где
     /// этот словарь уже собирается.
     pub defaults: HashMap<Symbol, Vec<adamas_parser::ast::Clause>>,
+    /// Умолчания методов **суперклассов** по классу (§4.1): `map f x = ap
+    /// (pure f) x` в `Applicative`. Раскрываются в инстансе, который
+    /// порождает недостающий инстанс суперкласса.
+    pub superdefaults: HashMap<Symbol, HashMap<Symbol, Vec<adamas_parser::ast::Clause>>>,
+    /// Написанные типы методов и имена параметров класса: по ним умолчание
+    /// метода этого класса, написанное в **подклассе**, проверяется в
+    /// подклассе (§10 вопрос 219).
+    pub signatures: HashMap<Symbol, adamas_parser::ast::Expr>,
+    /// Имена параметров в порядке написания.
+    pub params: Vec<Symbol>,
     /// Область видимости файла на месте объявления класса. Умолчание
     /// раскрывается в инстансе, а имена его обязаны разрешаться там, где оно
     /// написано: `compare` в умолчании прелюдного `Ord` в файле инстанса не
@@ -274,7 +284,7 @@ pub fn resolve(
     metas: &mut Metas,
     instances: &Instances,
     owned: &Owned,
-    declaring: Option<&Declaring>,
+    declaring: &[Declaring],
     term: &Term,
     ty: &Term,
     group: &[(Symbol, u32, Term)],
@@ -387,7 +397,7 @@ pub(crate) fn resolve_type(
         metas,
         instances,
         owned,
-        None,
+        &[],
         ty,
         Mult::Zero,
         span,
@@ -416,7 +426,7 @@ pub fn resolve_ground(
     metas: &mut Metas,
     instances: &Instances,
     owned: &Owned,
-    declaring: Option<&Declaring>,
+    declaring: &[Declaring],
     term: &Term,
     ty: &Term,
     span: Span,
@@ -476,7 +486,7 @@ pub(crate) fn resolve_ground_term(
         metas,
         instances,
         owned,
-        None,
+        &[],
         term,
         Mult::Many,
         span,
@@ -506,7 +516,7 @@ pub(crate) fn resolve_ground_type(
         metas,
         instances,
         owned,
-        None,
+        &[],
         ty,
         Mult::Zero,
         span,
@@ -528,7 +538,7 @@ fn settle(
     metas: &mut Metas,
     instances: &Instances,
     owned: &Owned,
-    declaring: Option<&Declaring>,
+    declaring: &[Declaring],
     term: &Term,
     sigma: Mult,
     span: Span,
@@ -555,7 +565,7 @@ fn settle_collecting(
     metas: &mut Metas,
     instances: &Instances,
     owned: &Owned,
-    declaring: Option<&Declaring>,
+    declaring: &[Declaring],
     term: &Term,
     sigma: Mult,
     span: Span,
@@ -717,8 +727,8 @@ fn settle_collecting(
         // объявленным кандидатом, а не собой. Не сошёлся заголовок - это не
         // отказ, а «не про этот инстанс»: поиск идёт дальше.
         if let Some(inner) = declaring
-            .filter(|it| it.matches(&class, &heads))
-            .filter(|it| it.fits(signature, metas, &ty))
+            .iter()
+            .find(|it| it.matches(&class, &heads) && it.fits(signature, metas, &ty))
         {
             let Some((solution, fresh)) = inner.dictionary(signature, metas, &ty) else {
                 return Err(ElabError::NoInstance { written, span });
@@ -746,7 +756,7 @@ fn settle_collecting(
             // цель попадает, когда по головам она с ним совпала, а по
             // заголовку нет: `Eqv (List Nat)` внутри `Eqv (List a)`. Отказ
             // обязан назвать это, а не «инстанс не найден» - он на экране.
-            if declaring.is_some_and(|it| it.matches(&class, &heads)) {
+            if declaring.iter().any(|it| it.matches(&class, &heads)) {
                 return Err(ElabError::DeclaringInstance { written, span });
             }
             return Err(ElabError::NoInstance { written, span });

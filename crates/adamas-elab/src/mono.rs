@@ -574,11 +574,10 @@ impl Pass<'_> {
         // только когда поля - имена: вычисление прочих полей иначе пропало бы.
         // Замкнутые типы у такого вызова появляются лишь со специализацией по
         // типам (§10 вопрос 253) - до неё он оставался открытым и не шёл сюда.
+        // Поле-запись из имён - тоже имя: так стоит словарь суперкласса,
+        // порождённого вместе с инстансом (§4.1), - `{#super0 = {map = …}}`.
         if let Term::Object(fields) = base {
-            if !fields
-                .iter()
-                .all(|(_, value)| matches!(&**value, Term::Const(..)))
-            {
+            if !fields.iter().all(|(_, value)| named(value)) {
                 return None;
             }
             let (_, found) = fields.iter().find(|(it, _)| it == field)?;
@@ -632,6 +631,16 @@ impl Pass<'_> {
         let (_, found) = fields.iter().find(|(it, _)| it == field)?;
         let given: Vec<Term> = arguments.iter().rev().map(|it| (*it).clone()).collect();
         Some(substituted(found, &Substitution::Closed(&given), 0))
+    }
+}
+
+/// Значение поля, из которого проекция сводится без потери вычисления: имя
+/// либо запись из таких.
+fn named(term: &Term) -> bool {
+    match term {
+        Term::Const(..) => true,
+        Term::Object(fields) => fields.iter().all(|(_, value)| named(value)),
+        _ => false,
     }
 }
 

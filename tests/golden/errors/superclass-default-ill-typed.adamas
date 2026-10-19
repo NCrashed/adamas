@@ -1,0 +1,13 @@
+-- Умолчание метода суперкласса проверяется в классе (§4.1, §10 вопрос 219):
+-- ошибка в его теле - отказ на теле, даже когда инстансов у класса нет.
+
+class Fun (f : Type -> Type) where
+  fmap : (a -> b) -> f a -> f b
+
+class App f when Fun f where
+  unit : a -> f a
+  apply : f (a -> b) -> f a -> f b
+  fmap g x = apply (unit g) True
+
+main : Int
+main = 1

@@ -1,0 +1,13 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: superclass-default-ill-typed.adamas:10:14: несовпадение типов: ожидался `f b`, получен `Bool`
+    fmap g x = apply (unit g) True
+               ^^^^^^^^^^^^^^^^^^^
+  в контексте:
+    (0 f : (0 _ : Type) -> Type)
+    (0 a : Type)
+    (0 b : Type)
+    (g : a -> b)
+    (x : f a)

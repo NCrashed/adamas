@@ -962,9 +962,14 @@ instance Functor (Result e) where
   map g (Ok x) = Ok (g x)
 
 -- | Значение в контексте и применение функции из контекста (§4.1).
+--
+-- `map` по умолчанию - через `pure` и `ap`: инстанс `Applicative` у типа без
+-- своего `Functor` порождает его сам. Написанный выше `Functor` умолчание
+-- заслоняет.
 class Applicative f when Functor f where
   pure : a -> f a
   ap : f (a -> b) -> f a -> f b
+  map g x = ap (pure g) x
 
 -- | Цепочка вычислений в контексте (§3.4). Канонический путь в Adamas -
 -- эффекты; класс - для интеропа и для действия на самой структуре (`List` как

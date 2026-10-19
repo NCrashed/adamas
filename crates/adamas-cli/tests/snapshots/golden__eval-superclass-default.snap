@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+(MkBox 42, MkBox 42, MkTagged 100 2, MkTagged 7 2)

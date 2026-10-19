@@ -1,0 +1,16 @@
+-- Инстанс суперкласса, написанный **ниже** подкласса, отвергается как второй
+-- (§4.1): подкласс уже породил его умолчанием. Написанный выше умолчание
+-- заслоняет - `eval/superclass-default`.
+
+data Box (a : Type) where
+  MkBox : a -> Box a
+
+instance Applicative Box where
+  pure x = MkBox x
+  ap (MkBox g) (MkBox x) = MkBox (g x)
+
+instance Functor Box where
+  map g (MkBox x) = MkBox (g x)
+
+main : Box Int
+main = map (\x -> x + 1) (MkBox 41)

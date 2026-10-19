@@ -1,0 +1,51 @@
+-- Умолчание метода суперкласса (§4.1): `class Applicative f when Functor f`
+-- пишет `map g x = ap (pure g) x`, и инстанс `Applicative` у типа без своего
+-- `Functor` порождает его сам.
+--
+-- Порождённый инстанс объявляется одной группой с подклассом: `map` зовёт
+-- `ap` и `pure`, а словарь `Applicative` несёт `Functor` полем суперкласса.
+-- Внутри группы оба словаря - записи из её членов; объявляются они после -
+-- порождённый первым.
+--
+-- Написанный выше инстанс суперкласса умолчание заслоняет: `Tagged` ниже
+-- считает `fmap` своим, и это видно по метке в ответе.
+
+data Box (a : Type) where
+  MkBox : a -> Box a
+
+-- Прелюдийный `Applicative`: `Functor Box` порождается.
+instance Applicative Box where
+  pure x = MkBox x
+  ap (MkBox g) (MkBox x) = MkBox (g x)
+
+class Fun (f : Type -> Type) where
+  fmap : (a -> b) -> f a -> f b
+
+class App f when Fun f where
+  unit : a -> f a
+  apply : f (a -> b) -> f a -> f b
+  fmap g x = apply (unit g) x
+
+data Tagged (a : Type) where
+  MkTagged : Int -> a -> Tagged a
+
+-- Свой `Fun` выше: умолчание не берётся, метка - 100.
+instance Fun Tagged where
+  fmap g (MkTagged _ x) = MkTagged 100 (g x)
+
+instance App Tagged where
+  unit x = MkTagged 0 x
+  apply (MkTagged t g) (MkTagged u x) = MkTagged (t + u) (g x)
+
+-- Своего `Fun` нет: порождается умолчанием, метка - от `unit` и `apply`.
+instance App Box where
+  unit x = MkBox x
+  apply (MkBox g) (MkBox x) = MkBox (g x)
+
+main : (Box Int, Box Int, Tagged Int, Tagged Int)
+main =
+  ( map (\x -> x + 1) (MkBox 41)
+  , fmap (\x -> x * 2) (MkBox 21)
+  , fmap (\x -> x + 1) (MkTagged 7 1)
+  , apply (unit (\x -> x + 1)) (MkTagged 7 1)
+  )

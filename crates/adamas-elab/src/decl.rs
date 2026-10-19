@@ -1208,7 +1208,7 @@ fn alias(
         metas,
         known.instances,
         known.owned,
-        None,
+        &[],
         &wrapped_body,
         &ty,
         &[],
@@ -1636,6 +1636,11 @@ fn declare_class(
     let mut info = Class {
         coherent: class.coherent,
         superclasses: class.superclasses.len(),
+        params: params
+            .iter()
+            .flat_map(|binder| &binder.names)
+            .map(|it| Rc::clone(&it.text))
+            .collect(),
         ..Class::default()
     };
     for (index, superclass) in class.superclasses.iter().enumerate() {
@@ -1648,7 +1653,21 @@ fn declare_class(
             ty: Some(superclass),
         });
     }
-    class_members(class, &mut info, &mut members)?;
+    // Методы суперклассов: их умолчания класс вправе писать (§4.1).
+    let supers: Vec<(Symbol, Vec<Symbol>)> = class
+        .superclasses
+        .iter()
+        .filter_map(|it| spine_of(it))
+        .map(|(written, _)| class_of(signature, &written.text))
+        .map(|name| {
+            let methods = instances
+                .class(&name)
+                .map(|it| it.methods.clone())
+                .unwrap_or_default();
+            (name, methods)
+        })
+        .collect();
+    class_members(class, &mut info, &mut members, &supers)?;
     flat_shape(&name.text, class, &params, &mut info)?;
     primitive_shape(&name.text, class, &params, &mut info)?;
     let names = Names::of(&name.text, Vec::new());
@@ -1729,7 +1748,7 @@ fn declare_class(
     for member in &info.types {
         declare_type_member(signature, metas, &name.text, member, within, span)?;
     }
-    if !info.defaults.is_empty() {
+    if !info.defaults.is_empty() || !info.superdefaults.is_empty() {
         info.home = Some(signature.scope().clone());
     }
     instances.declare(&name.text, info);
@@ -1778,12 +1797,17 @@ fn checked_defaults(
         else {
             continue;
         };
-        let Some(ty) = class.members.iter().find_map(|it| match &it.kind {
-            DeclKind::Signature { name, ty, .. } if name.text == method.text => Some(ty),
+        let own = class.members.iter().find_map(|it| match &it.kind {
+            DeclKind::Signature { name, ty, .. } if name.text == method.text => Some(ty.clone()),
             _ => None,
-        }) else {
+        });
+        // Умолчание метода суперкласса (§4.1) проверяется тем же определением,
+        // с написанным типом метода из суперкласса.
+        let Some(ty) = own.or_else(|| superclass_signature(signature, known, class, &method.text))
+        else {
             continue;
         };
+        let ty = &ty;
         let at = ty.span;
         let named = |text: &Symbol| ast::Expr {
             kind: ast::ExprKind::Name(ast::Name {
@@ -1855,6 +1879,30 @@ fn checked_defaults(
         )?;
     }
     Ok(())
+}
+
+/// Написанный тип метода суперкласса - если суперкласс применён к своим же
+/// именам параметров (`class Applicative f when Functor f`).
+///
+/// Тип хранится написанным, и подставлять в него чужие аргументы на уровне
+/// дерева нечем. При другом применении `None`: умолчание тогда проверяет
+/// раскрытие в инстансе.
+fn superclass_signature(
+    signature: &Signature,
+    known: Known<'_>,
+    class: &ast::ClassDecl,
+    method: &Symbol,
+) -> Option<ast::Expr> {
+    class.superclasses.iter().find_map(|written| {
+        let (head, arguments) = spine_of(written)?;
+        let info = known.instances.class(&class_of(signature, &head.text))?;
+        let ty = info.signatures.get(method)?;
+        let named = arguments.len() == info.params.len()
+            && arguments.iter().zip(&info.params).all(|(argument, param)| {
+                matches!(&argument.kind, ast::ExprKind::Name(name) if name.text == *param)
+            });
+        named.then(|| ty.clone())
+    })
 }
 
 /// Класс `Flat` объявляется так, как написан в §4.11, - и когерентен.
@@ -1987,11 +2035,6 @@ fn declare_instance(
 ) -> Result<(), ElabError> {
     let name = &instance_class(signature, instances, name, span)?;
     let names = Names::of(&name.text, Vec::new());
-    let fail = |error: TypeError| ElabError::Core {
-        span,
-        error: Box::new(error),
-        names: names.clone(),
-    };
     // Голова элаборируется **один раз на всю группу**: члены инстанса
     // объявляются вместе, поэтому граница объявления одна, и дырки уровня
     // доживают до неё.
@@ -2041,41 +2084,260 @@ fn declare_instance(
         .map(|(method, ..)| Rc::from(format!("{declared}.{method}").as_str()))
         .collect();
 
-    declare_members(
+    // Суперклассы, чьих инстансов нет, а класс пишет их методы умолчанием
+    // (§4.1): `class Applicative f when Functor f` с `map f x = ap (pure f) x`
+    // порождает `Functor` у головы, не имеющей своего.
+    let born = born_superclasses(
         signature,
         metas,
-        owned,
-        fixities,
         instances,
-        warnings,
-        name,
-        &arguments,
+        &name.text,
         &prefix,
         &written,
         superclasses,
-        &members,
-        &qualified,
-        &types,
         span,
         &names,
+    )?;
+    let mut parts = vec![Part {
+        name: name.clone(),
+        arguments: Rc::clone(&arguments),
+        written: written.clone(),
+        superclasses,
+        members: members.clone(),
+        qualified: qualified.clone(),
+        known: &types,
+    }];
+    for born in &born {
+        parts.push(Part {
+            name: ast::Name {
+                text: Rc::clone(&born.class),
+                span,
+            },
+            arguments: Rc::clone(&born.arguments),
+            written: concluded(&written, &born.goal),
+            superclasses: born.superclasses,
+            members: born.members.clone(),
+            qualified: born.qualified.clone(),
+            known: &[],
+        });
+    }
+    declare_members(
+        signature, metas, owned, fixities, instances, warnings, &prefix, &parts, span, &names,
     )?;
 
     // Словарь - запись из членов, применённых к своим же связываниям.
     // Заголовок считается заново: объявление группы освободило дырки, и
-    // прежний уже не жив.
+    // прежний уже не жив. Порождённые - первыми: поле суперкласса у словаря
+    // подкласса разряжает поиск, и найти он обязан уже объявленное.
+    // Заголовок - заново перед **каждым** словарём: объявление словаря тоже
+    // граница, и дырки прежнего заголовка она освобождает.
+    for born in &born {
+        let written = written_head(
+            signature, metas, owned, fixities, warnings, class, span, &names,
+        )?;
+        let prefix = leading(&written);
+        let (ty, _) = instance_method(
+            signature,
+            metas,
+            &prefix,
+            &written,
+            &format!("#super{}", born.index),
+            &[],
+            span,
+            &names,
+        )?;
+        let header = concluded(&written, &beneath(ty, prefix.len()));
+        declare_dictionary(
+            signature,
+            metas,
+            instances,
+            owned,
+            &prefix,
+            &header,
+            born.superclasses,
+            &[],
+            &born.members,
+            &born.qualified,
+            &born.declared,
+            span,
+            &names,
+        )?;
+    }
     let written = written_head(
         signature, metas, owned, fixities, warnings, class, span, &names,
     )?;
     let prefix = leading(&written);
-    let mut object = dictionary_head(
+    declare_dictionary(
         signature,
         metas,
+        instances,
+        owned,
         &prefix,
         &written,
         superclasses,
         &types,
+        &members,
+        &qualified,
+        &declared,
         span,
         &names,
+    )
+}
+
+/// Инстанс суперкласса, порождённый умолчанием метода (§4.1).
+struct Born {
+    /// Какое поле `#super` словаря подкласса он разряжает.
+    index: usize,
+    /// Класс.
+    class: Symbol,
+    /// Головы аргументов.
+    arguments: Rc<[Symbol]>,
+    /// Заключение заголовка: `Functor F` под префиксом подкласса.
+    goal: Term,
+    /// Сколько полей суперклассов у его собственного словаря.
+    superclasses: usize,
+    /// Члены с клаузами: умолчания подкласса, а где их нет - свои.
+    members: Vec<Written>,
+    /// Полные имена членов.
+    qualified: Vec<Symbol>,
+    /// Имя словаря.
+    declared: Symbol,
+}
+
+/// Суперклассы, которые объявляемый инстанс порождает сам (§4.1).
+///
+/// Порождается суперкласс, у головы которого инстанса **нет**, когда каждый
+/// его метод имеет умолчание - в подклассе либо в нём самом. Написанный выше
+/// инстанс суперкласса умолчание заслоняет; написанный ниже получает отказ
+/// дубликата, как всякий второй. Типовых членов умолчание не пишет, и класс с
+/// ними не порождается. Глубина - один шаг: суперклассы порождённого
+/// разряжает обычный поиск.
+#[allow(clippy::too_many_arguments)]
+fn born_superclasses(
+    signature: &Signature,
+    metas: &mut Metas,
+    instances: &mut Instances,
+    class: &Symbol,
+    prefix: &[Param],
+    written: &Term,
+    superclasses: usize,
+    span: Span,
+    names: &Names,
+) -> Result<Vec<Born>, ElabError> {
+    let mut born = Vec::new();
+    for index in 0..superclasses {
+        let Some(defaults) = instances
+            .class(class)
+            .map(|it| (it.superdefaults.clone(), it.home.clone()))
+        else {
+            break;
+        };
+        let (ty, _) = instance_method(
+            signature,
+            metas,
+            prefix,
+            written,
+            &format!("#super{index}"),
+            &[],
+            span,
+            names,
+        )?;
+        let goal = beneath(ty, prefix.len());
+        let Some((superclass, arguments)) = applied_head(signature, &goal, span)? else {
+            continue;
+        };
+        let Some(written_defaults) = defaults.0.get(&superclass) else {
+            continue;
+        };
+        if instances.declared(&superclass, &arguments) {
+            continue;
+        }
+        let Some(info) = instances.class(&superclass) else {
+            continue;
+        };
+        if !info.types.is_empty() {
+            continue;
+        }
+        let mut members = Vec::with_capacity(info.methods.len());
+        for method in &info.methods {
+            let taken = match written_defaults.get(method) {
+                Some(clauses) => (clauses.clone(), defaults.1.clone()),
+                None => match info.defaults.get(method) {
+                    Some(clauses) => (clauses.clone(), info.home.clone()),
+                    None => break,
+                },
+            };
+            members.push((Rc::clone(method), taken.0, span, taken.1));
+        }
+        if members.len() != info.methods.len() {
+            continue;
+        }
+        let own = info.superclasses;
+        let declared: Symbol = Rc::from(mangled(&superclass, &arguments).as_str());
+        instances.add(&superclass, &arguments, Rc::clone(&declared));
+        let qualified = members
+            .iter()
+            .map(|(method, ..)| Rc::from(format!("{declared}.{method}").as_str()))
+            .collect();
+        born.push(Born {
+            index,
+            class: superclass,
+            arguments,
+            goal,
+            superclasses: own,
+            members,
+            qualified,
+            declared,
+        });
+    }
+    Ok(born)
+}
+
+/// Заголовок с тем же префиксом и другим заключением.
+fn concluded(written: &Term, goal: &Term) -> Term {
+    match written {
+        Term::Pi(binder, name, domain, row, codomain) => Term::Pi(
+            *binder,
+            Rc::clone(name),
+            Rc::clone(domain),
+            row.clone(),
+            Rc::new(concluded(codomain, goal)),
+        ),
+        _ => goal.clone(),
+    }
+}
+
+/// Словарь инстанса: запись из членов, применённых к своим же связываниям.
+#[allow(clippy::too_many_arguments)]
+fn declare_dictionary(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    instances: &Instances,
+    owned: &Owned,
+    prefix: &[Param],
+    written: &Term,
+    superclasses: usize,
+    types: &[(Symbol, Term)],
+    members: &[Written],
+    qualified: &[Symbol],
+    declared: &Symbol,
+    span: Span,
+    names: &Names,
+) -> Result<(), ElabError> {
+    let fail = |error: TypeError| ElabError::Core {
+        span,
+        error: Box::new(error),
+        names: names.clone(),
+    };
+    let mut object = dictionary_head(
+        signature,
+        metas,
+        prefix,
+        written,
+        superclasses,
+        types,
+        span,
+        names,
     )?;
     // Row-аргументы члена берутся у **заголовка**, а не свежими дырками. Член
     // обобщён по тем же дыркам, что стоят в голове класса, поэтому
@@ -2083,7 +2345,7 @@ fn declare_instance(
     // row-параметров у класса не было; с ними член, чей тип row не называет
     // (`zero : a` рядом с эффектным `run`), получал дырку, которую не
     // определяет ничто, и она доживала до границы объявления (§10 вопрос 102).
-    let carried = head_rows(under_prefix(&written));
+    let carried = head_rows(under_prefix(written));
     for (at, (method, ..)) in members.iter().enumerate() {
         let Some(term) = instantiate_carrying(signature, metas, &qualified[at], &carried) else {
             continue;
@@ -2094,7 +2356,7 @@ fn declare_instance(
         });
         object.push((CoreName::from(&**method), Rc::new(applied)));
     }
-    let object = abstracted(&prefix, Term::Object(object.into()));
+    let object = abstracted(prefix, Term::Object(object.into()));
     // Поля суперклассов заполняются поиском - до проверки, которой дырка
     // уже мешала бы.
     class::resolve(
@@ -2102,19 +2364,19 @@ fn declare_instance(
         metas,
         instances,
         owned,
-        None,
+        &[],
         &object,
-        &written,
+        written,
         &[],
         span,
     )?;
     // `check_within`, а не `check_closed_with`: нерешённая дырка уровня здесь -
     // будущий параметр самого словаря, и запрет отвергал бы всякий
     // полиморфный инстанс. Окончательный запрет ставит объявление.
-    check_within(&Ctx::new(signature), metas, &object, &written).map_err(fail)?;
-    let written = zonk_term(metas, &written);
+    check_within(&Ctx::new(signature), metas, &object, written).map_err(fail)?;
+    let written = zonk_term(metas, written);
     signature
-        .define_inferred(metas, &declared, Mult::Many, written, Some(object))
+        .define_inferred(metas, declared, Mult::Many, written, Some(object))
         .map_err(fail)
 }
 
@@ -2126,6 +2388,7 @@ fn class_members<'a>(
     class: &'a ast::ClassDecl,
     info: &mut Class,
     members: &mut Vec<WrittenField<'a>>,
+    supers: &[(Symbol, Vec<Symbol>)],
 ) -> Result<(), ElabError> {
     for member in &class.members {
         match &member.kind {
@@ -2152,11 +2415,24 @@ fn class_members<'a>(
                     ty: Some(ty),
                 });
                 info.methods.push(Rc::clone(&name.text));
+                info.signatures.insert(Rc::clone(&name.text), ty.clone());
             }
             // Умолчание хранится написанным: тело его зовёт другие методы того
             // же класса, а словарь для них объявляет инстанс. Раскрывается оно
             // поэтому там, где этот словарь и собирается.
             DeclKind::Clauses { name, clauses } => {
+                // Метод суперкласса: умолчание для инстанса суперкласса,
+                // который подкласс породит сам (§4.1).
+                let owner = supers
+                    .iter()
+                    .find(|(_, methods)| methods.contains(&name.text));
+                if let (false, Some((superclass, _))) = (info.methods.contains(&name.text), owner) {
+                    info.superdefaults
+                        .entry(Rc::clone(superclass))
+                        .or_default()
+                        .insert(Rc::clone(&name.text), clauses.clone());
+                    continue;
+                }
                 if !info.methods.contains(&name.text) {
                     return Err(ElabError::MissingSignature {
                         name: Rc::clone(&name.text),
@@ -3010,6 +3286,25 @@ fn self_dictionary(
     })
 }
 
+/// Инстанс одного класса в группе членов: написанный либо порождённый
+/// умолчанием метода суперкласса (§4.1).
+struct Part<'a> {
+    /// Класс.
+    name: ast::Name,
+    /// Головы аргументов.
+    arguments: Rc<[Symbol]>,
+    /// Заголовок с префиксом: `{…} -> C T`.
+    written: Term,
+    /// Сколько полей суперклассов у словаря.
+    superclasses: usize,
+    /// Члены с клаузами.
+    members: Vec<Written>,
+    /// Полные имена членов.
+    qualified: Vec<Symbol>,
+    /// Значения типовых членов (§4.1).
+    known: &'a [(Symbol, Term)],
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(
     clippy::too_many_lines,
@@ -3022,14 +3317,8 @@ fn declare_members(
     fixities: &Fixities,
     instances: &Instances,
     warnings: &mut Warnings,
-    name: &ast::Name,
-    arguments: &Rc<[Symbol]>,
     prefix: &[Param],
-    written: &Term,
-    superclasses: usize,
-    members: &[Written],
-    qualified: &[Symbol],
-    known: &[(Symbol, Term)],
+    parts: &[Part<'_>],
     span: Span,
     names: &Names,
 ) -> Result<(), ElabError> {
@@ -3038,17 +3327,37 @@ fn declare_members(
         error: Box::new(error),
         names: names.clone(),
     };
+    // Группа одна на все части: члены порождённого суперкласса зовут члены
+    // подкласса и наоборот (§4.1, умолчание метода суперкласса).
+    let members: Vec<Written> = parts
+        .iter()
+        .flat_map(|part| part.members.iter().cloned())
+        .collect();
+    let qualified: Vec<Symbol> = parts
+        .iter()
+        .flat_map(|part| part.qualified.iter().cloned())
+        .collect();
+    let (members, qualified) = (members.as_slice(), qualified.as_slice());
     // Типы всех членов - из одного заголовка, значит с общими дырками уровня.
     let mut types = Vec::with_capacity(members.len());
     // Арность кратностей у каждого члена **своя**: она приходит от поля, а поле
     // связывает свои параметры само (§10 вопрос 115).
     let mut grades = Vec::with_capacity(members.len());
-    for (method, ..) in members {
-        let (ty, mults) = instance_method(
-            signature, metas, prefix, written, method, known, span, names,
-        )?;
-        types.push(ty);
-        grades.push(mults);
+    for part in parts {
+        for (method, ..) in &part.members {
+            let (ty, mults) = instance_method(
+                signature,
+                metas,
+                prefix,
+                &part.written,
+                method,
+                part.known,
+                span,
+                names,
+            )?;
+            types.push(ty);
+            grades.push(mults);
+        }
     }
     // Обобщение **общее на группу**: члены живут под одним заголовком, и
     // параметры уровня у них одни и те же. Арность поэтому известна до
@@ -3089,20 +3398,25 @@ fn declare_members(
             ty: Rc::new(ty.clone()),
         })
         .collect();
-    let declaring = self_dictionary(
-        signature,
-        metas,
-        name,
-        arguments,
-        prefix,
-        written,
-        superclasses,
-        members,
-        qualified,
-        &levels,
-        span,
-        names,
-    )?;
+    let declaring = parts
+        .iter()
+        .map(|part| {
+            self_dictionary(
+                signature,
+                metas,
+                &part.name,
+                &part.arguments,
+                prefix,
+                &part.written,
+                part.superclasses,
+                &part.members,
+                &part.qualified,
+                &levels,
+                span,
+                names,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     let mut trees = Vec::with_capacity(members.len());
     for (at, (_, clauses, at_span, home)) in members.iter().enumerate() {
@@ -3143,14 +3457,7 @@ fn declare_members(
             tree.nested = cases;
             let group = postponed.group();
             class::resolve_ground(
-                signature,
-                metas,
-                instances,
-                owned,
-                Some(&declaring),
-                &tree.term,
-                &types[at],
-                *at_span,
+                signature, metas, instances, owned, &declaring, &tree.term, &types[at], *at_span,
             );
             settle_literals(
                 signature, metas, owned, fixities, warnings, postponed, &tree.term, &types[at],
@@ -3162,14 +3469,7 @@ fn declare_members(
         }
         let (tree, group) = outcome?;
         class::resolve(
-            signature,
-            metas,
-            instances,
-            owned,
-            Some(&declaring),
-            &tree.term,
-            &types[at],
-            &group,
+            signature, metas, instances, owned, &declaring, &tree.term, &types[at], &group,
             *at_span,
         )?;
         trees.push(tree);
@@ -3420,7 +3720,7 @@ fn settled(
         metas,
         known.instances,
         known.owned,
-        None,
+        &[],
         term,
         ty,
         span,
@@ -3442,7 +3742,7 @@ fn settled(
         metas,
         known.instances,
         known.owned,
-        None,
+        &[],
         term,
         ty,
         &group,
@@ -4165,7 +4465,7 @@ fn declare_module_value(
         metas,
         instances,
         owned,
-        None,
+        &[],
         &term,
         &ty,
         &[],

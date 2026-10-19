@@ -702,6 +702,18 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Инстанс суперкласса, написанный ниже подкласса, который его уже
+    /// породил умолчанием (§4.1).
+    #[error("{}", adamas_l10n::tr!("elab-born-duplicate", written = .written, by = .by))]
+    BornDuplicate {
+        /// Класс с головами аргументов: `Functor Box`.
+        written: Symbol,
+        /// Подкласс, породивший первый, как пишется: `Applicative`.
+        by: Symbol,
+        /// Где написан второй.
+        span: Span,
+    },
+
     /// Второй инстанс когерентного класса (§3.5, пункт 3).
 
     ///
@@ -1698,6 +1710,7 @@ impl ElabError {
             | Self::TextualOpen { span }
             | Self::AmbiguousInstance { span, .. }
             | Self::CoherentDuplicate { span, .. }
+            | Self::BornDuplicate { span, .. }
             | Self::NotAnEffect { span, .. }
             | Self::MisplacedRow { span }
             | Self::RowExpected { span }

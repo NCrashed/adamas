@@ -55,6 +55,7 @@ elab-sealed-constraint = signature `{ $signature }` cannot seal: `{ $member }` c
 elab-member-multiplicity = member `{ $method }` is checked at multiplicities { $passing }, but the field promises { $promised }: an instance must keep the field's promise in full
 elab-sealed-instance = the instance context carries `{ $class } { $param }`, and `{ $param }` is a parameter of the sealed `{ $sealed }`; move the constraint into a module parameter or declare `{ $class }` `coherent`
 elab-coherent-duplicate = instance `{ $written }` is already declared, and `{ $class }` { $why }
+elab-born-duplicate = instance `{ $written }` was already produced above by the default in `{ $by }`: write your own above the `{ $by }` instance, or leave it out
 elab-undetermined-head = an instance of `{ $class }` cannot be chosen: the argument type is not determined in time for the search - give it an annotation
 elab-missing-type-member = the instance does not set type member `{ $name }`: it has no default, write `type { $name } = …`
 elab-coherent-orphan = instance `{ $written }` is declared outside the file of class `{ $class }` and outside the files of its argument heads, and `{ $class }` { $why }

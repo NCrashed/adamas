@@ -55,6 +55,7 @@ elab-sealed-constraint = сигнатурой `{ $signature }` запечаты�
 elab-member-multiplicity = член `{ $method }` проверяется при кратностях { $passing }, а поле обещает { $promised }: инстанс обязан выполнять обещание поля целиком
 elab-sealed-instance = контекст инстанса несёт `{ $class } { $param }`, а `{ $param }` - параметр запечатанного `{ $sealed }`; вынесите констрейнт в параметр модуля либо объявите `{ $class }` `coherent`
 elab-coherent-duplicate = инстанс `{ $written }` уже объявлен, а `{ $class }` { $why }
+elab-born-duplicate = инстанс `{ $written }` уже порождён умолчанием `{ $by }` выше: свой пишется выше инстанса `{ $by }` либо не пишется вовсе
 elab-undetermined-head = инстанс `{ $class }` не выбрать: тип аргумента к поиску не определился - дайте ему аннотацию
 elab-missing-type-member = инстанс не задаёт типовой член `{ $name }`: умолчания у него нет, напишите `type { $name } = …`
 elab-coherent-orphan = инстанс `{ $written }` объявлен вне файла класса `{ $class }` и вне файлов голов его аргументов, а `{ $class }` { $why }

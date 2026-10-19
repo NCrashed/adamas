@@ -2057,6 +2057,14 @@ fn declare_instance(
     // назвав `Eqv#Nat.eq` - имя, которого автор не писал.
     if class.name.is_some() {
         instances.add_named(&name.text, &arguments, Rc::clone(&declared));
+    } else if let Some(by) = instances.born_by(&name.text, &arguments) {
+        // Первый порождён умолчанием подкласса (§4.1): отказ называет это,
+        // иначе «уже объявлен» указывал бы на инстанс, которого автор не писал.
+        return Err(ElabError::BornDuplicate {
+            written: class::written(&name.text, &arguments),
+            by: Rc::from(adamas_core::term::written_name(by)),
+            span,
+        });
     } else if !instances.add(&name.text, &arguments, Rc::clone(&declared)) {
         return Err(ElabError::ModuleMember {
             name: Rc::clone(&name.text),
@@ -2274,7 +2282,7 @@ fn born_superclasses(
         }
         let own = info.superclasses;
         let declared: Symbol = Rc::from(mangled(&superclass, &arguments).as_str());
-        instances.add(&superclass, &arguments, Rc::clone(&declared));
+        instances.add_born(&superclass, &arguments, Rc::clone(&declared), class);
         let qualified = members
             .iter()
             .map(|(method, ..)| Rc::from(format!("{declared}.{method}").as_str()))

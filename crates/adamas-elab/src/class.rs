@@ -60,6 +60,9 @@ pub struct Instances {
     /// тип несколько (§4.3). Пока такой один, разрешение берёт его само;
     /// несколько - отказ с требованием `using`.
     named: HashMap<(Symbol, Rc<[Symbol]>), Vec<Symbol>>,
+    /// Анонимные инстансы, порождённые умолчанием подкласса (§4.1), - имя
+    /// подкласса. По нему отказ дубликата называет, откуда взялся первый.
+    born: HashMap<(Symbol, Rc<[Symbol]>), Symbol>,
     /// Модули, аннотированные сигнатурой: сигнатура - список её реализаций.
     ///
     /// Нужны implicit-параметру функтора (`module Sorted {Key : Ordered}`,
@@ -226,6 +229,19 @@ impl Instances {
     /// Запоминает класс.
     pub fn declare(&mut self, name: &Symbol, class: Class) {
         self.classes.insert(Rc::clone(name), class);
+    }
+
+    /// Запоминает инстанс, порождённый умолчанием подкласса `by` (§4.1).
+    pub fn add_born(&mut self, class: &Symbol, heads: &Rc<[Symbol]>, name: Symbol, by: &Symbol) {
+        self.add(class, heads, name);
+        self.born
+            .insert((Rc::clone(class), Rc::clone(heads)), Rc::clone(by));
+    }
+
+    /// Подкласс, чьим умолчанием порождён инстанс на эту пару.
+    #[must_use]
+    pub fn born_by(&self, class: &Symbol, heads: &Rc<[Symbol]>) -> Option<&Symbol> {
+        self.born.get(&(Rc::clone(class), Rc::clone(heads)))
     }
 
     /// Запоминает анонимный инстанс. `false` - такой уже есть.

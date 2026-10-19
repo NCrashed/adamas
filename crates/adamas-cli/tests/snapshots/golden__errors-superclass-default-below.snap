@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Ошибка: superclass-default-below.adamas:12:1: `Prelude.Functor` в программе не объявляется: анонимный инстанс для этого типа уже объявлен; несколько на один тип пишутся именованными
+Ошибка: superclass-default-below.adamas:12:1: инстанс `Functor Box` уже порождён умолчанием `Applicative` выше: свой пишется выше инстанса `Applicative` либо не пишется вовсе
   instance Functor Box where
   ^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -577,7 +577,7 @@ impl Pass<'_> {
         // Поле-запись из имён - тоже имя: так стоит словарь суперкласса,
         // порождённого вместе с инстансом (§4.1), - `{#super0 = {map = …}}`.
         if let Term::Object(fields) = base {
-            if !fields.iter().all(|(_, value)| named(value)) {
+            if !fields.iter().all(|(_, value)| inert(self.signature, value)) {
                 return None;
             }
             let (_, found) = fields.iter().find(|(it, _)| it == field)?;
@@ -634,14 +634,46 @@ impl Pass<'_> {
     }
 }
 
-/// Значение поля, из которого проекция сводится без потери вычисления: имя
-/// либо запись из таких.
-fn named(term: &Term) -> bool {
+/// Значение поля, из которого проекция сводится без потери вычисления.
+///
+/// Значение - то, в чём вычислять нечего: имя, примитив, сорт, запись из
+/// значений, применение конструктора или семейства и **недонасыщенное**
+/// применение константы - частичное применение тоже значение (§10 вопрос
+/// 258). Так стоят поля собственного словаря у инстанса с контекстом: члены,
+/// применённые к связываниям префикса, - `Two#Pair.one Int Mono#Int`.
+/// Насыщенный вызов функции значением не считается, и вычисление соседнего
+/// поля проекция не теряет.
+fn inert(signature: &Signature, term: &Term) -> bool {
     match term {
-        Term::Const(..) => true,
-        Term::Object(fields) => fields.iter().all(|(_, value)| named(value)),
+        Term::Const(..) | Term::Prim(_) | Term::Universe(_) => true,
+        Term::Object(fields) => fields.iter().all(|(_, value)| inert(signature, value)),
+        Term::App(..) => {
+            let (head, arguments) = spine(term);
+            let Term::Const(name, ..) = head else {
+                return false;
+            };
+            let Some(definition) = signature.lookup(name) else {
+                return false;
+            };
+            let valued = matches!(
+                definition.kind,
+                DefinitionKind::Data { .. } | DefinitionKind::Constructor { .. }
+            ) || arity(&definition.ty) > arguments.len();
+            valued && arguments.iter().all(|it| inert(signature, it))
+        }
         _ => false,
     }
+}
+
+/// Сколько связываний у типа до первого не-`Pi`.
+fn arity(ty: &Term) -> usize {
+    let mut count = 0;
+    let mut current = ty;
+    while let Term::Pi(_, _, _, _, codomain) = current {
+        count += 1;
+        current = codomain;
+    }
+    count
 }
 
 /// Тип-запись: сигнатура модуля (`module type`) либо синоним записи.

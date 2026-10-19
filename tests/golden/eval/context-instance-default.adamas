@@ -1,0 +1,38 @@
+-- Умолчание метода у инстанса с контекстом, зовущее соседний метод (§10
+-- вопрос 258).
+--
+-- Внутри группы членов собственный словарь - запись литералом, и у инстанса
+-- с контекстом её поля - члены, применённые к связываниям префикса. Проекция
+-- из такой записи сводилась, только если поля - имена; теперь и тогда, когда
+-- поле - значение: частичное применение, конструктор, запись из значений.
+-- Машина считала и прежде, понижение отказывало «тип в позиции значения».
+--
+-- Обе формы: собственное умолчание (`two` зовёт `one`) и суперкласс,
+-- порождённый умолчанием (§4.1) у той же головы с контекстом.
+
+data Pair (a : Type) (b : Type) where
+  MkPair : a -> b -> Pair a b
+
+class Mono (a : Type) where
+  zero : a
+  plus : a -> a -> a
+
+instance Mono Int where
+  zero = 0
+  plus x y = x + y
+
+class Two (f : Type -> Type) where
+  one : a -> f a
+  two : a -> f a
+  two x = one x
+
+instance {Mono w} => Two (Pair w) where
+  one x = MkPair zero x
+
+-- `Functor (Pair w)` порождается умолчанием прелюдийного `Applicative`.
+instance {Mono w} => Applicative (Pair w) where
+  pure x = MkPair zero x
+  ap (MkPair u g) (MkPair v x) = MkPair (plus u v) (g x)
+
+main : (Pair Int Int, Pair Int Int)
+main = (two 41, map (\x -> x * 2) (ap (MkPair 3 (\y -> y + 1)) (pure 20)))

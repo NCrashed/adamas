@@ -1,0 +1,26 @@
+-- Тип-запись в поле конструктора - положительная позиция (§3.2, §4.2).
+--
+-- `Branch : List (String, Tree) -> Tree`: семейство стоит внутри кортежа, а
+-- кортеж - внутри `List`. Вложенное вхождение спускалось в параметр `List`, но
+-- у записи нет головы-константы, и правило падало в общую ветку: «использует
+-- `Tree` в отрицательной позиции». Поля записи проверяются как поля
+-- конструктора: каждое - тем же правилом.
+--
+-- Отрицательное по-прежнему отвергается и внутри записи: `(Bad -> Int, Int)`
+-- в поле - тот же отказ, что без записи.
+
+data Tree where
+  Leaf : UInt64 -> Tree
+  Branch : List (String, Tree) -> Tree
+
+mutual
+  total : Tree -> UInt64
+  total (Leaf n) = n
+  total (Branch kids) = sumKids kids
+
+  sumKids : List (String, Tree) -> UInt64
+  sumKids Nil = 0
+  sumKids (Cons (_, t) rest) = total t + sumKids rest
+
+main : UInt64
+main = total (Branch [("a", Leaf 1), ("b", Branch [("c", Leaf 20)]), ("d", Leaf 300)])

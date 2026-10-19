@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: negative-record-field.adamas:6:11: конструктор `MkBad` использует `Bad` в отрицательной позиции
+    MkBad : (Bad -> UInt64, UInt64) -> Bad
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  путь: тип `Bad` -> конструктор `MkBad`

@@ -2413,6 +2413,27 @@ fn positive_seen<'a, 'g>(
             .or_else(|| {
                 positive_seen(signature, cycling, group, params, depth + 1, codomain, seen)
             }),
+        // Тип-запись (§4.2) - поля, как у конструктора: каждое - положительная
+        // позиция, проверяемая тем же правилом на своей глубине телескопа.
+        // Кортеж - такая запись, и `List (Pattern, Expr)` в поле `Expr`
+        // отвергался как отрицательный: у записи нет головы-константы, и
+        // правило падало в общую ветку.
+        Term::Record(fields) => {
+            for (offset, field) in fields.fields.iter().enumerate() {
+                let at = depth + u32::try_from(offset).unwrap_or(u32::MAX);
+                if let Some(found) =
+                    positive_seen(signature, cycling, group, params, at, &field.ty, seen)
+                {
+                    return Some(found);
+                }
+            }
+            negative(
+                fields
+                    .tail
+                    .as_ref()
+                    .and_then(|tail| mentioned_by(signature, group, tail)),
+            )
+        }
         other => {
             let (head, arguments) = spine(other);
             match head {

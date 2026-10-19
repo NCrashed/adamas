@@ -1,9 +1,0 @@
----
-source: crates/adamas-cli/tests/golden.rs
-expression: text
----
-Ошибка: hole-parameter-not-dictionary.adamas:13:21: несовпадение типов: ожидался `(ω _ : Int64) -> ?0`, получен `?1`
-    let k = \g -> map g [1, 2]
-                      ^
-  в контексте:
-    (g : _)

@@ -4205,15 +4205,36 @@ impl<'a> Elaborator<'a> {
         // уходил в умолчание, и `xs : List UInt64 = [1, 2]` собирался
         // унарными `Nat` прелюдии.
         let element = awaited.and_then(|ty| self.list_element(ty));
+        // Имплисит `Cons` один на все ячейки. Лямбде ждать нужно его: ядро
+        // проверяет её против него, а не против ожидаемого элемента (§10
+        // вопрос 257). Известный элемент сводится с ним заранее; неизвестный
+        // уточнит стрелкой первая лямбда.
+        let slot = match &cons {
+            Term::App(_, implicit) => Some(self.ctx.eval(implicit)),
+            _ => None,
+        };
+        if let (Some(slot), Some(element)) = (&slot, &element) {
+            let mark = self.metas.mark();
+            if !convertible(self.signature, self.metas, self.ctx.size(), slot, element) {
+                self.metas.rollback(mark);
+            }
+        }
+        let lambda_slot = slot.or_else(|| element.clone());
         let mut built = empty;
         for item in items.iter().rev() {
             // Элемент уезжает внутрь собранного значения, как поле
             // конструктора: позиция у него та же (§3.3).
             let element = element.clone();
-            let item = self.placed(Position::Field, |it| {
-                it.awaited = element;
-                it.expr(item, Mult::Many)
-            })?;
+            // Лямбда берёт тип параметра из ожидаемой стрелки, как аргумент
+            // применения; через `awaited` его не видно (§10 вопрос 257).
+            let item = if matches!(item.kind, ExprKind::Lam { .. }) {
+                self.argument_term(item, lambda_slot.as_ref(), Position::Field)?
+            } else {
+                self.placed(Position::Field, |it| {
+                    it.awaited = element;
+                    it.expr(item, Mult::Many)
+                })?
+            };
             built = cons.clone().apply([item, built]);
         }
         self.produced = None;
@@ -4565,6 +4586,35 @@ impl<'a> Elaborator<'a> {
             &*whnf_solved(self.signature, self.metas, ty),
             Value::Neutral(Head::Meta(_), _)
         )
+    }
+
+    /// Стрелка из свежих дырок на месте дырки, которую ждёт лямбда (§10
+    /// вопрос 257): `(ω x : ?d) -> {| ?ρ} ?c`. Дырка заведена, бывает, уже
+    /// контекста лямбды - тогда лишние позиции свежих дырок срезает
+    /// обрезание решателя. `None` - тип не дырка либо стрелкой не решается.
+    fn arrowed(&mut self, ty: &Rc<Value>) -> Option<Rc<Value>> {
+        if !self.flexible(ty) {
+            return None;
+        }
+        let domain = self.hole();
+        let name: Symbol = Rc::from("x");
+        let codomain = self.under(&name, Mult::Many, Rc::clone(&domain), Self::hole);
+        let size = self.ctx.size();
+        let arrow = Term::Pi(
+            Binder::explicit(Mult::Many),
+            CoreName::from("x"),
+            Rc::new(quote(size, &domain)),
+            self.metas.fresh_row(),
+            Rc::new(quote(size + 1, &codomain)),
+        );
+        let arrow = self.ctx.eval(&arrow);
+        let mark = self.metas.mark();
+        if convertible(self.signature, self.metas, size, ty, &arrow) {
+            Some(arrow)
+        } else {
+            self.metas.rollback(mark);
+            None
+        }
     }
 
     /// Стрелка с доменом-дыркой: форма лямбды известна, тип параметра - нет.
@@ -7605,6 +7655,21 @@ impl<'a> Elaborator<'a> {
         expected: &[Argument],
         drops: &[(u32, Symbol)],
     ) -> Result<Term, ElabError> {
+        // Ждут лямбду дыркой - дырка уточняется стрелкой, и параметр берёт её
+        // домен (§10 вопрос 257). Иначе тип параметра - своя дырка, стрелку
+        // не решает никто, и ядро отвечает «ожидалась функция».
+        let refined;
+        let expected = match self.result.clone() {
+            Some(ty) if expected.is_empty() && !params.is_empty() => match self.arrowed(&ty) {
+                Some(arrow) => {
+                    refined = self.arguments(&quote(self.ctx.size(), &arrow));
+                    self.result = Some(arrow);
+                    &refined[..]
+                }
+                None => expected,
+            },
+            _ => expected,
+        };
         let Some((param, rest)) = params.split_first() else {
             // Остаток спайна достаётся телу: `\x -> \y -> e` - две лямбды под
             // теми же `Pi`, что и `\x y -> e`.
@@ -8447,6 +8512,12 @@ impl<'a> Elaborator<'a> {
             return None;
         };
         let domain = whnf_solved(self.signature, self.metas, domain);
+        // Дырка доменом - тоже ожидание: стрелкой её уточнит сама лямбда (§10
+        // вопрос 257).
+        if self.flexible(&domain) {
+            self.expected = Vec::new();
+            return Some(domain);
+        }
         if !matches!(&*domain, Value::Pi(..)) {
             return None;
         }

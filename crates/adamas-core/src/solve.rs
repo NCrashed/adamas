@@ -109,6 +109,7 @@ pub fn solve(
     // а не размер контекста: дырка могла быть заведена уже, чем контекст, в
     // котором её встретили.
     let arity = u32::try_from(spine.len()).unwrap_or(u32::MAX);
+    pruned(metas, meta, &renaming, size, 0, right);
     let Some(body) = read(metas, meta, &renaming, size, arity, 0, right) else {
         return false;
     };
@@ -131,6 +132,153 @@ pub fn solve(
         crate::eval::eval(&crate::value::Env::default(), &abstracted),
     );
     true
+}
+
+/// Обрезание (pruning): дырка в правой части, чей спайн называет переменную,
+/// которой в решении нет, переводится на дырку без этой позиции (§10 вопрос
+/// 257).
+///
+/// `?1 ≡ (ω _ : Int64) -> ?0 g` при `?1`, заведённой снаружи связывания `g`,
+/// иначе не решается: `g` в решении `?1` невыразима, и [`read`] отказывает.
+/// Решение `?0 := λ … g. ?0' …` без `g` - самое общее, при котором задача
+/// вообще имеет ответ. Урезается только позиция-переменная; урезать нельзя,
+/// если от неё зависит тип оставшихся - тогда дырка остаётся как была, и
+/// откажет [`read`].
+///
+/// Проход идёт **до** чтения и только меняет хранилище: решённая дырка дальше
+/// читается своим решением.
+fn pruned(
+    metas: &mut Metas,
+    meta: TermMeta,
+    renaming: &HashMap<u32, u32>,
+    outer: u32,
+    depth: u32,
+    value: &Rc<Value>,
+) {
+    let forced = force(metas, value);
+    let value = forced.as_ref().unwrap_or(value);
+    let fresh = || Value::var(Lvl(outer + depth));
+    match &**value {
+        Value::Neutral(head, spine) => {
+            let mut arguments = Vec::with_capacity(spine.len());
+            for elim in spine {
+                match elim {
+                    Elim::App(argument) => {
+                        pruned(metas, meta, renaming, outer, depth, argument);
+                        arguments.push(Some(Rc::clone(argument)));
+                    }
+                    _ => arguments.push(None),
+                }
+            }
+            let Head::Meta(found) = head else {
+                return;
+            };
+            if *found == meta || arguments.iter().any(Option::is_none) {
+                return;
+            }
+            // Позиция годна, если её переменная выразима в решении: из спайна
+            // решаемой дырки либо связана спуском.
+            let keep: Vec<bool> = arguments
+                .iter()
+                .flatten()
+                .map(|argument| match &**argument {
+                    Value::Neutral(Head::Local(Lvl(level)), inner) if inner.is_empty() => {
+                        *level >= outer || renaming.contains_key(level)
+                    }
+                    _ => true,
+                })
+                .collect();
+            if keep.iter().all(|it| *it) {
+                return;
+            }
+            prune(metas, *found, &keep);
+        }
+        Value::Lam(_, _, closure) => {
+            let body = closure.apply(fresh());
+            pruned(metas, meta, renaming, outer, depth + 1, &body);
+        }
+        Value::Pi(_, _, domain, _, closure) => {
+            pruned(metas, meta, renaming, outer, depth, domain);
+            let codomain = closure.apply(fresh());
+            pruned(metas, meta, renaming, outer, depth + 1, &codomain);
+        }
+        Value::Object(fields) => {
+            for (_, field) in fields.iter() {
+                pruned(metas, meta, renaming, outer, depth, field);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Переводит дырку `found` на свежую без позиций, где `keep` ложно.
+///
+/// Тип свежей - телескоп `found` без этих позиций; читается он тем же
+/// [`read`] под переименованием, где выброшенных позиций нет, поэтому тип,
+/// зависящий от них, не читается, и обрезание не делается вовсе.
+fn prune(metas: &mut Metas, found: TermMeta, keep: &[bool]) {
+    // Чужое имя для проверки вхождения: телескоп самой дырки её не содержит.
+    let none = TermMeta(u32::MAX);
+    let mut renaming = HashMap::new();
+    let mut ty = Rc::clone(metas.term_type(found));
+    let mut binders = Vec::new();
+    let mut kept = 0u32;
+    for (position, keeping) in keep.iter().enumerate() {
+        let Value::Pi(binder, name, domain, row, closure) = &*ty else {
+            return;
+        };
+        let level = u32::try_from(position).unwrap_or(u32::MAX);
+        if *keeping {
+            let Some(domain) = read(metas, none, &renaming, level, kept, 0, domain) else {
+                return;
+            };
+            let row = row.apply(Value::var(Lvl(level)));
+            let Some(row) = read_row(metas, none, &renaming, level, kept, 1, &row) else {
+                return;
+            };
+            binders.push((*binder, Rc::clone(name), domain, row));
+            renaming.insert(level, kept);
+            kept += 1;
+        }
+        let closure = closure.clone();
+        ty = closure.apply(Value::var(Lvl(level)));
+    }
+    let arity = u32::try_from(keep.len()).unwrap_or(u32::MAX);
+    let Some(result) = read(metas, none, &renaming, arity, kept, 0, &ty) else {
+        return;
+    };
+    let telescope =
+        binders
+            .into_iter()
+            .rev()
+            .fold(result, |codomain, (binder, name, domain, row)| {
+                Term::Pi(binder, name, Rc::new(domain), row, Rc::new(codomain))
+            });
+    let ty = crate::eval::eval(&crate::value::Env::default(), &telescope);
+    let narrowed = metas.fresh_term_over(ty, &[], 0);
+    // Тело решения: свежая дырка, применённая к оставленным позициям, - под
+    // лямбдами по всем позициям `found`.
+    let body = keep
+        .iter()
+        .enumerate()
+        .filter(|(_, keeping)| **keeping)
+        .fold(narrowed, |callee, (position, _)| {
+            let index = arity - 1 - u32::try_from(position).unwrap_or(0);
+            Term::App(Rc::new(callee), Rc::new(Term::var(index)))
+        });
+    let mults = multiplicities(metas, found, arity);
+    let solution = (0..arity).fold(body, |body, index| {
+        let at = usize::try_from(arity - 1 - index).unwrap_or(0);
+        Term::Lam(
+            mults.get(at).copied().unwrap_or(Mult::Many),
+            format!("p{index}").into(),
+            Rc::new(body),
+        )
+    });
+    metas.solve_term(
+        found,
+        crate::eval::eval(&crate::value::Env::default(), &solution),
+    );
 }
 
 /// Читает телескоп полей под переименованием - по одному полю.

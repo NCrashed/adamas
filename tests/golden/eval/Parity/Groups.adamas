@@ -1,0 +1,25 @@
+-- Группы `mutual` в подключённом файле: семейства и определения. Свидетель -
+-- `eval/mutual-imported`.
+
+mutual
+  data Tree where
+    Node : UInt64 -> Forest -> Tree
+
+  data Forest where
+    Empty : Forest
+    Grove : Tree -> Forest -> Forest
+
+mutual
+  even : UInt64 -> Bool
+  even n = if n == 0 then True else odd (n - 1)
+
+  odd : UInt64 -> Bool
+  odd n = if n == 0 then False else even (n - 1)
+
+mutual
+  size : Tree -> UInt64
+  size (Node _ f) = 1 + sizes f
+
+  sizes : Forest -> UInt64
+  sizes Empty = 0
+  sizes (Grove t rest) = size t + sizes rest

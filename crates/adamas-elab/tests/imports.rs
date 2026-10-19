@@ -288,41 +288,47 @@ main = eq True True
 }
 
 #[test]
-fn a_mutual_block_is_refused_inside_an_imported_file() {
-    // Названная граница, а не умолчание: члены группы объявляются одним
-    // вызовом, а квалифицировать их он не умеет. Объяви их неквалифицированно -
-    // и `M.eval` снаружи не нашлось бы, а два файла с одноимённой группой
-    // столкнулись бы. Отказ поэтому стоит здесь, и пока он стоит, взаимная
-    // рекурсия между файлами невыразима - отсюда и отказ кольцу выше.
+fn a_mutual_block_in_an_imported_file_declares_qualified_members() {
+    // Члены группы объявляются квалифицированно, как всякий член файла:
+    // `Grouped.Tick`, а не `Tick`. Иначе `Grouped.size` снаружи не нашлось
+    // бы, а два файла с одноимённой группой столкнулись бы.
     let modules = Memory::new().with(
         "Grouped",
         "\
 mutual
   data Tick where
     Wind : Tock -> Tick
+    Stop : Tick
 
   data Tock where
     Turn : Tick -> Tock
-",
-    );
-    let why = refused("import Grouped (Tick)\n", &modules);
-    assert!(
-        why.contains("mutual") && why.contains("импортированном файле"),
-        "сказано: {why}"
-    );
 
-    // Тот же блок на верхнем уровне входного файла законен: квалификации там
-    // нет, и объявлять члены группы нечем мешать.
-    accepted(
-        "\
 mutual
-  data Tick where
-    Wind : Tock -> Tick
+  ticks : Tick -> UInt64
+  ticks (Wind t) = 1 + tocks t
+  ticks Stop = 0
 
-  data Tock where
-    Turn : Tick -> Tock
+  tocks : Tock -> UInt64
+  tocks (Turn t) = ticks t
 ",
-        &Memory::new(),
+    );
+    let program = accepted(
+        "import Grouped (Tick, Wind, Turn, Stop)\nimport Grouped as G\n\nn : UInt64\nn = G.ticks (Wind (Turn Stop))\n",
+        &modules,
+    );
+    let signature = program.signature.as_ref().expect("сигнатура есть");
+    for name in [
+        "Grouped.Tick",
+        "Grouped.Tock",
+        "Grouped.Wind",
+        "Grouped.ticks",
+        "Grouped.tocks",
+    ] {
+        assert!(signature.lookup(name).is_some(), "`{name}` не объявлено");
+    }
+    assert!(
+        signature.lookup("ticks").is_none() && signature.lookup("Tick").is_none(),
+        "член группы объявлен неквалифицированным"
     );
 }
 

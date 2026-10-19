@@ -986,10 +986,10 @@ fn member<'a>(
                     pending.take(),
                     postulated,
                 )?;
-                // Причина одна на блок и на файл: члены группы объявляются
-                // одним вызовом, а квалификация у этого вызова не написана.
-                // Разнятся они только тем, как об этом сказать.
-                if let Some(enclosing) = within {
+                // В файле и в теле модуля группа объявляется с квалификацией
+                // (`full` у члена). В теле **функтора** нет: члену нужен
+                // телескоп его параметров, а объявление группы его не несёт.
+                if let Some(enclosing) = within.filter(|it| !it.params.is_empty()) {
                     return Err(ElabError::ModuleMember {
                         name: Rc::from("mutual"),
                         what: if enclosing.file {
@@ -1002,7 +1002,8 @@ fn member<'a>(
                     });
                 }
                 declare_mutual(
-                    signature, metas, owned, fixities, instances, warnings, members, decl.span,
+                    signature, metas, owned, fixities, instances, warnings, within, members,
+                    decl.span,
                 )?;
             }
             DeclKind::Class(class) => {
@@ -3555,6 +3556,10 @@ fn declare_members(
 /// монотипен, и два тела не вправе звать его на разных уровнях. Внутри одного
 /// тела он монотипен и без этого - кэш инстанциаций держит одну копию на имя.
 #[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "группа идёт одной последовательностью: семейства, типы, тела, объявление"
+)]
 fn declare_mutual(
     signature: &mut Signature,
     metas: &mut Metas,
@@ -3562,17 +3567,20 @@ fn declare_mutual(
     fixities: &Fixities,
     instances: &Instances,
     warnings: &mut Warnings,
+    within: Option<&Enclosing>,
     members: &[ast::Decl],
     span: Span,
 ) -> Result<(), ElabError> {
-    let planned = mutual_members(members, span)?;
+    let planned = mutual_members(members, within, span)?;
     // Семейства объявляются **первыми и своей группой**. Разбор в теле
     // определения берёт у конструктора тип, а элаборация читает его из
     // сигнатуры: значит конструкторы обязаны быть там раньше, чем компилируется
     // первая клауза. Взаимная рекурсия семейств от этого не страдает - она
     // внутри их группы, - а названная цена в том, что тип конструктора не
     // вправе назвать определение того же блока.
-    declare_families(signature, metas, owned, fixities, warnings, &planned, span)?;
+    declare_families(
+        signature, metas, owned, fixities, warnings, within, &planned, span,
+    )?;
     let planned: Vec<&Mutual<'_>> = planned
         .iter()
         .filter_map(|member| match member {
@@ -3603,7 +3611,7 @@ fn declare_mutual(
         // приходится повторить: `mutual` меняет **видимость**, и только её
         // (§4.8), а без этой строки `leaked : File` внутри блока принималось,
         // тогда как то же объявление снаружи отвергалось (ревью 2026-09-07).
-        if let Some(how) = owned_head(signature, owned, None, member.ty) {
+        if let Some(how) = owned_head(signature, owned, within, member.ty) {
             return Err(ElabError::OwnedTopLevel {
                 owned: how,
                 name: Rc::clone(&member.name.text),
@@ -3611,7 +3619,8 @@ fn declare_mutual(
             });
         }
         let lift = metas.fresh_row();
-        let mut elaborator = Elaborator::new(signature, metas, owned, fixities, warnings);
+        let mut elaborator =
+            Elaborator::new(signature, metas, owned, fixities, warnings).within(within);
         types.push(elaborator.declaration_lifted(member.ty, Mult::Many, lift.clone())?);
         lifts.push(lift);
     }
@@ -3649,6 +3658,7 @@ fn declare_mutual(
         let compiled = {
             let mut elaborator =
                 Elaborator::with_group(signature, metas, owned, fixities, warnings, visible)
+                    .within(within)
                     .declaring(&written[at])
                     .suspending(suspends(member.ty))
                     .deferring();
@@ -3698,7 +3708,7 @@ fn declare_mutual(
     declare_definitions(signature, metas, &planned, &written, &trees, span)?;
     required_verdicts(signature, &planned)?;
     for member in &planned {
-        carrier::check(signature, owned, &member.name.text, member.span)?;
+        carrier::check(signature, owned, &member.full, member.span)?;
     }
     Ok(())
 }
@@ -3781,7 +3791,7 @@ fn declare_definitions(
 ) -> Result<(), ElabError> {
     let mut group: Option<Group> = None;
     for (at, member) in planned.iter().enumerate() {
-        let declared = SigMember::definition(&member.name.text, Mult::Many, written[at].clone())
+        let declared = SigMember::definition(&member.full, Mult::Many, written[at].clone())
             .with_body(trees[at].term.clone());
         group = Some(match group {
             None => Group::of(declared),
@@ -3813,12 +3823,12 @@ fn declare_definitions(
             ),
         })?;
     for (at, member) in planned.iter().enumerate() {
-        signature.locate(&member.name.text, written_at(member.clauses, member.span));
+        signature.locate(&member.full, written_at(member.clauses, member.span));
         let index = u32::try_from(at).unwrap_or(u32::MAX);
-        locate_allocation(signature, &member.name.text, &declared, index, member.span);
+        locate_allocation(signature, &member.full, &declared, index, member.span);
         locate_reuse(
             signature,
-            &member.name.text,
+            &member.full,
             &trees[at].term,
             &declared,
             index,
@@ -3871,7 +3881,7 @@ fn siblings_of(
             .substitute_levels(&levels)
             .substitute_rows(&rows);
         visible.push(Member {
-            name: Rc::clone(&sibling.name.text),
+            name: Rc::clone(&sibling.full),
             ty: Rc::new(ty),
             args: Args::rows(rows),
             levels,
@@ -4094,7 +4104,7 @@ fn verdicts(
 /// `mutual` выбрасывался вместе с заголовком, то есть не значил ничего.
 fn required_verdicts(signature: &Signature, planned: &[&Mutual<'_>]) -> Result<(), ElabError> {
     for member in planned {
-        verdicts(signature, &member.name.text, member.required, member.span)?;
+        verdicts(signature, &member.full, member.required, member.span)?;
     }
     Ok(())
 }
@@ -4125,12 +4135,14 @@ fn fbip_verdict(signature: &Signature, name: &Symbol) -> Result<(), ElabError> {
 /// `Tree` и `Forest` друг без друга не объявляются, и единица объявления у них
 /// поэтому общая: ядро принимает членов двух видов по построению (§10
 /// вопрос 50), а фаза B1 кладёт типы конструкторов раньше тел.
+#[allow(clippy::too_many_arguments)]
 fn declare_families(
     signature: &mut Signature,
     metas: &mut Metas,
     owned: &Owned,
     fixities: &Fixities,
     warnings: &mut Warnings,
+    within: Option<&Enclosing>,
     planned: &[Planned<'_>],
     span: Span,
 ) -> Result<(), ElabError> {
@@ -4164,14 +4176,14 @@ fn declare_families(
         };
         if let Some(previous) = families.last() {
             scratch.get_or_insert_with(|| signature.clone()).assume(
-                &previous.data.name.text,
+                &previous.declared,
                 u32::try_from(previous.levels.len()).unwrap_or(u32::MAX),
                 previous.kind.clone(),
             );
         }
         let known = scratch.as_ref().unwrap_or(signature);
         families.push(family_header(
-            known, metas, owned, fixities, warnings, None, data, *at,
+            known, metas, owned, fixities, warnings, within, data, *at,
         )?);
     }
     if families.is_empty() {
@@ -4203,7 +4215,7 @@ fn declare_families(
     let mut group: Option<Group> = None;
     for family in &families {
         let constructors = family_constructors(
-            signature, metas, owned, fixities, warnings, None, family, &seen,
+            signature, metas, owned, fixities, warnings, within, family, &seen,
         )?;
         seen.extend(constructors.iter().map(|(name, ty)| Member {
             name: Rc::clone(name),
@@ -4234,7 +4246,7 @@ fn declare_families(
             owned,
             fixities,
             warnings,
-            &family.data.name.text,
+            &family.declared,
             &family.data.params,
             Unwritten::Sort,
         )?;
@@ -4245,6 +4257,8 @@ fn declare_families(
 /// Член группы: имя, написанный тип и клаузы.
 struct Mutual<'a> {
     name: &'a ast::Name,
+    /// Объявленное имя: в подключённом файле и в теле модуля - квалифицированное.
+    full: Symbol,
     ty: &'a ast::Expr,
     clauses: &'a [ast::Clause],
     span: Span,
@@ -4263,7 +4277,11 @@ enum Planned<'a> {
 ///
 /// Постулата в группе не бывает: члены её объявляются вместе, а постулат -
 /// это отсутствие тела, и объявлять его группой незачем.
-fn mutual_members(members: &[ast::Decl], span: Span) -> Result<Vec<Planned<'_>>, ElabError> {
+fn mutual_members<'a>(
+    members: &'a [ast::Decl],
+    within: Option<&Enclosing>,
+    span: Span,
+) -> Result<Vec<Planned<'a>>, ElabError> {
     let mut found = Vec::with_capacity(members.len() / 2);
     let mut pending: Option<(&ast::Name, &ast::Expr, Span, Required)> = None;
     for member in members {
@@ -4295,6 +4313,7 @@ fn mutual_members(members: &[ast::Decl], span: Span) -> Result<Vec<Planned<'_>>,
                     });
                 };
                 found.push(Planned::Definition(Mutual {
+                    full: qualify(within, &declared.text),
                     name: declared,
                     ty,
                     clauses,

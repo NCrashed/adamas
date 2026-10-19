@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: mutual-in-functor.adamas:10:3: `mutual` в модуле не объявляется: члену группы нужен телескоп параметров функтора, а объявление группы его не несёт
+    mutual
+    ^^^^^^

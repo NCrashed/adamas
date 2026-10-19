@@ -1,0 +1,30 @@
+-- `mutual` в подключённом файле и в теле модуля (§4.8).
+--
+-- Члены группы объявляются квалифицированно, как всякий член файла или
+-- модуля: `Parity.Groups.even`, `Local.ping`. Прежде блок отвергался «члены
+-- группы объявляются одним вызовом, а квалифицировать их он не умеет», и
+-- взаимная рекурсия была выразима только во входном файле - многомодульная
+-- программа с ней не писалась. Найдено демо-компилятором Фазы 9.
+--
+-- Тело функтора по-прежнему отвергает `mutual`: члену группы нужен телескоп
+-- параметров функтора (`errors/mutual-in-functor`).
+
+import Parity.Groups (even, odd, size, Node, Grove, Empty)
+import Parity.Groups as P
+
+module Local where
+  mutual
+    ping : UInt64 -> UInt64
+    ping n = if n == 0 then 0 else 1 + pong (n - 1)
+
+    pong : UInt64 -> UInt64
+    pong n = if n == 0 then 0 else 10 + ping (n - 1)
+
+main : (Bool, Bool, UInt64, UInt64, Bool)
+main =
+  ( even 10
+  , odd 7
+  , size (Node 1 (Grove (Node 2 Empty) (Grove (Node 3 Empty) Empty)))
+  , Local.ping 4
+  , P.even 3
+  )

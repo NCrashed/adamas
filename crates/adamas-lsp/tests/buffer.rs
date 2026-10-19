@@ -42,10 +42,6 @@ fn checked(name: &str, text: &str) -> Document {
 
 /// Заготовка: определение, аллоцирующее через соседа.
 const SOURCE: &str = "\
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Pair where
   MkPair : Nat -> Nat -> Pair
 

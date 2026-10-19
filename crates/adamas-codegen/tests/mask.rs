@@ -36,10 +36,6 @@ data Bool where
 data Unit where
   MkUnit : Unit
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data List (a : Type) where
   Nil : List a
   Cons : a -> List a -> List a
@@ -204,7 +200,7 @@ main = handle nearAsk with
 fn a_mask_takes_the_entry_of_its_own_label() {
     let (answer, _) = run("маска-чужая-метка", &format!("{SHAPE}{ALIEN}"));
     assert_eq!(
-        answer, "Cons (Succ (Succ (Succ (Succ (Succ Zero))))) (Cons Zero (Cons (Succ Zero) Nil))",
+        answer, "Cons 5 (Cons 0 (Cons 1 Nil))",
         "маска сняла последнюю запись вектора, а не запись своей метки"
     );
 }
@@ -249,7 +245,7 @@ main = handle near with
 fn a_handler_installed_under_the_mask_stands_nearer_than_it() {
     let (answer, _) = run("маска-под-хендлером", &format!("{SHAPE}{UNDER}"));
     assert_eq!(
-        answer, "Cons (Succ (Succ (Succ Zero))) (Cons (Succ (Succ Zero)) Nil)",
+        answer, "Cons 3 (Cons 2 Nil)",
         "маска сработала в точке операции, а не в точке `mask`"
     );
 }
@@ -290,7 +286,7 @@ main = handle near with
 fn a_mask_holds_across_a_suspension_point() {
     let (answer, _) = run("маска-через-приостановку", &format!("{SHAPE}{ACROSS}"));
     assert_eq!(
-        answer, "Cons Zero (Cons Zero (Cons (Succ Zero) (Cons (Succ Zero) Nil)))",
+        answer, "Cons 0 (Cons 0 (Cons 1 (Cons 1 Nil)))",
         "маска не пережила точку приостановки"
     );
 }
@@ -364,8 +360,7 @@ fn a_resumption_left_in_a_closure_slot_unwinds() {
     // Отметка деструктора обязана стоять в ответе **машины** тоже - иначе
     // свидетель мельче того, что проверяет, и `run` сверяет два молчания.
     assert_eq!(
-        answer,
-        "Cons Zero (Cons (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) Nil)",
+        answer, "Cons 0 (Cons 9 Nil)",
         "деструктор брошенной резумпции не сработал"
     );
 }

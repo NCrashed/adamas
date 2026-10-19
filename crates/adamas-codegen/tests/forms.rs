@@ -53,10 +53,6 @@ const BOTH: &str = "\
 data Unit where
   MkUnit : Unit
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 effect Ask where
   ask : Nat
 
@@ -87,10 +83,6 @@ const PURE: &str = "\
 data Unit where
   MkUnit : Unit
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 quiet : Unit -> Nat
 quiet u = Zero
 
@@ -114,10 +106,6 @@ main = hold louder (relayed size)
 const HANDLED: &str = "\
 data Unit where
   MkUnit : Unit
-
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
 
 effect Ask where
   ask : Nat
@@ -346,10 +334,6 @@ fn the_first_form_cannot_call_the_second() {
 const DEMANDED: &str = "\
 data Unit where
   MkUnit : Unit
-
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
 
 data List (a : Type) where
   Nil : List a

@@ -50,10 +50,6 @@ data Bool where
 data Unit where
   MkUnit : Unit
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data List (a : Type) where
   Nil : List a
   Cons : a -> List a -> List a
@@ -106,7 +102,7 @@ main = handleMulti probe with
 fn a_second_resume_walks_the_captured_part_again() {
     let (answer, _) = run("мультишот-повтор", &format!("{SHAPE}{RECOMPUTED}"));
     assert_eq!(
-        answer, "Cons (Succ (Succ Zero)) (Cons (Succ (Succ (Succ (Succ Zero)))) Nil)",
+        answer, "Cons 2 (Cons 4 Nil)",
         "второй ход не пересчитал захваченный участок"
     );
 }
@@ -140,9 +136,7 @@ main = handleMulti probe with
 fn an_operation_after_the_fork_finds_the_handler_of_its_own_copy() {
     let (answer, _) = run("мультишот-вложенный", &format!("{SHAPE}{NESTED_TOSS}"));
     assert_eq!(
-        answer,
-        "Cons (Succ Zero) (Cons (Succ (Succ Zero)) (Cons (Succ (Succ (Succ Zero))) \
-         (Cons (Succ (Succ (Succ (Succ Zero)))) Nil)))",
+        answer, "Cons 1 (Cons 2 (Cons 3 (Cons 4 Nil)))",
         "четыре хода развилки разошлись не так, как у машины"
     );
 }
@@ -309,7 +303,7 @@ fn a_oneshot_resumption_inside_the_copy_serves_every_walk() {
         &format!("{SHAPE}{ONESHOT_INSIDE}"),
     );
     assert_eq!(
-        answer, "Cons (Succ (Succ Zero)) (Cons (Succ (Succ (Succ (Succ Zero)))) Nil)",
+        answer, "Cons 2 (Cons 4 Nil)",
         "второй ход не получил живой одношотной резумпции"
     );
 }
@@ -443,7 +437,7 @@ fn the_llvm_path_walks_the_captured_part_again() {
     let (expected, by_c) = run("мультишот-повтор-C", &source);
     let (answer, by_llvm) = through_llvm("llvm-мультишот-повтор", &source, &tools);
     assert_eq!(
-        answer, "Cons (Succ (Succ Zero)) (Cons (Succ (Succ (Succ (Succ Zero)))) Nil)",
+        answer, "Cons 2 (Cons 4 Nil)",
         "второй ход LLVM не пересчитал захваченный участок"
     );
     assert_eq!(answer, expected, "LLVM и C разошлись ответом");
@@ -468,9 +462,7 @@ fn the_llvm_path_finds_the_handler_of_its_own_copy() {
     let (expected, by_c) = run("мультишот-вложенный-C", &source);
     let (answer, by_llvm) = through_llvm("llvm-мультишот-вложенный", &source, &tools);
     assert_eq!(
-        answer,
-        "Cons (Succ Zero) (Cons (Succ (Succ Zero)) (Cons (Succ (Succ (Succ Zero))) \
-         (Cons (Succ (Succ (Succ (Succ Zero)))) Nil)))",
+        answer, "Cons 1 (Cons 2 (Cons 3 (Cons 4 Nil)))",
         "четыре хода развилки на LLVM разошлись не так, как у машины"
     );
     assert_eq!(answer, expected, "LLVM и C разошлись ответом");
@@ -512,7 +504,7 @@ fn a_oneshot_resumption_inside_the_copy_serves_every_walk_on_llvm() {
     let (expected, by_c) = run("мультишот-над-одношотом-C", &source);
     let (answer, by_llvm) = through_llvm("llvm-мультишот-над-одношотом", &source, &tools);
     assert_eq!(
-        answer, "Cons (Succ (Succ Zero)) (Cons (Succ (Succ (Succ (Succ Zero)))) Nil)",
+        answer, "Cons 2 (Cons 4 Nil)",
         "второй ход LLVM не получил живой одношотной резумпции"
     );
     assert_eq!(answer, expected, "LLVM и C разошлись ответом");

@@ -56,10 +56,6 @@ const LEDGER: &str = "\
 data Unit where
   MkUnit : Unit
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data List (a : Type) where
   Nil : List a
   Cons : a -> List a -> List a
@@ -90,10 +86,6 @@ const CELLS: usize = 3;
 const LIFO: &str = "\
 data Unit where
   MkUnit : Unit
-
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
 
 data Pair where
   MkPair : Nat -> Nat -> Pair
@@ -150,10 +142,6 @@ fn lifo(last: &str) -> String {
 const SHAPES: &str = "\
 data Unit where
   MkUnit : Unit
-
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
 
 resource Gauge where
   Set : Int64 -> Gauge

@@ -24,10 +24,6 @@ const SHAPE: &str = "\
 data Unit where
   MkUnit : Unit
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data List (a : Type) where
   Nil : List a
   Cons : a -> List a -> List a
@@ -245,10 +241,6 @@ fn source(left: usize, right: usize) -> String {
         "\
 data Unit where
   MkUnit : Unit
-
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
 
 (+) : Nat -> Nat -> Nat
 (+) Zero m = m

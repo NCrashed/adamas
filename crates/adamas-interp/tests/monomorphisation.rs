@@ -27,10 +27,6 @@ data Bool where
   False : Bool
   True : Bool
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Unit where
   MkUnit : Unit
 
@@ -207,10 +203,7 @@ fn specialising_keeps_the_value() {
             format!("{BASE}{CLASSES}"),
             "Cons False (Cons True (Cons True Nil))",
         ),
-        (
-            format!("{BASE}{EFFECTS}"),
-            "Cons Zero (Cons (Succ Zero) Nil)",
-        ),
+        (format!("{BASE}{EFFECTS}"), "Cons 0 (Cons 1 Nil)"),
     ] {
         let (mut signature, mut metas, instances) = elaborated(&source);
         let written = body(&signature, "main");

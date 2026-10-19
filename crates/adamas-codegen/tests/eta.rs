@@ -83,10 +83,6 @@ fn a_class_method_written_by_eta_lowers_flat() {
 /// делающая, тоже выдаёт ноль. Форма у обоих одна - метод, свёрнутый по эте,
 /// позванный дважды, - разошлись они представлением.
 const BY_ETA_BOXED: &str = "\
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 bump : Nat -> Nat
 bump n = Succ n
 
@@ -220,10 +216,6 @@ fn an_arity_hidden_behind_a_type_alias_lowers_flat() {
 /// достроенные наличными поголовно - и `again` позвала бы `pick` с лишним
 /// аргументом на первой позиции.
 const ERASED: &str = "\
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 pick : (0 a : Type) -> a -> a -> a
 pick a x y = x
 
@@ -283,10 +275,6 @@ const BRANCHED_BOXED: &str = "\
 data Bool where
   True : Bool
   False : Bool
-
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
 
 first : Nat -> Nat -> Nat
 first x y = x

@@ -18,10 +18,6 @@ const SHAPE: &str = "\
 data Unit where
   MkUnit : Unit
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data List (a : Type) where
   Nil : List a
   Cons : a -> List a -> List a
@@ -66,7 +62,7 @@ main = handle near with
 fn the_innermost_handler_of_two_alike_answers() {
     let (answer, _) = run("одноимённые", &format!("{SHAPE}{NESTED}"));
     assert_eq!(
-        answer, "Succ Zero",
+        answer, "1",
         "операцию поймал внешний хендлер: поиск в векторе идёт не изнутри наружу"
     );
 }
@@ -94,7 +90,7 @@ main = paired (Succ Zero) (Succ (Succ (Succ Zero)))
 fn the_frame_environment_keeps_the_order_of_its_slots() {
     let (answer, _) = run("среда", &format!("{SHAPE}{CAPTURES}"));
     assert_eq!(
-        answer, "Cons Zero (Cons (Succ Zero) (Cons (Succ (Succ (Succ Zero))) Nil))",
+        answer, "Cons 0 (Cons 1 (Cons 3 Nil))",
         "слоты среды кадра переставлены"
     );
 }
@@ -123,7 +119,7 @@ main = handle asked with
 fn the_operation_number_picks_the_branch() {
     let (answer, _) = run("ветки", &format!("{SHAPE}{BRANCHES}"));
     assert_eq!(
-        answer, "Cons (Succ (Succ Zero)) (Cons Zero (Cons (Succ Zero) Nil))",
+        answer, "Cons 2 (Cons 0 (Cons 1 Nil))",
         "ветка выбрана не своим номером либо `return` не сработал"
     );
 }
@@ -146,7 +142,7 @@ main = handle asked with
 fn the_arguments_of_an_operation_keep_their_order() {
     let (answer, _) = run("аргументы", &format!("{SHAPE}{ARGUMENTS}"));
     assert_eq!(
-        answer, "Cons (Succ Zero) (Cons Zero Nil)",
+        answer, "Cons 1 (Cons 0 Nil)",
         "аргументы операции пришли ветке не в том порядке"
     );
 }
@@ -170,7 +166,7 @@ main = handle thrice with
 fn the_handler_survives_its_first_operation() {
     let (answer, _) = run("глубокий", &format!("{SHAPE}{DEEP}"));
     assert_eq!(
-        answer, "Cons (Succ Zero) (Cons (Succ Zero) (Cons (Succ Zero) Nil))",
+        answer, "Cons 1 (Cons 1 (Cons 1 Nil))",
         "хендлер не пережил первой операции"
     );
 }
@@ -198,10 +194,7 @@ main = handle relayed with
 #[test]
 fn a_branch_reaches_past_its_own_handler() {
     let (answer, _) = run("переизлучение", &format!("{SHAPE}{RELAY}"));
-    assert_eq!(
-        answer, "Succ Zero",
-        "операция ветки ушла не к внешнему хендлеру"
-    );
+    assert_eq!(answer, "1", "операция ветки ушла не к внешнему хендлеру");
 }
 
 /// Хендлер в чистой функции: она корень своего стека, и течи нет.
@@ -228,7 +221,7 @@ main = runAsk body
 #[test]
 fn a_pure_function_roots_its_own_stack() {
     let (answer, allocated) = run("корень", &format!("{SHAPE}{ROOTED}"));
-    assert_eq!(answer, "Cons (Succ Zero) (Cons (Succ Zero) Nil)");
+    assert_eq!(answer, "Cons 1 (Cons 1 Nil)");
     // Семь, и каждый назван: две ячейки `Cons`, два `Succ` (ветка отвечает
     // дважды), замыкание `body`, кадр хендлера и вектор evidence, расширенный
     // из пустого корня чистой `runAsk`, - сам пустой корень один на процесс и
@@ -280,7 +273,7 @@ main = handle outer with
 "
     );
     let (answer, allocated) = run("обрыв-плоским-ответом", &source);
-    assert_eq!(answer, "Succ Zero");
+    assert_eq!(answer, "1");
     assert_eq!(allocated, 11, "цена прогона с обёрткой ответа изменилась");
 }
 
@@ -323,7 +316,7 @@ main = withNursery guarded
     );
     let (answer, _) = run("nursery-inner-handler", &source);
     assert_eq!(
-        answer, "Succ Zero",
+        answer, "1",
         "уступку взял круг, а ближе стоял написанный хендлер"
     );
 }

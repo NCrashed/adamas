@@ -273,10 +273,6 @@ data Bool where
   True : Bool
   False : Bool
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data List (a : Type) where
   Nil : List a
   Cons : a -> List a -> List a
@@ -339,8 +335,7 @@ main = handle @Foreign body with
 ";
 
 /// Ответ программы потока.
-const STREAM_ANSWER: &str =
-    "Cons (Succ Zero) (Cons (Succ Zero) (Cons (Succ Zero) (Cons (Succ Zero) Nil)))";
+const STREAM_ANSWER: &str = "Cons 1 (Cons 1 (Cons 1 (Cons 1 Nil)))";
 
 /// Файл, который программа кладёт на диск.
 const ARTEFACT: &str = "zstream-probe.gz";

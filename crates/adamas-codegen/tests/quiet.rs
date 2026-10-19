@@ -25,10 +25,6 @@ mod harness;
 /// Метка, множитель, дерево и три прохода - дословно форма `handled` стенда,
 /// чтобы свидетели стерегли ровно ту программу, по которой мерится выигрыш.
 const SHAPE: &str = "\
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Tree where
   Leaf : Int64 -> Tree
   Node : Tree -> Tree -> Tree

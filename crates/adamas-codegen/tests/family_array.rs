@@ -151,10 +151,6 @@ main = open (peel (MkW (MkBox (arrayNew 4 7))))
 fn a_pointer_field_still_enters_generic_code() {
     let source = format!(
         "{BOX}
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 again : Box a -> Box a
 again (MkBox xs) = MkBox (arraySet xs 0 (arrayIndex xs 1))
 

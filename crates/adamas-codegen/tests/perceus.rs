@@ -37,10 +37,6 @@ const NODES: usize = (1 << DEPTH) - 1;
 /// блока не занимает, поэтому в счётчике видны только ячейки `Node` и разбор
 /// самого счётчика глубины.
 const COMMON: &str = "\
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Tree where
   Leaf : Tree
   Node : Tree -> Nat -> Tree -> Tree
@@ -128,10 +124,6 @@ fn reuse_shows_up_as_allocations_not_saved() {
 /// вместо `MkFour b a a b`. Счётчик тут не годился бы: он показал бы экономию,
 /// а не порчу.
 const ALIVE: &str = "\
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Two where
   MkTwo : Nat -> Nat -> Two
 
@@ -169,10 +161,6 @@ fn a_scrutinee_named_again_keeps_its_cell() {
 /// Прогон идёт именно незанимающим путём (`a = Zero`): свидетель, не заходящий
 /// на него, не показал бы ничего.
 const PARTIAL: &str = "\
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Two where
   MkTwo : Nat -> Nat -> Two
 
@@ -343,10 +331,6 @@ fn the_llvm_path_reuses_the_same_cell() {
 
 /// Общая часть замера кратности: у `swap` параметр объявлен единицей.
 const LINEAR: &str = "\
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Two where
   MkTwo : Nat -> Nat -> Two
 

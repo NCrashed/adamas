@@ -48,10 +48,6 @@ mod harness;
 /// той же формы, что разобрал, - и потому спрашивает уникальность у поля,
 /// которое `inner` только что взяла.
 const COMMON: &str = "\
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Box where
   MkBox : Nat -> Nat -> Box
 

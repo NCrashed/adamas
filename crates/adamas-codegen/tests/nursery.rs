@@ -61,10 +61,6 @@ const SHAPE: &str = "\
 data Unit where
   MkUnit : Unit
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data List (a : Type) where
   Nil : List a
   Cons : a -> List a -> List a
@@ -278,10 +274,7 @@ fn the_answer_of_a_cancelled_task_is_taken_off_the_ready_list() {
     // Парная программа: тот же круг, та же уступка, отмены нет - есть ответ.
     let answer = harness::machine_printed(&kept).expect("программа без отмены обязана отвечать");
     assert_eq!(
-        answer,
-        "Cons (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) \
-         (Cons (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ \
-         (Succ Zero))))))))))))) Nil)",
+        answer, "Cons 9 (Cons 13 Nil)",
         "парная программа посчитала не то"
     );
     let ran = harness::c_printed("nursery.kept", &kept);
@@ -371,10 +364,7 @@ fn a_destructor_of_an_abandoned_task_may_yield() {
     // довольно с машиной, но порядок здесь и есть утверждение, поэтому он
     // назван числом, а не выведен из совпадения двух реализаций.
     assert_eq!(
-        answer,
-        "Cons (Succ Zero) (Cons (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))) \
-         (Cons (Succ (Succ (Succ (Succ Zero)))) (Cons (Succ (Succ (Succ (Succ (Succ (Succ (Succ \
-         (Succ (Succ Zero))))))))) Nil)))",
+        answer, "Cons 1 (Cons 7 (Cons 4 (Cons 9 Nil)))",
         "машина отметила не 1-7-4-9: уступка деструктора ушла не в тот круг"
     );
     let ran = harness::c_printed("nursery.yielding", &source);

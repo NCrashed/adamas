@@ -40,10 +40,6 @@ const SHAPE: &str = "\
 data Unit where
   MkUnit : Unit
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Pair where
   MkPair : Nat -> Nat -> Pair
 
@@ -79,10 +75,7 @@ main = handle asked with
 #[test]
 fn the_branch_answers_for_the_handler() {
     let answer = harness::printed(&format!("{SHAPE}{ANSWER}"));
-    assert_eq!(
-        answer, "Cons (Succ (Succ Zero)) Nil",
-        "остаток вычисления пережил обрыв"
-    );
+    assert_eq!(answer, "Cons 2 Nil", "остаток вычисления пережил обрыв");
     allocated("abortive-answer", &format!("{SHAPE}{ANSWER}"));
 }
 
@@ -115,7 +108,7 @@ fn an_alien_abort_passes_the_inner_handler() {
     let source = format!("{SHAPE}{NESTED}");
     assert_eq!(
         harness::printed(&source),
-        "Cons (Succ (Succ (Succ Zero))) Nil",
+        "Cons 3 Nil",
         "обрыв поймал не тот хендлер"
     );
     allocated("abortive-nested", &source);
@@ -171,7 +164,7 @@ fn the_unwinding_stops_where_the_handler_stood() {
     let source = format!("{SHAPE}{FLOOR}");
     assert_eq!(
         harness::printed(&source),
-        "Succ (Succ (Succ (Succ Zero)))",
+        "4",
         "живой хендлер под абортивным не пережил раскрутки"
     );
     allocated("abortive-floor", &source);

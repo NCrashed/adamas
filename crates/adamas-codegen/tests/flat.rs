@@ -69,10 +69,6 @@ const LINKS: usize = 3;
 /// оказался бы безобидным. Мутант «дропать плоский слот» на единице выживал -
 /// измерено.
 const LISTS: &str = "\
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Row where
   End : Row
   Item : Int64 -> Row -> Row
@@ -123,10 +119,6 @@ fn a_flat_field_costs_no_cell_of_its_own() {
 /// указательным: `dup` полей ставится по одному на названное поле, и плоское
 /// туда попасть не должно, а указательное - должно, иначе свидетель пуст.
 const COUNTED: &str = "\
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Box where
   MkBox : Int64 -> Nat -> Box
 

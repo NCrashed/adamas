@@ -160,3 +160,22 @@ fn an_unknown_command_is_named() {
     assert!(err.contains("команды `:frobnicate` нет"), "{err}");
     assert!(err.contains("`:type` ждёт аргумента"), "{err}");
 }
+
+/// Команда посреди ввода в несколько строк его кончает и выполняется
+/// следующей: `let` ждёт тела на следующей строке, и `:type` прежде уходил
+/// ему продолжением.
+#[test]
+fn a_command_ends_an_unfinished_input() {
+    let dir = scratch("held");
+    let (out, err) = session(&dir, &[], "let f = 1\n:type map\n2\n");
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(
+        lines.first().is_some_and(|it| it.starts_with("map : ")),
+        "{out}"
+    );
+    assert_eq!(lines.get(1), Some(&"2"), "{out}");
+    assert!(
+        err.starts_with("Ошибка: "),
+        "незаконченный `let` - отказ: {err}"
+    );
+}

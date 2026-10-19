@@ -157,11 +157,19 @@ impl Lines {
 
     /// Форма целиком: строки, пока ввод не кончен ([`unfinished`]) либо не
     /// пришла пустая строка.
-    fn read(&mut self) -> anyhow::Result<Read> {
+    ///
+    /// Команда посреди ввода в несколько строк его кончает и читается
+    /// следующей - `held`: `let x = 3`, за которым `:t x`, иначе уходил бы
+    /// продолжением выражения. Только строка без отступа: внутри блока строку
+    /// вправе начинать оператор `::`.
+    fn read(&mut self, held: &mut Option<String>) -> anyhow::Result<Read> {
         let mut input = String::new();
         loop {
             let prompt = if input.is_empty() { PROMPT } else { MORE };
-            let line = match self.line(prompt)? {
+            let line = match held
+                .take()
+                .map_or_else(|| self.line(prompt), |it| Ok(Ok(Some(it))))?
+            {
                 Ok(Some(line)) => line,
                 Ok(None) if input.is_empty() => return Ok(Read::End),
                 Ok(None) => break,
@@ -175,6 +183,10 @@ impl Lines {
             }
             if input.is_empty() && line.trim_start().starts_with(':') {
                 input = line;
+                break;
+            }
+            if line.starts_with(':') {
+                *held = Some(line);
                 break;
             }
             input.push_str(&line);
@@ -586,8 +598,9 @@ pub(crate) fn run(path: Option<&Path>) -> anyhow::Result<()> {
         );
     }
     let mut session = Session::opened(path)?;
+    let mut held = None;
     loop {
-        let input = match lines.read()? {
+        let input = match lines.read(&mut held)? {
             Read::Input(input) => input,
             Read::Dropped => continue,
             Read::End => return Ok(()),

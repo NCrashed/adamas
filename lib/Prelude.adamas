@@ -1188,3 +1188,25 @@ showArg x =
   case chars shown of
     Nil -> shown
     Cons c rest -> if opening c then shown else if c == '-' || spaced rest then "(" <> shown <> ")" else shown
+
+-- Символ внутри двойных кавычек: экранируется своя кавычка, одинарная - нет.
+escapedInText : Char -> String
+escapedInText c =
+  if c == '"' then "\\\""
+  else if c == '\'' then "'"
+  else escapedChar c
+
+-- | Текст так, как пишется его литерал: `"hi"`, `"a\nb"` - так же, как ответ
+-- печатает `adamas eval`.
+instance Show String where
+  show s = "\"" <> foldr (\c rest -> escapedInText c <> rest) "" (chars s) <> "\""
+
+-- | `None`, `Some 3` - так, как пишется значение.
+instance {Show a} => Show (Option a) where
+  show None = "None"
+  show (Some x) = "Some " <> showArg x
+
+-- | `Ok 3`, `Err "нет"` - так, как пишется значение.
+instance {Show e, Show a} => Show (Result e a) where
+  show (Err e) = "Err " <> showArg e
+  show (Ok x) = "Ok " <> showArg x

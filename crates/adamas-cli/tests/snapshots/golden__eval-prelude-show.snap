@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+["\"plain\"", "\"quote \\\" and 'apostrophe'\"", "\"line\\nbreak\\ttab\"", "Some (-3)", "None", "Err \"no\"", "Ok 7", "MkNamed \"x\" 2"]

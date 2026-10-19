@@ -1,0 +1,25 @@
+-- `Show` у текста, `Option` и `Result` в прелюдии (§4.4).
+--
+-- Текст показывается так, как пишется его литерал - в двойных кавычках, с теми
+-- же экранированиями, что у печати ответа: своя кавычка экранируется,
+-- одинарная - нет. `Option` и `Result` - так, как пишется значение: аргумент
+-- составной либо отрицательный - в скобках (`showArg`, как у `deriving`).
+--
+-- Прежде `Show` не было ни у одного из трёх, и `deriving Show` не проходил у
+-- всякого типа с полем-текстом.
+
+data Named where
+  MkNamed : String -> UInt64 -> Named
+  deriving (Show)
+
+main : List String
+main =
+  [ show "plain"
+  , show "quote \" and 'apostrophe'"
+  , show "line\nbreak\ttab"
+  , show (Some (0 - 3 : Int64))
+  , show (the (Option UInt64) None)
+  , show (the (Result String UInt64) (Err "no"))
+  , show (the (Result String UInt64) (Ok 7))
+  , show (MkNamed "x" 2)
+  ]

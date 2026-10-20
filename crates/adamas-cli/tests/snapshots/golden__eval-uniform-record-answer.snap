@@ -1,0 +1,6 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+assertion_line: 117
+expression: text
+---
+(Ok (7, [5]), Ok 1, Err "none")

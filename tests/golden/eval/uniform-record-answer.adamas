@@ -1,0 +1,31 @@
+-- Голый указатель на запись туда, где ждут форму с плоским полем (§10 вопросы
+-- 235 и 260).
+--
+-- Разбор с веткой `throw` сводит ответ к указателю: результат операции -
+-- обобщённое `a`. Запись другой ветки уезжает тогда единообразной формой
+-- (вопрос 235), а функция объявлена формой с плоским `UInt64`, и обратного
+-- шага не было: `fits` пропускает указатель в указатель. Собранная программа
+-- падала «the match does not know the constructor» - разбор вызывающего формы
+-- не узнавал; машина считала. Найдено демо-компилятором Фазы 9.
+
+import Std.Except (Except, throw, attempt)
+
+data Tok where
+  Named : String -> Tok
+  Other : Tok
+
+step : List UInt64 -> {Except String} (UInt64, List UInt64)
+step (Cons 0 rest) = (7, rest)
+step tokens = throw "no"
+
+nested : List Tok -> {Except String} ((String, List UInt64), List Tok)
+nested (Cons (Named c) rest) = ((c, [1, 2]), rest)
+nested tokens = throw "none"
+
+lengths : List Tok -> {Except String} UInt64
+lengths ts =
+  let (named, rest) = nested ts
+  length rest
+
+main : (Result String (UInt64, List UInt64), Result String UInt64, Result String UInt64)
+main = (attempt (step [0, 5]), attempt (lengths [Named "x", Other]), attempt (lengths [Other]))

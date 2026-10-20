@@ -1151,7 +1151,10 @@ impl<'a> Lowerer<'a> {
         self.tainted = self.detached;
         let (mut body, repr) =
             self.saturated(&mut scope, &inner, &parameters[taken..], declared)?;
-        if !fits(repr, declared) || self.needs_uniform(repr, declared) {
+        if !fits(repr, declared)
+            || self.needs_uniform(repr, declared)
+            || self.needs_specific(repr, declared)
+        {
             // Ответ перекладывается, как всякая объявленная позиция:
             // проекция плотного поля отдаёт байты, а объявлен указатель.
             let Some(moved) = self.coerced(&mut scope, body, repr, declared)? else {
@@ -1707,6 +1710,65 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Голый указатель туда, где ждут запись **не** единообразной формы:
+    /// указатель держит единообразную (§10 вопрос 235), и форму надо вернуть.
+    ///
+    /// `fits` такой переход пропускает - указатель в указатель, - и ответ
+    /// уезжал единообразной формой под видом названной: разбор вызывающего её
+    /// не узнавал. Найдено демо-компилятором Фазы 9: ветка с `throw` отвечает
+    /// указателем, разбор с ней сводится к указателю, и кортеж функции с
+    /// плоским полем перекладывался в единообразную форму без обратного шага.
+    fn needs_specific(&self, got: Repr, want: Repr) -> bool {
+        got == Repr::Boxed && matches!(want, Repr::Record(_)) && self.needs_uniform(want, got)
+    }
+
+    /// Запись из единообразной формы в форму `tag`: поля разбором, примитивы
+    /// снимаются с обёрток - обратный шаг [`Self::uniformed`].
+    fn specific(
+        &mut self,
+        scope: &mut Scope,
+        value: Expr,
+        tag: CtorId,
+    ) -> Result<Option<Expr>, LowerError> {
+        let described = self.constructors[usize::from(tag.0)].clone();
+        let Some(labels) = described.labels.clone() else {
+            return Ok(None);
+        };
+        if described.binders.iter().any(|fact| !fact.present) {
+            return Ok(None);
+        }
+        let uniform = self.uniform_shape(&labels)?;
+        let fields: Vec<Binding> = labels
+            .iter()
+            .map(|label| Binding {
+                name: label.clone(),
+                local: scope.fresh(),
+                fact: Fact::declared(Mult::One).shaped(Repr::Boxed),
+            })
+            .collect();
+        let mut arguments = Vec::with_capacity(fields.len());
+        for (field, fact) in fields.iter().zip(&described.binders) {
+            let local = Expr::Local(field.local);
+            let Some(argument) = self.coerced(scope, local, Repr::Boxed, fact.repr)? else {
+                return Ok(None);
+            };
+            arguments.push(argument);
+        }
+        Ok(Some(Expr::Match {
+            scrutinee: Box::new(value),
+            consumed: Mult::One,
+            arms: vec![Arm {
+                constructor: uniform,
+                fields,
+                body: Expr::Construct {
+                    constructor: tag,
+                    reuse: None,
+                    arguments,
+                },
+            }],
+        }))
+    }
+
     /// Сверка представлений с перекладкой записи в единообразную форму:
     /// годится как есть - значение, иначе переклад, `None` - перехода нет.
     fn coerced(
@@ -1718,6 +1780,9 @@ impl<'a> Lowerer<'a> {
     ) -> Result<Option<Expr>, LowerError> {
         if self.needs_uniform(got, want) {
             return self.uniformed(scope, value, got);
+        }
+        if let (true, Repr::Record(tag)) = (self.needs_specific(got, want), want) {
+            return self.specific(scope, value, tag);
         }
         if fits(got, want) {
             return Ok(Some(value));

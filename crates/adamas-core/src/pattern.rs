@@ -2157,8 +2157,12 @@ impl Compiler<'_> {
         rows: &[Row],
         split: usize,
     ) -> Result<Family, PatternError> {
-        let Some((data, levels, row_args, arguments)) = data_head(self.signature, &column.ty)
-        else {
+        // Тип колонки бывает **решённой** дыркой: поле `Ok` у разбираемого
+        // `attempt (f True)` есть `?a`, которую вывод разбираемого уже решил
+        // (§10 вопрос 261). Без развёртки вложенный образец отвергался
+        // «разбирать нечего».
+        let ty = crate::conv::whnf_solved(self.signature, self.metas, &column.ty);
+        let Some((data, levels, row_args, arguments)) = data_head(self.signature, &ty) else {
             return Err(PatternError::NotMatchable {
                 ty: ctx.quote(&column.ty).to_string(),
             });

@@ -1,0 +1,29 @@
+-- Вложенный образец по ответу `attempt` (§10 вопрос 261).
+--
+-- Поле `Ok` у разбираемого `attempt (pick n)` есть дырка `?a`: ответ
+-- вычисления-аргумента сводится с ней проверкой, а не элаборацией. Вывод
+-- разбираемого её решает, но компилятор образцов брал тип колонки, не
+-- разворачивая решённую дырку, и вложенный `Ok (Some x)` отвергался
+-- «разбирать нечего: значение имеет тип `?2705`». Без вложенного образца и с
+-- аннотацией разбор проходил. Найдено демо-компилятором Фазы 9.
+
+import Std.Except (Except, throw, attempt)
+
+pick : UInt64 -> {Except String} Option UInt64
+pick n = if n == 0 then throw "zero" else if n == 1 then None else Some (n * 10)
+
+direct : UInt64 -> UInt64
+direct n = case attempt (pick n) of
+  Ok (Some x) -> x
+  Ok None -> 1
+  Err _ -> 0
+
+bound : UInt64 -> UInt64
+bound n =
+  let r = attempt (pick n)
+  case r of
+    Ok (Some x) -> x + 1
+    _ -> 2
+
+main : (UInt64, UInt64, UInt64, UInt64, UInt64)
+main = (direct 0, direct 1, direct 4, bound 5, bound 0)

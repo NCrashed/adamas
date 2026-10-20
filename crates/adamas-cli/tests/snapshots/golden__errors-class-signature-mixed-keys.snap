@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Ошибка: class-signature-mixed-keys.adamas:25:22: неявный аргумент у `member` не выведен: из места употребления его не видно - дайте тип результату (аннотацией `let` или сигнатурой)
+Ошибка: class-signature-mixed-keys.adamas:25:22: несовпадение типов: ожидался `UInt64`, получен `Char`
   main = Sorted.member 'a' numbers
                        ^^^

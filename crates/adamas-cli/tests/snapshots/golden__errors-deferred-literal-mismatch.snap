@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: deferred-literal-mismatch.adamas:14:13: несовпадение типов: ожидался `UInt64`, получен `Char`
+  main = same 'a' (3 : UInt64)
+              ^^^

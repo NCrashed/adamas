@@ -4767,6 +4767,24 @@ impl<'a> Elaborator<'a> {
             let mark = self.metas.mark();
             if !convertible(self.signature, self.metas, self.ctx.size(), &want, &got) {
                 self.metas.rollback(mark);
+                // Литерал не лёг в тип, который решили соседи: `same 'a' (3 :
+                // UInt64)`. Дырка остаётся нерешённой, и наружу выходил
+                // «неявный аргумент не выведен» - про то, что выведено.
+                // Говорит теперь проверка самого литерала, на его месте.
+                let unsolved = matches!(
+                    &*whnf_solved(self.signature, self.metas, &want),
+                    Value::Neutral(Head::Meta(_), _)
+                );
+                if unsolved && !lambda {
+                    let goal = self.ctx.quote(&goal);
+                    if let Err(error) = check_within(&self.ctx, self.metas, &value, &goal) {
+                        return Err(ElabError::Core {
+                            error: Box::new(error),
+                            span: written.span,
+                            names: Names::default(),
+                        });
+                    }
+                }
             }
         }
         Ok(placed)

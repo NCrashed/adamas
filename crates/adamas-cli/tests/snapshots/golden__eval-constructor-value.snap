@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+([Some 1, Some 2], [3, 4], 5, Some 6, [7, 7])

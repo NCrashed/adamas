@@ -1,0 +1,33 @@
+-- Конструктор значением берёт кратности полей у места употребления (§4.1,
+-- решение владельца 2026-10-20).
+--
+-- Поле без написанной кратности линейно, и конструктор значением получал
+-- стрелку `(1 _ : A) -> P`: `map Some xs`, `foldr Cons Nil xs`, `map (MkP 1)
+-- xs` отвергались - ждут `A -> P`. Так делает Linear Haskell, на который §4.1
+-- ссылается: конструктор значением полиморфен по кратности. Здесь кратности
+-- даёт ожидаемая стрелка; недостающие поля разворачиваются лямбдой.
+--
+-- Линейное ожидание оставляет конструктор линейным (`applyOnce`): развёртка
+-- делается только там, где кратности расходятся. Найдено демо-компилятором
+-- Фазы 9 (`foldr TyArrow result fields`).
+
+data P where
+  MkP : UInt64 -> Bool -> P
+
+apply2 : (a -> b -> c) -> a -> b -> c
+apply2 f x y = f x y
+
+applyOnce : ((1 _ : UInt64) -> Option UInt64) -> UInt64 -> Option UInt64
+applyOnce f x = f x
+
+first : P -> UInt64
+first (MkP n _) = n
+
+main : (List (Option UInt64), List UInt64, UInt64, Option UInt64, List UInt64)
+main =
+  ( map Some [1, 2]
+  , foldr Cons Nil [3, 4]
+  , first (apply2 MkP 5 True)
+  , applyOnce Some 6
+  , map first (map (MkP 7) [False, True])
+  )

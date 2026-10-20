@@ -2780,13 +2780,17 @@ impl<'a> Elaborator<'a> {
                 if let Some(scoped) = self.scoped_name(&name.text) {
                     self.produced = Some(Rc::clone(scoped));
                 }
-                self.name(name)
+                let term = self.name(name)?;
+                Ok(self.constructor_value(term, awaited))
             }
             // Спайн собирается циклом. Рекурсия по `callee` уходила на глубину
             // числа аргументов, а его ограничивает только длина файла: предел
             // вложенности парсера на плоское `f a b c …` не тратится, и тысячи
             // аргументов роняли процесс вместо отказа (§10 вопрос 62).
-            ExprKind::App(..) => self.application(expr),
+            ExprKind::App(..) => {
+                let term = self.application(expr)?;
+                Ok(self.constructor_value(term, awaited))
+            }
             ExprKind::Arrow(domain, codomain) => self.arrow(domain, codomain, default, expr.span),
             ExprKind::Pi { binders, codomain } => self.pi(binders, codomain, default),
             ExprKind::Effectful { .. } => self.suspended(expr, default),
@@ -9058,6 +9062,80 @@ impl<'a> Elaborator<'a> {
         Ok(Clause {
             patterns,
             body: body?,
+        })
+    }
+
+    /// Недоприменённый конструктор значением берёт кратности полей у места
+    /// употребления (§4.1, решение владельца 2026-10-20).
+    ///
+    /// Поле без написанной кратности линейно, и конструктор значением - `MkP 1`
+    /// в `map (MkP 1) xs`, `TyArrow` в `foldr TyArrow` - получал стрелку `(1 _
+    /// : A) -> P`, а ждут `A -> P`. Так делает Linear Haskell, на который §4.1
+    /// ссылается: конструктор значением полиморфен по кратности. Здесь
+    /// полиморфизм решает ожидаемый тип: недостающие поля разворачиваются
+    /// лямбдой с кратностями ожидаемой стрелки. Линейная функция принимает и
+    /// неограниченный аргумент, поэтому развёрнутое тело проходит при любой из
+    /// них. Ожидания нет - конструктор остаётся линейным, как прежде; стёртое
+    /// поле не разворачивается: кратности ему не сменить.
+    fn constructor_value(&mut self, term: Term, wanted: Option<&Rc<Value>>) -> Term {
+        let Some(wanted) = wanted else {
+            return term;
+        };
+        let mut head = &term;
+        while let Term::App(callee, _) = head {
+            head = callee;
+        }
+        let constructor = matches!(head, Term::Const(name, ..)
+        if self.signature.lookup(name).is_some_and(|it| {
+            matches!(it.kind, adamas_core::sig::DefinitionKind::Constructor { .. })
+        }));
+        let mut want = whnf_solved(self.signature, self.metas, wanted);
+        if !constructor || !matches!(&*want, Value::Pi(..)) {
+            return term;
+        }
+        // Вывод типа решает дырки - уровни, параметры семейства, - а решать
+        // их здесь некому: кратности читаются, и решённое откатывается, чтобы
+        // дальше элаборация шла как без развёртки.
+        let mark = self.metas.mark();
+        let Some(ty) = self.synthesized(&term) else {
+            self.metas.rollback(mark);
+            return term;
+        };
+        let size = self.ctx.size();
+        let mut mults = Vec::new();
+        let mut have = whnf_solved(self.signature, self.metas, &ty);
+        while let (Value::Pi(field, _, _, _, rest), Value::Pi(binder, _, _, _, more)) =
+            (&*have, &*want)
+        {
+            if field.visibility.is_implicit()
+                || binder.visibility.is_implicit()
+                || field.mult == Mult::Zero
+                || !binder.mult.is_fixed()
+            {
+                break;
+            }
+            mults.push((field.mult, binder.mult));
+            let level = size + u32::try_from(mults.len() - 1).unwrap_or(u32::MAX);
+            let variable = Rc::new(Value::Neutral(Head::Local(Lvl(level)), Vec::new()));
+            let (rest, more) = (rest.clone(), more.clone());
+            have = whnf_solved(
+                self.signature,
+                self.metas,
+                &rest.apply(Rc::clone(&variable)),
+            );
+            want = whnf_solved(self.signature, self.metas, &more.apply(variable));
+        }
+        self.metas.rollback(mark);
+        if mults.iter().all(|(field, binder)| field == binder) {
+            return term;
+        }
+        let count = u32::try_from(mults.len()).unwrap_or(u32::MAX);
+        let applied = (0..count).fold(
+            adamas_core::pattern::shift_free(&term, count),
+            |callee, at| Term::App(Rc::new(callee), Rc::new(Term::var(count - 1 - at))),
+        );
+        mults.iter().rev().fold(applied, |body, (_, binder)| {
+            Term::Lam(*binder, CoreName::from("field"), Rc::new(body))
         })
     }
 

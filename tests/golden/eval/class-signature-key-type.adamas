@@ -1,0 +1,53 @@
+-- Тип коллекции с ключом снаружи функтора (§4.8, решение владельца
+-- 2026-10-20).
+--
+-- Два правила. Тип-член функтора с неявным параметром-классом берёт ключ
+-- первым аргументом: `Sorted.Map Char Bool`. Главный тип модуля - член,
+-- названный его именем, и модуль пишется им: `Sorted UInt64` есть
+-- `Sorted.Sorted UInt64` - буквальная форма примера §4.8 `Map Int String`.
+-- Функции ключ не пишут: его выводит значение.
+
+module Sorted {K : Ord} where
+  data Sorted where
+    Leaf : Sorted
+    Node : Sorted -> K.T -> Sorted -> Sorted
+
+  data Map (v : Type) where
+    Tip : Map v
+    Bin : Map v -> K.T -> v -> Map v -> Map v
+
+  empty : Sorted
+  empty = Leaf
+
+  insert : K.T -> Sorted -> Sorted
+  insert x Leaf = Node Leaf x Leaf
+  insert x (Node l y r) = case compare x y of
+    LT -> Node (insert x l) y r
+    GT -> Node l y (insert x r)
+    EQ -> Node l y r
+
+  size : Sorted -> UInt64
+  size Leaf = 0
+  size (Node l _ r) = size l + 1 + size r
+
+  single : K.T -> v -> Map v
+  single k v = Bin Tip k v Tip
+
+  found : K.T -> Map v -> Option v
+  found x Tip = None
+  found x (Bin l k v r) = case compare x k of
+    LT -> found x l
+    GT -> found x r
+    EQ -> Some v
+
+numbers : Sorted UInt64
+numbers = Sorted.insert 3 (Sorted.insert 5 (Sorted.insert 3 Sorted.empty))
+
+letters : Sorted Char
+letters = Sorted.insert 'a' Sorted.empty
+
+table : Sorted.Map Char Bool
+table = Sorted.single 'x' True
+
+main : (UInt64, UInt64, Option Bool, Option Bool)
+main = (Sorted.size numbers, Sorted.size letters, Sorted.found 'x' table, Sorted.found 'y' table)

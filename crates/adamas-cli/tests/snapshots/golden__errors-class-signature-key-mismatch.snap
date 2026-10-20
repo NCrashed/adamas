@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: class-signature-key-mismatch.adamas:18:11: несовпадение типов: ожидался `Sorted UInt64`, получен `Sorted Char`
+  letters = Sorted.insert 'a' Sorted.empty
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

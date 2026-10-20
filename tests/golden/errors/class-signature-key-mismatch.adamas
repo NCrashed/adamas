@@ -1,0 +1,21 @@
+-- Несовпадение ключей печатается так, как автор пишет тип (§4.8, лог
+-- 2026-10-20): `Sorted UInt64` против `Sorted Char`, а не запись-модуль
+-- параметра `{T = UInt64, #dict = Ord#UInt64}`.
+
+module Sorted {K : Ord} where
+  data Sorted where
+    Leaf : Sorted
+    Node : Sorted -> K.T -> Sorted -> Sorted
+
+  empty : Sorted
+  empty = Leaf
+
+  insert : K.T -> Sorted -> Sorted
+  insert x Leaf = Node Leaf x Leaf
+  insert x (Node l y r) = Node l y r
+
+letters : Sorted UInt64
+letters = Sorted.insert 'a' Sorted.empty
+
+main : UInt64
+main = 0

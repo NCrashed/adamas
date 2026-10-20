@@ -1191,6 +1191,10 @@ pub(crate) struct Elaborator<'a> {
     /// Классы, годные сигнатурой параметра функтора (§3.5), - там, где
     /// таблицы инстансов нет: телескоп функтора её не получает.
     classes: Rc<[Symbol]>,
+    /// Голова применения элаборируется: вставка неявных останавливается
+    /// перед параметром-классом, и ключ ему вправе дать первый аргумент
+    /// (`Sorted.Set UInt64`, §4.8).
+    keying: bool,
     /// Именованные инстансы, выбранные `using`: класс и имя (§4.3).
     ///
     /// Выбор действует на **вставку**, а не на разрешение: словарь для
@@ -1548,6 +1552,7 @@ impl<'a> Elaborator<'a> {
             body_awaited: None,
             instances: None,
             classes: Rc::from(&[][..]),
+            keying: false,
             arrow_row: None,
             awaited: None,
             bare: false,
@@ -5614,6 +5619,21 @@ impl<'a> Elaborator<'a> {
         self.declared(name)
     }
 
+    /// Главный тип модуля - член, названный его именем (§4.8, решение
+    /// владельца 2026-10-20): `HashMap String Int` есть `HashMap.HashMap
+    /// String Int`, и пример §4.8 `Map Int String` пишется буквально. Только
+    /// семейство: модуль с одноимённой функцией остаётся модулем.
+    fn main_type(&self, written: &str) -> Option<Symbol> {
+        let module = self.qualified(written).unwrap_or_else(|| Rc::from(written));
+        let last = module.rsplit('.').next()?;
+        let member: Symbol = Rc::from(format!("{module}.{last}").as_str());
+        matches!(
+            self.signature.lookup(&member).map(|it| &it.kind),
+            Some(DefinitionKind::Data { .. })
+        )
+        .then_some(member)
+    }
+
     /// Объявленное имя: инстанциация с аргументами уровня.
     ///
     /// Аргументы уровня подставляются дырками - это implicit UP со стороны
@@ -5625,6 +5645,12 @@ impl<'a> Elaborator<'a> {
         if self.signature.leaked(&name.text) {
             return Err(ElabError::UnknownName {
                 name: Rc::clone(&name.text),
+                span: name.span,
+            });
+        }
+        if let Some(main) = self.main_type(&name.text) {
+            return self.declared(&ast::Name {
+                text: main,
                 span: name.span,
             });
         }
@@ -5859,7 +5885,10 @@ impl<'a> Elaborator<'a> {
         // Лямбда-голова шагает по нему под своё связывание и назад не кладёт,
         // поэтому спрошенный после спайна он всегда пуст.
         let awaited = self.result.clone();
-        let mut term = self.placed(Position::Inner, |it| it.expr(head, Mult::Many))?;
+        let keying = std::mem::replace(&mut self.keying, true);
+        let head_term = self.placed(Position::Inner, |it| it.expr(head, Mult::Many));
+        self.keying = keying;
+        let mut term = head_term?;
         // Row-аргументы семейства (§3.2, §5.2) - не связывания, а параметры
         // ссылки: снимаются со спайна до остальных и встают в аргументы
         // головы. `arguments` идёт от последнего написанного к первому.
@@ -5978,10 +6007,21 @@ impl<'a> Elaborator<'a> {
         // проходом, когда спайн пройден и домены, возможно, решены.
         let mut postponed: Vec<(Term, &Expr, Rc<Value>)> = Vec::new();
 
+        // Тип-член функтора с классом сигнатурой берёт ключ первым аргументом:
+        // `Sorted.Set UInt64` (§4.8, решение владельца 2026-10-20).
+        let carriers = ty.clone().is_some_and(|it| self.former(&it));
         let mut position = arguments.len();
         for argument in arguments.iter().rev().copied() {
             position -= 1;
             let ahead = literal_ahead.get(position).copied().unwrap_or(false);
+            if carriers {
+                if let Some((carried, rest)) = self.keyed(ty.as_ref(), argument)? {
+                    term = Term::App(Rc::new(term), Rc::new(carried.clone()));
+                    ty = Some(rest);
+                    given.push(carried);
+                    continue;
+                }
+            }
             if let Some(current) = ty.take() {
                 let (inserted, rest) = self.inserted(term, current);
                 term = inserted;
@@ -7447,6 +7487,9 @@ impl<'a> Elaborator<'a> {
             if !binder.visibility.is_implicit() {
                 return (term, ty);
             }
+            if self.keying && self.bridged_shape(domain).is_some() {
+                return (term, ty);
+            }
             let (domain, codomain) = (Rc::clone(domain), codomain.clone());
             // `using` выбирает словарь до всякого поиска: место написания
             // здесь ещё есть, а у дырки его уже не будет.
@@ -7458,6 +7501,81 @@ impl<'a> Elaborator<'a> {
             term = Term::App(Rc::new(term), Rc::new(argument));
             ty = codomain.apply(value);
         }
+    }
+
+    /// Формер типа с ведущим неявным параметром-классом: его телескоп, какой
+    /// ни есть, кончается сортом. `Sorted.Set` - формер, `Sorted.insert` -
+    /// нет; ключ первым аргументом пишется только формеру, функции его
+    /// выводят из значений.
+    fn former(&mut self, ty: &Rc<Value>) -> bool {
+        let mut current = whnf_solved(self.signature, self.metas, ty);
+        let Value::Pi(binder, _, domain, _, _) = &*current else {
+            return false;
+        };
+        if !binder.visibility.is_implicit() || self.bridged_shape(domain).is_none() {
+            return false;
+        }
+        let mut level = self.ctx.size();
+        while let Value::Pi(_, _, _, _, codomain) = &*current {
+            let variable = Rc::new(Value::Neutral(Head::Local(Lvl(level)), Vec::new()));
+            level += 1;
+            current = whnf_solved(self.signature, self.metas, &codomain.apply(variable));
+        }
+        matches!(&*current, Value::Universe(_))
+    }
+
+    /// Поля записи-параметра с классом сигнатурой: носитель и класс словаря.
+    fn bridged_shape(&mut self, domain: &Rc<Value>) -> Option<(CoreField, Rc<Term>, CoreName)> {
+        let shape = self
+            .ctx
+            .quote(&whnf_solved(self.signature, self.metas, domain));
+        let Term::Record(fields) = &shape else {
+            return None;
+        };
+        let [carrier, dictionary] = &fields[..] else {
+            return None;
+        };
+        if &*dictionary.name != DICTIONARY {
+            return None;
+        }
+        let Term::App(class, _) = &*dictionary.ty else {
+            return None;
+        };
+        Some((carrier.clone(), Rc::clone(class), dictionary.name.clone()))
+    }
+
+    /// Написанный тип - ключ неявного параметра-класса: `Sorted.Set UInt64`
+    /// есть `Sorted.Set {T = UInt64, #dict = ?d}`, а словарь `?d : Ord UInt64`
+    /// решает разрешение классов. `None` - следующее связывание не такое, и
+    /// аргумент идёт обычным путём.
+    fn keyed(
+        &mut self,
+        ty: Option<&Rc<Value>>,
+        argument: &Expr,
+    ) -> Result<Option<(Term, Rc<Value>)>, ElabError> {
+        let Some(ty) = ty else {
+            return Ok(None);
+        };
+        let current = whnf_solved(self.signature, self.metas, ty);
+        let Value::Pi(binder, _, domain, _, codomain) = &*current else {
+            return Ok(None);
+        };
+        if !binder.visibility.is_implicit() {
+            return Ok(None);
+        }
+        let Some((carrier, class, dictionary)) = self.bridged_shape(domain) else {
+            return Ok(None);
+        };
+        let codomain = codomain.clone();
+        let key = self.typing(|it| it.expr(argument, Mult::Many))?;
+        let goal = self.ctx.eval(&Term::App(class, Rc::new(key.clone())));
+        let d = self.fresh_meta(&goal);
+        let packed = Term::Object(Rc::from(vec![
+            (carrier.name, Rc::new(key)),
+            (dictionary, Rc::new(d)),
+        ]));
+        let rest = codomain.apply(self.ctx.eval(&packed));
+        Ok(Some((packed, rest)))
     }
 
     /// Неявный параметр функтора с классом сигнатурой (§3.5, §4.4) - запись из

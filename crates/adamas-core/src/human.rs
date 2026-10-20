@@ -230,6 +230,11 @@ impl Humane {
         // их, как прочие неявные, значило бы печатать `Set` вместо `Downs.Set`.
         if let Term::Const(name, _, _) = head {
             if let Some((shown, folded, count)) = functor_member(name, &arguments) {
+                let shown = if main_type(&shown) {
+                    Name::from(&shown[..shown.rfind('.').unwrap_or(shown.len())])
+                } else {
+                    shown
+                };
                 let head = Term::Const(shown, Rc::from([]), Args::none());
                 let own = implicits(name).saturating_sub(count);
                 let kept = arguments[folded..count]
@@ -238,7 +243,7 @@ impl Humane {
                     .copied()
                     .collect::<Vec<_>>();
                 return kept.into_iter().fold(head, |callee, argument| {
-                    Term::App(Rc::new(callee), Rc::new(self.term(argument)))
+                    Term::App(Rc::new(callee), Rc::new(self.term(keyed(argument))))
                 });
             }
         }
@@ -246,9 +251,19 @@ impl Humane {
             Term::Const(name, _, _) => implicits(name),
             _ => 0,
         };
-        let head = self.term(head);
+        let head = match head {
+            Term::Const(name, levels, args) if main_type(name) => {
+                let module = &name[..name.rfind('.').unwrap_or(name.len())];
+                self.term(&Term::Const(
+                    Name::from(module),
+                    Rc::clone(levels),
+                    args.clone(),
+                ))
+            }
+            _ => self.term(head),
+        };
         arguments[hidden..].iter().fold(head, |callee, argument| {
-            Term::App(Rc::new(callee), Rc::new(self.term(argument)))
+            Term::App(Rc::new(callee), Rc::new(self.term(keyed(argument))))
         })
     }
 
@@ -472,6 +487,29 @@ fn hole(term: &Term) -> bool {
         head = callee;
     }
     matches!(head, Term::Meta(_))
+}
+
+/// Аргумент-модуль параметра с классом сигнатурой печатается своим ключом:
+/// `{T = UInt64, #dict = Ord#UInt64}` автор пишет `UInt64` (§4.8, лог
+/// 2026-10-20). Имя поля - `adamas_elab::expr::DICTIONARY`, ядру его не
+/// импортировать.
+fn keyed(argument: &Term) -> &Term {
+    match argument {
+        Term::Object(fields) => match &fields[..] {
+            [(carrier, key), (dictionary, _)] if &**carrier == "T" && &**dictionary == "#dict" => {
+                key
+            }
+            _ => argument,
+        },
+        _ => argument,
+    }
+}
+
+/// Главный тип модуля - член, названный его именем: `Sorted.Sorted`
+/// печатается `Sorted`, как и пишется (§4.8, лог 2026-10-20).
+fn main_type(name: &str) -> bool {
+    let mut segments = name.rsplit('.');
+    matches!((segments.next(), segments.next()), (Some(last), Some(module)) if last == module)
 }
 
 #[cfg(test)]

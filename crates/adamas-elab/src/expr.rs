@@ -1300,9 +1300,7 @@ fn mentions_constant(term: &Term, name: &str) -> bool {
         Term::Lam(_, _, body) => recur(body),
         Term::Pi(_, _, domain, _, codomain) => recur(domain) || recur(codomain),
         Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || recur(body),
-        Term::Split(split) => {
-            recur(&split.scrutinee) || recur(&split.motive) || recur(&split.body)
-        }
+        Term::Split(split) => recur(&split.scrutinee) || recur(&split.motive) || recur(&split.body),
         Term::Case(case) => {
             recur(&case.scrutinee)
                 || recur(&case.motive)
@@ -9063,17 +9061,6 @@ impl<'a> Elaborator<'a> {
         })
     }
 
-    /// Дырки тела клаузы решаются в контексте клаузы, пока переменные
-    /// образцов - переменные.
-    ///
-    /// Элаборация имплиситы аргумента не решает - `stepped` откатывает свою
-    /// проверку, - и решает их ядро, проверяя дерево разбора. А там переменная
-    /// ветки-переменной за веткой-конструктором подставлена уточнённым
-    /// разбираемым: `g Nil = Nil; g current = reverse current` проверялось с
-    /// `current = Cons #1 #0`, спайн дырки `a` у `reverse` переставал быть
-    /// паттерном Миллера, и программа отвергалась. Здесь та же проверка тела
-    /// идёт раньше, по связываниям; не сошлась - откат, и решает, как прежде,
-    /// ядро.
     /// Члены объявляемой группы, которых терм называет: тройки для [`assuming`].
     fn named_members(&self, term: &Term) -> Vec<(Symbol, u32, Term)> {
         self.group
@@ -9105,6 +9092,17 @@ impl<'a> Elaborator<'a> {
         infer(&ctx, self.metas, Mult::Many, term)
     }
 
+    /// Дырки тела клаузы решаются в контексте клаузы, пока переменные
+    /// образцов - переменные.
+    ///
+    /// Элаборация имплиситы аргумента не решает - `stepped` откатывает свою
+    /// проверку, - и решает их ядро, проверяя дерево разбора. А там переменная
+    /// ветки-переменной за веткой-конструктором подставлена уточнённым
+    /// разбираемым: `g Nil = Nil; g current = reverse current` проверялось с
+    /// `current = Cons #1 #0`, спайн дырки `a` у `reverse` переставал быть
+    /// паттерном Миллера, и программа отвергалась. Здесь та же проверка тела
+    /// идёт раньше, по связываниям; не сошлась - откат, и решает, как прежде,
+    /// ядро.
     fn solved_here(&mut self, body: &Term, result: Option<&Rc<Value>>) {
         let Some(result) = result else {
             return;

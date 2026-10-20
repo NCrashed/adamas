@@ -1,0 +1,31 @@
+-- Семейство с детьми в массиве (§4.11, лог 2026-10-20).
+--
+-- Узел HAMT - маска и массив детей того же типа. Объявить его не давали две
+-- вещи. (1) Элемент массива живёт в `Type 0`, и вхождение `Rose v` в `Array`
+-- заземляет уровень самого семейства; обобщённое до конструкторов, оно
+-- уносило лишний параметр уровня - «`Node` принимает 1 параметров уровня,
+-- передано 0». (2) Позитивность не знала примитива и звала вхождение
+-- отрицательным. Массив кладёт элементы в ячейки - позиция положительная, как
+-- у параметра `List`.
+
+data Rose (v : Type) where
+  Leaf : v -> Rose v
+  Node : v -> (ω n : UInt64) -> Array n (Rose v) -> Rose v
+
+mutual
+  totalFrom : (ω n : UInt64) -> Array n (Rose UInt64) -> UInt64 -> UInt64
+  totalFrom n children i = case decide (ltUInt64 i n) of
+    No _ -> 0
+    Yes _ -> total (arrayIndex children i) + totalFrom n children (i + 1)
+
+  total : Rose UInt64 -> UInt64
+  total (Leaf x) = x
+  total (Node x n children) = x + totalFrom n children 0
+
+tree : Rose UInt64
+tree =
+  let kids = arraySet (arraySet (arrayNew 2 (Leaf 0)) 0 (Leaf 10)) 1 (Node 20 1 (arrayNew 1 (Leaf 300)))
+  Node 1 2 kids
+
+main : UInt64
+main = total tree

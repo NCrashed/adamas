@@ -2508,6 +2508,17 @@ fn positive_seen<'a, 'g>(
                     }
                     None
                 }
+                // Массив кладёт элементы в ячейки, и элемент стоит в нём
+                // положительно - как параметр `List`, только объявления у
+                // примитива нет, и спросить его не о чем (§4.11). Длина группу
+                // не называет вовсе: она слово. Дерево с детьми в массиве -
+                // узел HAMT (лог 2026-10-20).
+                Term::Prim(Prim::Array) if arguments.len() == 2 => {
+                    if mentions_any(signature, group, arguments[0]) {
+                        return negative(mentioned_by(signature, group, other));
+                    }
+                    positive_seen(signature, cycling, group, params, depth, arguments[1], seen)
+                }
                 // Тип упомянут, но позиция ещё не разобрана: если голова -
                 // определение, смотрим на то, чем она является.
                 Term::Const(name, _, _) if arguments.is_empty() => {

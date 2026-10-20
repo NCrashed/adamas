@@ -3118,6 +3118,7 @@ fn alias_result(metas: &Metas, ty: &Term) -> Option<LevelMeta> {
 /// пересчитанный там ответ разошёлся бы с принятым здесь.
 fn postponed(member: &Member, ty: &Term) -> bool {
     let Member::Data {
+        name,
         params,
         constructors,
         ..
@@ -3126,9 +3127,44 @@ fn postponed(member: &Member, ty: &Term) -> bool {
         return false;
     };
     universe_indexed(ty, *params)
-        || constructors
-            .iter()
-            .any(|constructor| lifts_a_type(&constructor.ty, *params))
+        || constructors.iter().any(|constructor| {
+            lifts_a_type(&constructor.ty, *params) || boxes_itself(&constructor.ty, name)
+        })
+}
+
+/// Кладёт ли конструктор своё семейство в `Array` либо `Simd`: дерево с
+/// детьми в массиве (узел HAMT, лог 2026-10-20).
+///
+/// Элемент массива живёт в `Type 0`, и такое вхождение заземляет уровень
+/// самого семейства. Обобщённое до конструкторов, оно уносило параметр
+/// уровня, которого конструктор уже не имел: `data T (v : Type)` с полем
+/// `Array n (T v)` отвергалось «`B` принимает 1 параметров уровня, передано
+/// 0». Путь добавочный: такое семейство раньше не объявлялось вовсе.
+fn boxes_itself(ty: &Term, family: &str) -> bool {
+    match ty {
+        Term::Pi(_, _, domain, _, codomain) => {
+            boxes_itself(domain, family) || boxes_itself(codomain, family)
+        }
+        Term::App(callee, element) => {
+            let boxed = matches!(&**callee, Term::App(head, _)
+                if matches!(&**head, Term::Prim(crate::prim::Prim::Array | crate::prim::Prim::Simd)));
+            (boxed && names_family(element, family))
+                || boxes_itself(callee, family)
+                || boxes_itself(element, family)
+        }
+        _ => false,
+    }
+}
+
+/// Называет ли тип семейство `family` - головой применения.
+fn names_family(term: &Term, family: &str) -> bool {
+    match term {
+        Term::Const(found, ..) => &**found == family,
+        Term::App(callee, argument) => {
+            names_family(callee, family) || names_family(argument, family)
+        }
+        _ => false,
+    }
 }
 
 /// Несёт ли конструктор собственный уровень сверх параметров семейства.

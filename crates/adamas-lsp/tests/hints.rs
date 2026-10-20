@@ -282,10 +282,10 @@ fn a_link_in_another_file_points_into_that_file() {
     const BORROWED: &str = "\
 import Prelude
 import Cmp.Truth (Bool)
-import Cmp.Words (isBig)
+import Cmp.Words (listed)
 
-echo : UInt64 -> Bool
-echo n = isBig n
+echo : UInt64 -> Prelude.List UInt64
+echo n = listed n
 ";
     let (uri, document) = checked("borrowed.adamas", BORROWED);
     let found = lines(&uri, &document, whole());
@@ -298,7 +298,7 @@ echo n = isBig n
         "звено обязано вести в свой файл, а не в этот: {status}"
     );
     assert!(
-        status.contains("Cmp.Words.isBig@"),
+        status.contains("Cmp.Words.listed@"),
         "звено обязано быть названо: {status}"
     );
 }

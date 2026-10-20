@@ -51,3 +51,10 @@ classify n = n
 sumDown : UInt64 -> UInt64 -> UInt64
 sumDown 0 acc = acc
 sumDown n acc = sumDown (subUInt64 n 1) (addUInt64 acc n)
+
+-- Список из одного элемента аллоцирует по-настоящему: ячейка `Cons` с полями.
+-- На нём подсказки редактора ведут звено цепочки в этот файл
+-- (`adamas-lsp/tests`). Прежде эту роль играл `isBig` - через ложный бокс
+-- насыщенного примитива (§10 вопрос 268).
+listed : UInt64 -> Prelude.List UInt64
+listed n = Prelude.Cons n Prelude.Nil

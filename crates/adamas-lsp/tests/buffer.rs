@@ -116,9 +116,17 @@ fn an_edit_drops_what_belonged_to_the_old_text() {
 /// URI. Без этой пары звено цепочки из подключённого файла показать нечем.
 #[test]
 fn a_buffer_translates_a_module_path_into_a_file() {
-    let text = std::fs::read_to_string(corpus().join("library.adamas"))
-        .unwrap_or_else(|error| panic!("фикстура корпуса обязана читаться: {error}"));
-    let document = checked("library.adamas", &text);
+    // Заготовка, а не `library.adamas`: аллокации подключённых модулей той
+    // фикстуры были ложным боксом примитива (§10 вопрос 268), а `listed` -
+    // настоящая ячейка `Cons`.
+    const BORROWED: &str = "\
+import Prelude
+import Cmp.Words (listed)
+
+echo : UInt64 -> Prelude.List UInt64
+echo n = listed n
+";
+    let document = checked("borrowed.adamas", BORROWED);
     let signature = document
         .signature()
         .expect("буфер обязан помнить сигнатуру прохода");

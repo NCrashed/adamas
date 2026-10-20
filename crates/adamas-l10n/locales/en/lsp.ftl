@@ -27,6 +27,7 @@ lsp-blame-partial = { $name } partially
 lsp-blame-operation = operation { $name }
 lsp-blame-handler = handler { $effect }
 lsp-blame-opaque = { $name } without a body
+lsp-blame-array = array block: { $name }
 lsp-bad-params = parameters not parsed: { $error }
 lsp-unsupported = method `{ $method }` is not supported by the server
 lsp-notification = notification `{ $method }` not handled: { $error }

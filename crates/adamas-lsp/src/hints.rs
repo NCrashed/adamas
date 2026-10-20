@@ -622,5 +622,6 @@ fn shortly(source: &Source) -> String {
         Source::Resumption { effect, .. } => adamas_l10n::tr!("lsp-blame-handler", effect = effect),
         Source::Boxing => adamas_l10n::tr!("lsp-hints-15").to_owned(),
         Source::Opaque(name) => adamas_l10n::tr!("lsp-blame-opaque", name = name),
+        Source::Array(name) => adamas_l10n::tr!("lsp-blame-array", name = name),
     }
 }

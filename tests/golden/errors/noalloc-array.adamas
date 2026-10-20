@@ -1,0 +1,10 @@
+-- `@noalloc` видит блок массива (§5.1, §10 вопрос 268).
+--
+-- Насыщенный примитив под `@noalloc` законен - кроме операций массива,
+-- заводящих блок в куче Perceus: `arrayNew`, `arrayBytes`, `arraySet` (копия
+-- при общем владении), `arrayRead` (ячейка ответа). Ближайший проходящий сосед
+-- - арифметика: `programs/noalloc-machine-numbers.adamas`.
+
+@noalloc
+fresh : UInt64 -> Array 4 UInt64
+fresh c = arrayNew 4 c

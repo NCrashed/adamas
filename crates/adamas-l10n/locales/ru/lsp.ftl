@@ -27,6 +27,7 @@ lsp-blame-partial = { $name } частично
 lsp-blame-operation = операция { $name }
 lsp-blame-handler = хендлер { $effect }
 lsp-blame-opaque = { $name } без тела
+lsp-blame-array = блок массива: { $name }
 lsp-bad-params = параметры не разобраны: { $error }
 lsp-unsupported = метод `{ $method }` сервером не поддержан
 lsp-notification = уведомление `{ $method }` не обработано: { $error }

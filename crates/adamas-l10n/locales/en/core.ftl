@@ -95,6 +95,7 @@ alloc-partial = applies `{ $name }` partially, and the missing arguments wait in
 alloc-operation = calls operation `{ $name }`: whether it allocates is decided by the branch of the handler that intercepts it, and that handler is unknown at the call site. The tail-resumptive verdict is computed at the `handle` site, and that site is not written here
 alloc-resumption = installs handler `{ $effect }`, whose branch `{ $operation }` calls `resume` outside tail position: the continuation has to be captured into a heap segment. A tail branch leaves the continuation alone, an abortive one discards it - both are fine
 alloc-multi-shot = installs `handleMulti` over `{ $effect }`: an ω-resumption does not promise "at most once", and the segment is copied to the heap on every resumption
+alloc-array = calls `{ $name }`, which places an array block on the Perceus heap: `arraySet` copies it when shared, `arrayRead` builds its answer cell
 alloc-opaque = calls `{ $name }`, which has no body and no `@noalloc`: across the boundary the obligation is declared, not inferred from someone else's code
 alloc-boxing = applies a function value: the argument travels in a closure slot, a slot holds a pointer, and a flat argument is boxed at this boundary. The verdict has no types, so every such application counts as allocating
 alloc-call = calls `{ $name }`, which allocates

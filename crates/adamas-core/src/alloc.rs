@@ -126,6 +126,10 @@ pub enum Source {
     /// сторону, что прочие пробелы, - отвергается лишнее, не принимается
     /// аллоцирующее.
     Boxing,
+    /// Операция массива, заводящая блок в куче: `arrayNew`, `arrayBytes`,
+    /// `arraySet` (при общем владении копирует блок), `arrayRead` (строит
+    /// `MkRead`).
+    Array(Name),
     /// Вызов определения без тела, на котором обязательство не объявлено.
     Opaque(Name),
     /// Вызов определения, чей вердикт отрицателен.
@@ -229,6 +233,7 @@ impl fmt::Display for Blame {
                 effect,
                 operation: None,
             } => tr!("alloc-multi-shot", effect = effect),
+            Source::Array(name) => tr!("alloc-array", name = name),
             Source::Opaque(name) => tr!("alloc-opaque", name = name),
             Source::Boxing => tr!("alloc-boxing"),
             Source::Call(name) => tr!("alloc-call", name = name),
@@ -439,6 +444,19 @@ impl Walk<'_> {
                         self.route.truncate(before);
                         self.spine(&arguments, |_| false);
                     }
+                    // Насыщенный примитив - инструкция, а не вызов замыкания:
+                    // `addUInt64 c 1` понижается в `adamas_add_UInt64`
+                    // (§10 вопрос 268). Кучу трогают только операции массива,
+                    // заводящие блок; недонасыщенный примитив - замыкание.
+                    Term::Prim(prim) => {
+                        let arity = prim_arity(self.signature, *prim);
+                        if arguments.len() < arity {
+                            self.record(Source::Closure);
+                        } else if let Some(name) = array_allocating(*prim) {
+                            self.record(Source::Array(name));
+                        }
+                        self.spine(&arguments, |_| false);
+                    }
                     other => {
                         // Голова - значение: вызов идёт через `adamas_apply`,
                         // аргумент уходит слотом замыкания, и плоский на этой
@@ -641,4 +659,24 @@ fn telescope(ty: &Term) -> usize {
         current = codomain;
     }
     found
+}
+
+/// Сколько аргументов насыщает примитив: связывания его типа, неявные тоже -
+/// элаборация вставляет их в спайн.
+fn prim_arity(signature: &Signature, prim: crate::prim::Prim) -> usize {
+    let ty = crate::eval::quote(0, &crate::check::prim_type(signature, prim));
+    telescope(&ty)
+}
+
+/// Операция массива, заводящая блок в куче, - её имя для отказа.
+fn array_allocating(prim: crate::prim::Prim) -> Option<Name> {
+    use crate::prim::{ArrayOp, Prim};
+    let name = match prim {
+        Prim::Over(ArrayOp::New) => "arrayNew",
+        Prim::Over(ArrayOp::Bytes(_)) => "arrayBytes",
+        Prim::Over(ArrayOp::Set) => "arraySet",
+        Prim::Over(ArrayOp::Read) => "arrayRead",
+        _ => return None,
+    };
+    Some(Name::from(name))
 }

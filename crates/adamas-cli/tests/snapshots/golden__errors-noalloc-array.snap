@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: noalloc-array.adamas:9:1: `fresh` объявлена `@noalloc`, но зовёт `arrayNew`, а та заводит блок массива в куче Perceus: `arraySet` - копию при общем владении, `arrayRead` - ячейку ответа
+  fresh : UInt64 -> Array 4 UInt64
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

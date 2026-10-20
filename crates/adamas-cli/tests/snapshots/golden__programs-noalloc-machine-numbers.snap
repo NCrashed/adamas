@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+noalloc-machine-numbers.adamas: проверено, объявлений 4

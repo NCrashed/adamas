@@ -1,0 +1,25 @@
+-- `@noalloc` над машинными числами (§5.1, §10 вопрос 268).
+--
+-- Насыщенный примитив - инструкция: `addUInt64 c 1` понижается в
+-- `adamas_add_UInt64`, без замыкания и без бокса. Было: «применяет
+-- значение-функцию… боксируется», и под `@noalloc` не проходила даже
+-- арифметика. Полиморфная функция со словарём-переменной ничего не строит и
+-- проходила и прежде. Арифметика через словарь известного инстанса (`c + 1`)
+-- пока отвергается: `errors/noalloc-class-dictionary.adamas`. Найдено
+-- примером прошивки замка.
+
+@noalloc
+inc : UInt64 -> UInt64
+inc c = addUInt64 c 1
+
+@noalloc
+same : UInt8 -> Bool
+same c = eqUInt8 c c
+
+@noalloc
+checksum : UInt8 -> UInt8 -> UInt16 -> UInt16
+checksum a b c = addUInt16 (addUInt16 (uInt8ToUInt16 a) (uInt8ToUInt16 b)) c
+
+@noalloc
+sum : {Add a} => a -> a -> a
+sum x y = x + y

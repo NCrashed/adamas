@@ -70,7 +70,7 @@ use crate::meta::{Generalization, Metas, zonk_term};
 use crate::mult::Mult;
 use crate::row::{Row, RowVar, Tail};
 use crate::term::{Args, Name, Term};
-use crate::value::{Env, Value};
+use crate::value::{Env, Lvl, Value};
 
 /// Невыразимое имя элиминатора scope, держащего ресурс (§3.3).
 ///
@@ -2582,7 +2582,7 @@ impl Signature {
             let Some(body) = &definition.body else {
                 continue;
             };
-            let normal = crate::eval::quote(0, &crate::ctx::Ctx::new(self).eval(body));
+            let normal = normal_keeping(self, body, &Env::default(), 0);
             let checked = Definition {
                 body: Some(normal),
                 ..definition
@@ -3652,4 +3652,105 @@ fn hole_located(
         .rev()
         .fold(error, TypeError::in_frame)
         .in_frame(top)
+}
+
+/// Нормальная форма тела для перепроверки (`recheck_group`), но `let`, чьё
+/// значение **исполняет** эффект, остаётся `let` (§10 вопрос 264).
+///
+/// Нормализация раскрывает `let` подстановкой, и для чистого значения это
+/// безвредно. Эффектное - `let n = ask` - уезжало на место употребления: в
+/// `logged (record n)` операция оказывалась внутри аргумента-вычисления и
+/// проверялась под его окружающей - «эффекты `{Ask}` не погашены: вокруг
+/// разрешено `{Log}`», - а упомянутая дважды исполнялась бы дважды. Такой
+/// `let` сохраняется, его тело нормализуется под нейтральной переменной.
+/// Остальное - как прежде, нормальной формой: ради неё перепроверка и
+/// заведена (редексы решений дырок, поднятый разбор).
+fn normal_keeping(signature: &Signature, term: &Term, env: &Env, depth: u32) -> Term {
+    if !keeps_let(signature, term) {
+        return crate::eval::quote(depth, &eval(env, term));
+    }
+    let keep = |inner: &Term| Rc::new(normal_keeping(signature, inner, env, depth));
+    let under = |body: &Term| {
+        let bound = env.extend(Value::var(Lvl(depth)));
+        Rc::new(normal_keeping(signature, body, &bound, depth + 1))
+    };
+    match term {
+        Term::Let(mult, name, ty, value, body) if performs(signature, value) => {
+            Term::Let(*mult, name.clone(), keep(ty), keep(value), under(body))
+        }
+        Term::Let(_, _, _, value, body) => {
+            normal_keeping(signature, body, &env.extend(eval(env, value)), depth)
+        }
+        Term::Lam(mult, name, body) => Term::Lam(*mult, name.clone(), under(body)),
+        Term::App(callee, argument) => Term::App(keep(callee), keep(argument)),
+        Term::Case(case) => Term::Case(Rc::new(crate::term::Case {
+            scrutinee: keep(&case.scrutinee),
+            motive: keep(&case.motive),
+            branches: case
+                .branches
+                .iter()
+                .map(|branch| crate::term::Branch {
+                    constructor: branch.constructor.clone(),
+                    body: keep(&branch.body),
+                })
+                .collect(),
+            ..(**case).clone()
+        })),
+        Term::Split(split) => Term::Split(Rc::new(
+            split.map(|inner| normal_keeping(signature, inner, env, depth)),
+        )),
+        Term::Project(record, field) => Term::Project(keep(record), field.clone()),
+        _ => crate::eval::quote(depth, &eval(env, term)),
+    }
+}
+
+/// Стоит ли где-нибудь в терме `let`, который нормализация обязана сохранить.
+fn keeps_let(signature: &Signature, term: &Term) -> bool {
+    let recur = |inner: &Term| keeps_let(signature, inner);
+    match term {
+        Term::Let(_, _, _, value, body) => {
+            performs(signature, value) || recur(value) || recur(body)
+        }
+        Term::Lam(_, _, body) => recur(body),
+        Term::App(callee, argument) => recur(callee) || recur(argument),
+        Term::Case(case) => {
+            recur(&case.scrutinee) || case.branches.iter().any(|branch| recur(&branch.body))
+        }
+        Term::Split(split) => recur(&split.scrutinee) || recur(&split.body),
+        Term::Project(record, _) => recur(record),
+        _ => false,
+    }
+}
+
+/// Исполняет ли значение эффект: применение операции либо функции, чья
+/// стрелка на последнем применённом аргументе несёт непустую row. Голова-
+/// переменная эффектов по терму не показывает и считается чистой - как и до
+/// этой правки.
+fn performs(signature: &Signature, value: &Term) -> bool {
+    let mut head = value;
+    let mut applied = 0;
+    while let Term::App(callee, _) = head {
+        head = callee;
+        applied += 1;
+    }
+    let Term::Const(name, ..) = head else {
+        return false;
+    };
+    let Some(definition) = signature.lookup(name) else {
+        return false;
+    };
+    if matches!(definition.kind, DefinitionKind::Operation { .. }) {
+        return true;
+    }
+    let mut ty = &definition.ty;
+    for _ in 0..applied {
+        let Term::Pi(_, _, _, row, codomain) = ty else {
+            return false;
+        };
+        if !row.is_empty() {
+            return true;
+        }
+        ty = codomain;
+    }
+    false
 }

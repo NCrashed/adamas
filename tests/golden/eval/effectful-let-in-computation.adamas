@@ -1,0 +1,34 @@
+-- Эффектное значение `let`, названное внутри аргумента-вычисления (§10
+-- вопрос 264).
+--
+-- `let n = ask` исполняет операцию один раз, а `logged (record n)` передаёт
+-- `n` в вычисление под своим хендлером. Отвергалось «эффекты `{Ask}` не
+-- погашены: вокруг разрешено `{Log}`» - на строке `let`. Перепроверка тела
+-- идёт по нормальной форме, а нормализация раскрывала `let` подстановкой: `n`
+-- становилось `ask MkUnit` внутри аргумента. Эффектный `let` теперь
+-- сохраняется. Ответ показывает и смысл: `ask` спрошен один раз, а запись
+-- видит именно его. Найдено примером прошивки замка.
+
+effect Ask where
+  ask : UInt16
+
+effect Log where
+  record : UInt16 -> Unit
+
+logged : ({Log} a) -> {Ask} (a, UInt16)
+logged k = handle k with
+  state 0
+  return v -> (v, state)
+  record n -> resume MkUnit (state + n)
+
+outside : {Ask} ((Unit, UInt16), UInt16)
+outside =
+  let n : UInt16 = ask
+  let both = logged (record n)
+  (both, n)
+
+main : (((Unit, UInt16), UInt16), UInt16)
+main = handle outside with
+  state 0
+  return v -> (v, state)
+  ask -> resume (40 + state) (state + 1)

@@ -1279,6 +1279,38 @@ impl Postponed {
     }
 }
 
+/// Называет ли терм константу.
+fn mentions_constant(term: &Term, name: &str) -> bool {
+    let recur = |inner: &Term| mentions_constant(inner, name);
+    match term {
+        Term::Const(found, ..) => **found == *name,
+        Term::Var(_)
+        | Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Prim(_)
+        | Term::Meta(_) => false,
+        Term::Project(record, _) => recur(record),
+        Term::App(callee, argument) => recur(callee) || recur(argument),
+        Term::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
+        Term::With(base, fields) => recur(base) || fields.iter().any(|(_, value)| recur(value)),
+        Term::Record(fields) | Term::Row(fields) => {
+            fields.iter().any(|field| recur(&field.ty)) || fields.tail.as_deref().is_some_and(recur)
+        }
+        Term::Lam(_, _, body) => recur(body),
+        Term::Pi(_, _, domain, _, codomain) => recur(domain) || recur(codomain),
+        Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || recur(body),
+        Term::Split(split) => {
+            recur(&split.scrutinee) || recur(&split.motive) || recur(&split.body)
+        }
+        Term::Case(case) => {
+            recur(&case.scrutinee)
+                || recur(&case.motive)
+                || case.branches.iter().any(|branch| recur(&branch.body))
+        }
+    }
+}
+
 /// Копия сигнатуры, где члены объявляемой группы **предположены** - как у
 /// `self_levels`. Проверка тела до объявления иначе спотыкается на ссылке на
 /// себя раньше, чем дойдёт до того, что стоит в её аргументах. `None` -
@@ -4287,7 +4319,7 @@ impl<'a> Elaborator<'a> {
     /// не выводится» (§10 вопрос 112). Настоящее суждение придёт позже, со
     /// своей кратностью.
     fn synthesized(&mut self, term: &Term) -> Option<Rc<Value>> {
-        if let Ok((ty, _)) = infer(&self.ctx.speculating(), self.metas, Mult::Many, term) {
+        if let Ok((ty, _)) = self.assumed_infer(term, true) {
             return Some(ty);
         }
         let mut arguments = Vec::new();
@@ -8182,7 +8214,7 @@ impl<'a> Elaborator<'a> {
             // xs` - несовпадение типов в сложении, а не «у лямбды его нет»
             // (§10 вопрос 217).
             if !matches!(value, Term::Lam(..)) {
-                if let Err(error) = infer(&self.ctx, self.metas, Mult::Many, &value) {
+                if let Err(error) = self.assumed_infer(&value, false) {
                     return Err(ElabError::Core {
                         error: Box::new(error),
                         span: binding.body.span,
@@ -8474,7 +8506,7 @@ impl<'a> Elaborator<'a> {
     /// откатывается: решать за настоящую проверку она не вправе.
     fn held_type(&mut self, term: &Term) -> Option<Rc<Value>> {
         let mark = self.metas.mark();
-        if let Ok((ty, _)) = infer(&self.ctx.speculating(), self.metas, Mult::Many, term) {
+        if let Ok((ty, _)) = self.assumed_infer(term, true) {
             return Some(ty);
         }
         self.metas.rollback(mark);
@@ -9042,6 +9074,37 @@ impl<'a> Elaborator<'a> {
     /// паттерном Миллера, и программа отвергалась. Здесь та же проверка тела
     /// идёт раньше, по связываниям; не сошлась - откат, и решает, как прежде,
     /// ядро.
+    /// Члены объявляемой группы, которых терм называет: тройки для [`assuming`].
+    fn named_members(&self, term: &Term) -> Vec<(Symbol, u32, Term)> {
+        self.group
+            .iter()
+            .filter(|member| mentions_constant(term, &member.name))
+            .map(|member| {
+                let arity = u32::try_from(member.levels.len()).unwrap_or(u32::MAX);
+                (Rc::clone(&member.name), arity, (*member.ty).clone())
+            })
+            .collect()
+    }
+
+    /// Вывод типа терма, где члены объявляемой группы **предположены** (§10
+    /// вопрос 259): в сигнатуре их ещё нет, и ссылка на себя или соседа
+    /// внутри значения - `let y = g n + 1` - отвергалась «определение `g` не
+    /// найдено». Голову-члена знал и прежний путь ([`Self::synthesized`]);
+    /// член в аргументе - нет.
+    fn assumed_infer(
+        &mut self,
+        term: &Term,
+        speculating: bool,
+    ) -> Result<(Rc<Value>, adamas_core::ctx::Usage), adamas_core::error::TypeError> {
+        let assumed = assuming(self.signature, &self.named_members(term));
+        let ctx = match &assumed {
+            Some(signature) => adamas_core::ctx::Ctx::attach(signature, self.ctx.detach()),
+            None => self.ctx.clone(),
+        };
+        let ctx = if speculating { ctx.speculating() } else { ctx };
+        infer(&ctx, self.metas, Mult::Many, term)
+    }
+
     fn solved_here(&mut self, body: &Term, result: Option<&Rc<Value>>) {
         let Some(result) = result else {
             return;
@@ -9049,8 +9112,21 @@ impl<'a> Elaborator<'a> {
         if adamas_core::meta::unsolved_term_meta(self.metas, body).is_none() {
             return;
         }
+        // Тело, зовущее члена объявляемой группы, проверяется по копии
+        // сигнатуры, где группа **предположена** (как у `class::resolve`):
+        // в настоящей члена ещё нет, проверка отказывала на нём и откатывала
+        // всё решённое - и мотив `if` в клаузе-переменной `mutual` доезжал до
+        // ядра нерешённым, где его спайн уже уточнён (§10 вопрос 259).
+        let assumed = assuming(self.signature, &self.named_members(body));
         let mark = self.metas.mark();
-        if check(&self.ctx, self.metas, Mult::Many, body, result).is_err() {
+        let outcome = match &assumed {
+            Some(signature) => {
+                let ctx = adamas_core::ctx::Ctx::attach(signature, self.ctx.detach());
+                check(&ctx, self.metas, Mult::Many, body, result)
+            }
+            None => check(&self.ctx, self.metas, Mult::Many, body, result),
+        };
+        if outcome.is_err() {
             self.metas.rollback(mark);
         }
     }

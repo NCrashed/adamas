@@ -9,12 +9,21 @@
 //! Авторское форматирование не сохраняется - решение записано в decision log
 //! 2026-08-25 вместе с выбором AST против lossless CST. Отсюда договор, который
 //! проверяется тестами: **`parse(print(m))` даёт `m` с точностью до спанов**, и
-//! `print` идемпотентна. Не сохраняются: переносы строк, выравнивание пробелами,
-//! лишние скобки. Сохраняется всё, что несёт дерево, включая написание литерала
-//! (`0xff` не превращается в `255`).
+//! `print` идемпотентна. Не сохраняются: выравнивание пробелами, лишние скобки
+//! и переносы строк вне трёх форм ниже. Сохраняется всё, что несёт дерево,
+//! включая написание литерала (`0xff` не превращается в `255`).
 //!
-//! Переносов строк печать не делает: длинное применение печатается одной
-//! строкой.
+//! # Переносы
+//!
+//! Ширины строки у печати нет, и сама она строк не рвёт: длинное применение
+//! печатается одной строкой. Три формы рвёт **автор** (решение владельца
+//! 2026-10-20, как у ormolu): `else` цепочки `if`, элементы списка и
+//! кортежа, оператор цепочки. Стоял в исходнике перевод строки между
+//! соседями - форма печатается разорванной, не стоял - в строку; остальное
+//! канонично. Ширина решала бы за автора и рвала бы `if` там, где решил
+//! алгоритм, а не там, где он читается. Идемпотентность держится по
+//! построению: разорванное печатается разорванным, и второй проход видит те
+//! же переводы строк. [`print`] исходника не видит и печатает всё в строку.
 //!
 //! # Комментарии
 //!
@@ -230,6 +239,14 @@ impl<'a> Comments<'a> {
         Some((self.written(comment), blank))
     }
 
+    /// Стоял ли в исходнике перевод строки между `end` одного соседа и
+    /// `start` другого. Без исходника - никогда.
+    fn broken(&self, end: usize, start: usize) -> bool {
+        self.text
+            .get(end..start)
+            .is_some_and(|between| between.contains('\n'))
+    }
+
     /// Следующий комментарий, если он стоит на той же строке, что и конец уже
     /// напечатанного: между `after` и им только пробелы.
     ///
@@ -313,6 +330,33 @@ impl<'a> Printer<'a> {
         }
     }
 
+    /// Начинает новую строку на колонке `column`.
+    fn line_at(&mut self, column: usize) {
+        self.out.push('\n');
+        for _ in 0..column {
+            self.out.push(' ');
+        }
+    }
+
+    /// Напечатанное на последней строке.
+    fn last_line(&self) -> &str {
+        let start = self.out.rfind('\n').map_or(0, |at| at + 1);
+        &self.out[start..]
+    }
+
+    /// Колонка, на которой стоит конец напечатанного.
+    fn column(&self) -> usize {
+        self.last_line().chars().count()
+    }
+
+    /// Колонка продолжения формы, начатой здесь: на шаг глубже и строки, и
+    /// блока. Блок `let` начинается правее своей строки, и продолжение левее
+    /// его колонки закрыло бы его (§4.1, правило 2).
+    fn continuation(&self) -> usize {
+        let indent = self.last_line().chars().take_while(|ch| *ch == ' ').count();
+        indent.max(self.indent) + STEP
+    }
+
     /// Печатает то, что идёт глубже на `step`.
     fn nested(&mut self, step: usize, body: impl FnOnce(&mut Self)) {
         self.indent += step;
@@ -388,8 +432,24 @@ impl<'a> Printer<'a> {
     // --- объявления ------------------------------------------------------
 
     fn module(&mut self, module: &Module) {
+        self.level(&module.decls);
+        if !self.out.is_empty() {
+            self.out.push('\n');
+        }
+        self.trailing_comments();
+    }
+
+    /// Объявления под ключевым словом - `mutual`, `where`, тело модуля,
+    /// класса, ресурса - на шаг глубже, по тому же правилу пустых строк, что
+    /// и файл: объявление остаётся объявлением на любом уровне.
+    fn declarations(&mut self, decls: &[Decl]) {
+        self.nested(STEP, |printer| printer.level(decls));
+    }
+
+    /// Объявления одного уровня, каждое со своей строки на текущем отступе.
+    fn level(&mut self, decls: &[Decl]) {
         let mut previous_is_tall = false;
-        for (index, decl) in module.decls.iter().enumerate() {
+        for (index, decl) in decls.iter().enumerate() {
             // Комментарии над объявлением снимаются с курсора **до** печати
             // самого объявления: иначе их подобрал бы первый же член его блока.
             let leading = self.detached_comments(decl.span.start());
@@ -402,35 +462,36 @@ impl<'a> Printer<'a> {
             // же `infixl` без пояснения нет.
             let leads = !leading.is_empty();
             text.push_str(&self.line_tail(decl.span.end()));
-            if index > 0 {
+            // Первое объявление файла начинает вывод; первое объявление блока
+            // встаёт под строкой с ключевым словом.
+            if !self.out.is_empty() {
                 self.out.push('\n');
-                // Пустая строка - когда хотя бы одно из соседних объявлений
-                // заняло больше строки: список коротких определений остаётся
-                // списком. Сигнатуру от её клауз не отделяем и тогда: они об
-                // одном.
-                if (tall || leads || previous_is_tall) && !attached(&module.decls[index - 1], decl)
-                {
-                    self.out.push('\n');
-                }
+            }
+            // Пустая строка - когда хотя бы одно из соседних объявлений заняло
+            // больше строки: список коротких определений остаётся списком.
+            // Сигнатуру от её клауз не отделяем и тогда: они об одном.
+            if index > 0
+                && (tall || leads || previous_is_tall)
+                && !attached(&decls[index - 1], decl)
+            {
+                self.out.push('\n');
             }
             self.out.push_str(&leading);
             self.out.push_str(&text);
             previous_is_tall = tall;
         }
-        if !self.out.is_empty() {
-            self.out.push('\n');
-        }
-        self.trailing_comments();
     }
 
-    /// Печатает объявление отдельно, тем же курсором комментариев.
+    /// Печатает объявление отдельно, тем же курсором комментариев, с отступом
+    /// текущего уровня впереди: колонки внутри объявления меряются от начала
+    /// строки.
     ///
     /// Нужна ли перед ним пустая строка, зависит от того, заняло ли оно больше
     /// строки, - а это видно только после печати.
     fn rendered(&mut self, decl: &Decl) -> String {
         let mut sub = Printer {
-            out: String::new(),
-            indent: 0,
+            out: " ".repeat(self.indent),
+            indent: self.indent,
             comments: std::mem::take(&mut self.comments),
         };
         sub.decl(decl);
@@ -498,7 +559,7 @@ impl<'a> Printer<'a> {
             }
             DeclKind::Mutual(members) => {
                 self.push("mutual");
-                self.block_of(members, Self::decl);
+                self.declarations(members);
             }
             DeclKind::Class(class) => {
                 if class.coherent {
@@ -523,7 +584,7 @@ impl<'a> Printer<'a> {
                     self.expr(superclass, Prec::Lowest);
                 }
                 self.push(" where");
-                self.block_of(&class.members, Self::decl);
+                self.declarations(&class.members);
             }
             DeclKind::Extern(declared) => self.extern_decl(declared),
             DeclKind::Export(exported) => {
@@ -616,7 +677,7 @@ impl<'a> Printer<'a> {
         self.nested(step, |printer| {
             printer.line();
             printer.push("where");
-            printer.block_of(&clause.wheres, Self::decl);
+            printer.declarations(&clause.wheres);
         });
     }
 
@@ -641,7 +702,7 @@ impl<'a> Printer<'a> {
             return;
         }
         self.push(" where");
-        self.block_of(&module.members, Self::decl);
+        self.declarations(&module.members);
     }
 
     fn data(&mut self, data: &Data) {
@@ -715,7 +776,7 @@ impl<'a> Printer<'a> {
             self.binder(param);
         }
         self.push(" where");
-        self.block_of(&resource.members, Self::decl);
+        self.declarations(&resource.members);
     }
 
     /// Имя в позиции объявления: оператор пишется в скобках (§4.4).
@@ -1009,8 +1070,8 @@ impl<'a> Printer<'a> {
             self.push(" ");
             self.push(&param.text);
         }
-        self.push(" -> ");
-        self.expr(&branch.body, Prec::Lowest);
+        self.push(" ->");
+        self.body(&branch.body);
     }
 
     /// Спайн применения - циклом, а не спуском.
@@ -1051,6 +1112,26 @@ impl<'a> Printer<'a> {
     }
 
     fn conditional(&mut self, cond: &Expr, then_branch: &Expr, else_branch: &Expr) {
+        self.conditional_from(cond, then_branch, else_branch, None);
+    }
+
+    /// `if`, чей `else` автор перенёс, встаёт `else` на колонку `if`, если
+    /// тот начинает строку, и на шаг продолжения - если нет. `chained` -
+    /// колонка цепочки, начатой выше: `else if` её не сдвигает.
+    fn conditional_from(
+        &mut self,
+        cond: &Expr,
+        then_branch: &Expr,
+        else_branch: &Expr,
+        chained: Option<usize>,
+    ) {
+        let column = chained.unwrap_or_else(|| {
+            if self.last_line().trim().is_empty() {
+                self.column()
+            } else {
+                self.continuation()
+            }
+        });
         self.push("if ");
         self.expr(cond, Prec::Chain);
         // Ветвь-блок открывается `then` либо `else`, стоящим последним на
@@ -1086,8 +1167,23 @@ impl<'a> Printer<'a> {
         }
         self.push(" then ");
         self.expr(then_branch, Prec::Lowest);
-        self.push(" else ");
-        self.expr(else_branch, Prec::Lowest);
+        if self
+            .comments
+            .broken(then_branch.span.end(), else_branch.span.start())
+        {
+            self.line_at(column);
+            self.push("else ");
+        } else {
+            self.push(" else ");
+        }
+        match &else_branch.kind {
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => self.conditional_from(cond, then_branch, else_branch, Some(column)),
+            _ => self.expr(else_branch, Prec::Lowest),
+        }
     }
 
     fn alt(&mut self, alt: &Alt) {
@@ -1100,8 +1196,8 @@ impl<'a> Printer<'a> {
             self.guards(guards, " ->");
             return;
         }
-        self.push(" -> ");
-        self.expr(&alt.body, Prec::Lowest);
+        self.push(" ->");
+        self.body(&alt.body);
     }
 
     /// Сахар 2026-10-09 печатается так, как написан: секции, аннотация,
@@ -1139,13 +1235,22 @@ impl<'a> Printer<'a> {
         });
     }
 
+    /// Цепочка; оператор, перед которым автор перенёс строку, начинает строку
+    /// продолжения.
     fn chain(&mut self, chain: &Chain) {
+        let column = self.continuation();
         self.expr(&chain.head, Prec::App);
+        let mut end = chain.head.span.end();
         for (operator, operand) in &chain.tail {
-            self.push(" ");
+            if self.comments.broken(end, operand.span.start()) {
+                self.line_at(column);
+            } else {
+                self.push(" ");
+            }
             self.infix(&operator.text);
             self.push(" ");
             self.expr(operand, Prec::App);
+            end = operand.span.end();
         }
     }
 
@@ -1173,8 +1278,8 @@ impl<'a> Printer<'a> {
             }
             self.lam_param(param);
         }
-        self.push(" -> ");
-        self.expr(body, Prec::Lowest);
+        self.push(" ->");
+        self.body(body);
     }
 
     /// Аннотация пишется в своих скобках: `(e : T)`.
@@ -1197,7 +1302,29 @@ impl<'a> Printer<'a> {
         }
     }
 
+    /// Список и кортеж. Разорванный автором печатается элементом на строку,
+    /// запятая впереди, на колонке скобки: под скобкой layout выключен
+    /// (§4.1, правило 4), и колонка там ничего не закрывает.
     fn sequence(&mut self, open: &str, items: &[Expr], close: &str) {
+        let broken = items.windows(2).any(|pair| {
+            self.comments
+                .broken(pair[0].span.end(), pair[1].span.start())
+        });
+        if broken {
+            let column = self.column();
+            self.push(open);
+            self.push(" ");
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    self.line_at(column);
+                    self.push(", ");
+                }
+                self.expr(item, Prec::Lowest);
+            }
+            self.line_at(column);
+            self.push(close);
+            return;
+        }
         self.push(open);
         for (index, item) in items.iter().enumerate() {
             if index > 0 {

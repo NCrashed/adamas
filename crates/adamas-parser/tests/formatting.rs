@@ -178,6 +178,62 @@ fn the_printer_alone_still_prints_no_comments() {
     assert_eq!(adamas_parser::print(&module), "f = 1\n");
 }
 
+/// Переносы трёх форм берутся у автора (§7.4, решение владельца 2026-10-20):
+/// разорванное печатается разорванным, написанное в строку - в строку.
+/// Колонки выбирает печать, а не автор.
+#[test]
+fn the_author_breaks_if_chains_lists_and_operator_chains() {
+    placed(&[
+        // `else` цепочки - на колонке `if`, начинающего строку; `else if`
+        // колонку не сдвигает.
+        (
+            "f x =\n  if x then 1\n  else if y then 2\n      else 3\n",
+            "f x =\n  if x then 1\n  else if y then 2\n  else 3\n",
+        ),
+        // `if` посреди строки: `else` - на шаг продолжения.
+        (
+            "f x = if x then 1\n            else 2\n",
+            "f x = if x then 1\n  else 2\n",
+        ),
+        // Под `let` - не левее его блока: левее он бы закрылся.
+        (
+            "f =\n  let y = if a then 1\n          else 2\n  y\n",
+            "f =\n  let y = if a then 1\n        else 2\n  y\n",
+        ),
+        // Список: элемент на строку, запятая впереди, на колонке скобки;
+        // хватает одного переноса между любыми соседями.
+        (
+            "xs = [1,\n  2, 3]\n",
+            "xs = [ 1\n     , 2\n     , 3\n     ]\n",
+        ),
+        ("p = (a,\n  b)\n", "p = ( a\n    , b\n    )\n"),
+        // Оператор - на шаг продолжения; рвётся только тот, перед которым
+        // перенос стоял.
+        ("s =\n  a\n      <> b <> c\n", "s =\n  a\n    <> b <> c\n"),
+        // Написанное в строку остаётся строкой.
+        (
+            "f x = if x then [1, 2] else [a <> b, c]\n",
+            "f x = if x then [1, 2] else [a <> b, c]\n",
+        ),
+    ]);
+}
+
+/// Стрелка, за которой тело-блок, кончает строку: хвостового пробела после
+/// `->` нет ни у ветки `case`, ни у лямбды.
+#[test]
+fn an_arrow_before_a_block_ends_its_line() {
+    placed(&[
+        (
+            "f x = case x of\n  A ->\n    let y = 1\n    y\n  B -> 2\n",
+            "f x = case x of\n  A ->\n    let y = 1\n    y\n  B -> 2\n",
+        ),
+        (
+            "g = h \\u ->\n  put 1\n  get\n",
+            "g = h \\u ->\n  put 1\n  get\n",
+        ),
+    ]);
+}
+
 /// Лексика, на которой комментарии встречаются часто: минус и фигурная скобка
 /// в наборе, поэтому `--`, `{-` и `-}` генератор порождает сам.
 fn plausible() -> impl Strategy<Value = String> {

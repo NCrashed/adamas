@@ -56,6 +56,7 @@ module Arena :> Regions where
   effect Alloc (0 r : Region) where
     allocIn : Int64 -> Ref r Int64
     readRef : Ref r Int64 -> Int64
+
   withRegion : {a : Type} -> ((0 r : Region) -> (ω u : Unit) -> {Alloc r} a) -> a
   withRegion body = handle body Home with
     state regionNew

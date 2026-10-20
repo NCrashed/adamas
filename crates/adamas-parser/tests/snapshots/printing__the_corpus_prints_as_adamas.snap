@@ -138,6 +138,7 @@ f x = y
   where
     g z = case z of
       A -> 1
+
     h = g x
 === blocks_in_tail_position
 f = g case x of

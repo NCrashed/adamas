@@ -1,0 +1,23 @@
+-- Эффектная функция с ответом-агрегатом (§4.11, §10 вопрос 215).
+--
+-- Обрыв требует вернуть ответ `adamas_kont_abort` немедленно, а у функции с
+-- плоским ответом вернуть его нечем. Вопрос 215 закрыл примитивный ответ -
+-- обёрткой; плотный агрегат (кортеж из двух `UInt64`) оба эмиттера по-прежнему
+-- отвергали «операция в функции с плоским ответом». Найдено демо-компилятором
+-- Фазы 9: таблица конструкторов отвечает тегом и арностью. Ответ уезжает
+-- массивом из одной ячейки, место вызова читает ячейку `0` владением.
+
+import Std.Except (Except, throw, attempt)
+
+tag : String -> List (String, (UInt64, UInt64)) -> {Except String} (UInt64, UInt64)
+tag c t = case lookup c t of
+  Some found -> found
+  None -> throw ("unknown " <> c)
+
+use : String -> {Except String} UInt64
+use c =
+  let (k, n) = tag c [("A", (0, 2)), ("B", (1, 0))]
+  k * 10 + n
+
+main : (Result String UInt64, Result String UInt64, Result String UInt64)
+main = (attempt (use "A"), attempt (use "B"), attempt (use "C"))

@@ -52,8 +52,8 @@ use adamas_core::mult::Mult;
 use adamas_core::prim::PrimTy;
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Expr, Fact, Form, FuncId, Function, LocalId, Packing,
-    Program, Repr, Verdict,
+    Arm, Binding, Constructor, CtorId, Expr, Fact, Form, FuncId, Function, LocalId, PackId,
+    Packing, Program, Repr, Stride, Verdict,
 };
 
 /// Итог анализа приостановок: кто приостанавливается и тиха ли программа.
@@ -852,57 +852,92 @@ fn bound(binds: Vec<(Binding, Expr)>, body: Expr) -> Expr {
         })
 }
 
-/// Приостанавливающаяся функция с плоским примитивным ответом отвечает
-/// обёрткой (§4.11, §10 вопрос 215).
+/// Чем уезжает ответ приостанавливающейся функции с плоским ответом.
+#[derive(Clone, Copy)]
+enum Answer {
+    /// Примитив - обёрткой примитива (§10 вопрос 158).
+    Primitive(PrimTy, CtorId),
+    /// Плотный агрегат - массивом из одной ячейки: в слот объекта он не
+    /// ложится, а плоский массив агрегатов оба эмиттера знают (§4.11).
+    Packed(PackId),
+}
+
+/// Приостанавливающаяся функция с плоским ответом отвечает коробкой (§4.11,
+/// §10 вопрос 215).
 ///
 /// Обрыв (`SUPPRESSED`) требует вернуть ответ `adamas_kont_abort` немедленно,
 /// а ответ этот - значение: у функции с плоским ответом вернуть его нечем, и
 /// оба эмиттера отказывали - «операция в функции с плоским ответом», - при том
-/// что машина такую программу считала. Ответ поэтому уезжает обёрткой
-/// примитива - той же, какой едет плоский ответ через замыкание (§10 вопрос
-/// 158), - а каждое место вызова снимает её разбором. Цена названа: ячейка
-/// кучи на вызов такой функции.
+/// что машина такую программу считала. Ответ поэтому уезжает коробкой, а
+/// каждое место вызова её снимает. Примитив едет обёрткой примитива - той же,
+/// какой плоский ответ проходит замыкание (§10 вопрос 158); плотный агрегат -
+/// массивом из одной ячейки, и снимает его чтение ячейки `0` владением:
+/// кортеж из двух `UInt64` у функции с `throw` отвергался так же (найдено
+/// демо-компилятором Фазы 9). Цена названа: ячейка кучи на вызов такой функции.
 ///
 /// Экспортированная функция не трогается: её сигнатуру читает чужая сторона,
 /// и там отказ остаётся отказом.
 fn boxed_answers(mut program: Program) -> Program {
     let known = suspending(&program);
     let exported: BTreeSet<FuncId> = program.exports.iter().map(|it| it.function).collect();
-    let flat: Vec<(FuncId, PrimTy)> = program
+    let flat: Vec<(FuncId, Repr)> = program
         .functions
         .iter()
         .filter(|it| known.functions.contains(&it.id) && !exported.contains(&it.id))
-        .filter_map(|it| match it.result {
-            Repr::Flat(prim) => Some((it.id, prim)),
-            _ => None,
-        })
+        .filter(|it| matches!(it.result, Repr::Flat(_) | Repr::Packed(_)))
+        .map(|it| (it.id, it.result))
         .collect();
     if flat.is_empty() {
         return program;
     }
-    let targets: BTreeMap<FuncId, (PrimTy, CtorId)> = flat
+    let targets: BTreeMap<FuncId, Answer> = flat
         .into_iter()
-        .map(|(id, prim)| (id, (prim, wrapper(&mut program.constructors, prim))))
+        .filter_map(|(id, result)| match result {
+            Repr::Flat(prim) => Some((
+                id,
+                Answer::Primitive(prim, wrapper(&mut program.constructors, prim)),
+            )),
+            Repr::Packed(pack) => Some((id, Answer::Packed(pack))),
+            _ => None,
+        })
         .collect();
     for function in &mut program.functions {
         let mut next = ceiling(function);
         let mut body = std::mem::replace(&mut function.body, Expr::Erased);
         unwrapped(&mut body, &targets, &mut next);
-        if let Some((prim, tag)) = targets.get(&function.id) {
+        if let Some(answer) = targets.get(&function.id) {
+            let (repr, boxed) = match *answer {
+                Answer::Primitive(prim, tag) => (
+                    Repr::Flat(prim),
+                    Box::new(move |local| Expr::Construct {
+                        constructor: tag,
+                        reuse: None,
+                        arguments: vec![Expr::Local(local)],
+                    }) as Box<dyn Fn(LocalId) -> Expr>,
+                ),
+                Answer::Packed(pack) => (
+                    Repr::Packed(pack),
+                    Box::new(move |local| Expr::ArrayNew {
+                        stride: Some(Stride::Packed(pack)),
+                        count: Box::new(Expr::Literal {
+                            ty: PrimTy::UInt64,
+                            bits: 1,
+                        }),
+                        initial: Box::new(Expr::Local(local)),
+                        bytes: None,
+                    }) as Box<dyn Fn(LocalId) -> Expr>,
+                ),
+            };
             let held = Binding {
                 name: "ответ".to_owned(),
                 local: LocalId(next),
-                fact: Fact::present(Mult::One).shaped(Repr::Flat(*prim)),
+                fact: Fact::present(Mult::One).shaped(repr),
             };
             let local = held.local;
             body = Expr::Bind {
                 binding: held,
                 value: Box::new(body),
-                body: Box::new(Expr::Construct {
-                    constructor: *tag,
-                    reuse: None,
-                    arguments: vec![Expr::Local(local)],
-                }),
+                body: Box::new(boxed(local)),
             };
             function.result = Repr::Boxed;
         }
@@ -911,33 +946,46 @@ fn boxed_answers(mut program: Program) -> Program {
     program
 }
 
-/// Снимает обёртку ответа у каждого вызова функции из `targets`.
-fn unwrapped(expr: &mut Expr, targets: &BTreeMap<FuncId, (PrimTy, CtorId)>, next: &mut u32) {
+/// Снимает коробку ответа у каждого вызова функции из `targets`.
+fn unwrapped(expr: &mut Expr, targets: &BTreeMap<FuncId, Answer>, next: &mut u32) {
     for child in children_mut(expr) {
         unwrapped(child, targets, next);
     }
     let Expr::Call { function, .. } = expr else {
         return;
     };
-    let Some((prim, tag)) = targets.get(function).copied() else {
+    let Some(answer) = targets.get(function).copied() else {
         return;
     };
-    let bits = Binding {
-        name: "ответ".to_owned(),
-        local: LocalId(*next),
-        fact: Fact::present(Mult::Many).shaped(Repr::Flat(prim)),
-    };
-    *next += 1;
-    let local = bits.local;
     let call = std::mem::replace(expr, Expr::Erased);
-    *expr = Expr::Match {
-        scrutinee: Box::new(call),
-        consumed: Mult::One,
-        arms: vec![Arm {
-            constructor: tag,
-            fields: vec![bits],
-            body: Expr::Local(local),
-        }],
+    *expr = match answer {
+        Answer::Primitive(prim, tag) => {
+            let bits = Binding {
+                name: "ответ".to_owned(),
+                local: LocalId(*next),
+                fact: Fact::present(Mult::Many).shaped(Repr::Flat(prim)),
+            };
+            *next += 1;
+            let local = bits.local;
+            Expr::Match {
+                scrutinee: Box::new(call),
+                consumed: Mult::One,
+                arms: vec![Arm {
+                    constructor: tag,
+                    fields: vec![bits],
+                    body: Expr::Local(local),
+                }],
+            }
+        }
+        Answer::Packed(pack) => Expr::ArrayIndex {
+            stride: Some(Stride::Packed(pack)),
+            owned: true,
+            array: Box::new(call),
+            at: Box::new(Expr::Literal {
+                ty: PrimTy::UInt64,
+                bits: 0,
+            }),
+        },
     };
 }
 

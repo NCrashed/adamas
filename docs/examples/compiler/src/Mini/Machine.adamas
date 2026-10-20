@@ -1,0 +1,112 @@
+-- | The machine: a stack, an environment, and frames to return to.
+--
+-- `exec` runs one instruction at a time and calls itself in tail position, so
+-- a Mini program that recurses deeply grows the list of frames, not the stack
+-- of the program running it.
+
+import Mini.Syntax (Operator, OpAdd, OpSub, OpMul, OpLess, OpEqual)
+import Mini.Compile (Instr, IInt, IBool, IAccess, IClosure, IRecClosure, IApply, IReturn, IBind, IUnbind, IBranch, IPrim, IPack, IMatch)
+import Std.Except (Except, throw)
+
+-- | A value of a Mini program.
+data Value where
+  VInt : Int -> Value
+  VBool : Bool -> Value
+  VClosure : List Instr -> List Value -> Value
+  -- | A function that calls itself: `IRecClosure`.
+  VRecursive : List Instr -> List Value -> Value
+  -- | A constructor with its tag and fields.
+  VData : String -> UInt64 -> List Value -> Value
+
+-- | A frame: where to continue, and in which environment.
+type Frame = (List Instr, List Value)
+
+-- | The arm of a tag, or a refusal: a `match` without it.
+armFor : UInt64 -> List (UInt64, List Instr) -> {Except String} List Instr
+armFor k Nil = throw "no arm for the constructor"
+armFor k (Cons (j, code) rest) = if j == k then code else armFor k rest
+
+-- | Applies an operator to two values.
+primitive : Operator -> Value -> Value -> {Except String} Value
+primitive OpAdd (VInt a) (VInt b) = VInt (a + b)
+primitive OpSub (VInt a) (VInt b) = VInt (a - b)
+primitive OpMul (VInt a) (VInt b) = VInt (a * b)
+primitive OpLess (VInt a) (VInt b) = VBool (a < b)
+primitive OpEqual (VInt a) (VInt b) = VBool (a == b)
+primitive _ _ _ = throw "an operator met a value of the wrong kind"
+
+-- | Drops `n` bindings.
+dropped : UInt64 -> List Value -> List Value
+dropped 0 env = env
+dropped n Nil = Nil
+dropped n (Cons _ rest) = dropped (n - 1) rest
+
+-- | Pushes values in order: the last ends up on top.
+pushed : List Value -> List Value -> List Value
+pushed Nil env = env
+pushed (Cons v rest) env = pushed rest (Cons v env)
+
+-- | Pops `n` values; the first popped is the last field.
+popped : UInt64 -> List Value -> List Value -> {Except String} (List Value, List Value)
+popped 0 stack acc = (acc, stack)
+popped n (Cons v rest) acc = popped (n - 1) rest (Cons v acc)
+popped n Nil acc = throw "the stack ran out"
+
+-- | Runs instructions to the end.
+exec : List Instr -> List Value -> List Value -> List Frame -> {Except String} Value
+exec Nil (Cons v _) env Nil = v
+exec Nil stack env (Cons (code, saved) dump) = exec code stack saved dump
+exec Nil Nil env Nil = throw "the program left nothing"
+exec (Cons instr rest) stack env dump = case instr of
+  IInt n -> exec rest (Cons (VInt n) stack) env dump
+  IBool b -> exec rest (Cons (VBool b) stack) env dump
+  IAccess k -> case dropped k env of
+    Cons v _ -> exec rest (Cons v stack) env dump
+    Nil -> throw "an access past the environment"
+  IClosure code -> exec rest (Cons (VClosure code env) stack) env dump
+  IRecClosure code -> exec rest (Cons (VRecursive code env) stack) env dump
+  IApply -> case stack of
+    Cons argument (Cons (VClosure code captured) more) ->
+      exec code more (Cons argument captured) (Cons (rest, env) dump)
+    Cons argument (Cons (VRecursive code captured) more) ->
+      exec code more (Cons argument (Cons (VRecursive code captured) captured)) (Cons (rest, env) dump)
+    _ -> throw "applied a value that is not a function"
+  IReturn -> case dump of
+    Cons (code, saved) frames -> exec code stack saved frames
+    Nil -> exec Nil stack env Nil
+  IBind -> case stack of
+    Cons v more -> exec rest more (Cons v env) dump
+    Nil -> throw "the stack ran out"
+  IUnbind n -> exec rest stack (dropped n env) dump
+  IBranch yes no -> case stack of
+    Cons (VBool b) more -> exec ((if b then yes else no) ++ rest) more env dump
+    _ -> throw "a condition that is not a boolean"
+  IPrim op -> case stack of
+    Cons b (Cons a more) -> exec rest (Cons (primitive op a b) more) env dump
+    _ -> throw "the stack ran out"
+  IPack c k n ->
+    let (fields, more) = popped n stack Nil
+    exec rest (Cons (VData c k fields) more) env dump
+  IMatch arms -> case stack of
+    Cons (VData _ k fields) more -> exec (armFor k arms ++ rest) more (pushed fields env) dump
+    _ -> throw "matched a value that is not data"
+
+-- | The value of a compiled program.
+run : List Instr -> {Except String} Value
+run code = exec code Nil Nil Nil
+
+mutual
+  -- | A value as Mini would write it.
+  display : Value -> String
+  display (VInt n) = show n
+  display (VBool True) = "true"
+  display (VBool False) = "false"
+  display (VClosure _ _) = "<function>"
+  display (VRecursive _ _) = "<function>"
+  display (VData c _ Nil) = c
+  display (VData c _ fields) = c <> foldr (\v acc -> " " <> displayArgument v <> acc) "" fields
+
+  -- | A field of a constructor: one with fields of its own needs parentheses.
+  displayArgument : Value -> String
+  displayArgument (VData c k (Cons f fs)) = "(" <> display (VData c k (Cons f fs)) <> ")"
+  displayArgument v = display v

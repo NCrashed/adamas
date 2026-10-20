@@ -1,0 +1,119 @@
+-- | The compiler: a checked program to instructions of a stack machine.
+--
+-- Variables become positions in the environment, counted from the most
+-- recent binding (de Bruijn indices). A lambda becomes a closure over the
+-- current environment; `let rec` a closure that finds itself one slot past
+-- its argument. A constructor applied partially becomes a chain of closures,
+-- and `match` dispatches on the constructor's tag.
+
+import Mini.Syntax (Operator, OpLess, OpEqual, Expr, EInt, EBool, EVar, ECon, ELam, EApp, ELet, ELetRec, EIf, EBinary, EMatch, Written, WParam, WInt, WBool, WData, WArrow, Pattern, PConstructor, Declaration, MkDeclaration, Program, MkProgram)
+import Std.Except (Except, throw)
+
+-- | An instruction of the machine (`Mini.Machine`).
+data Instr where
+  IInt : Int -> Instr
+  IBool : Bool -> Instr
+  -- | Pushes the value at this position of the environment.
+  IAccess : UInt64 -> Instr
+  -- | Pushes a closure of this code over the current environment.
+  IClosure : List Instr -> Instr
+  -- | The same, for a function that calls itself: entered, it sees its
+  -- argument at position 0 and itself at position 1.
+  IRecClosure : List Instr -> Instr
+  -- | Pops an argument and a function, and enters the function.
+  IApply : Instr
+  -- | Leaves the function: the result stays on the stack.
+  IReturn : Instr
+  -- | Moves the top of the stack into the environment.
+  IBind : Instr
+  -- | Drops this many bindings from the environment.
+  IUnbind : UInt64 -> Instr
+  -- | Pops a boolean and runs one of the two codes.
+  IBranch : List Instr -> List Instr -> Instr
+  IPrim : Operator -> Instr
+  -- | Pops this many fields and builds a value of the constructor.
+  IPack : String -> UInt64 -> UInt64 -> Instr
+  -- | Pops a value and runs the arm of its tag with the fields bound.
+  IMatch : List (UInt64, List Instr) -> Instr
+
+-- | Constructors by name: tag and number of fields.
+type Table = List (String, (UInt64, UInt64))
+
+-- | Constructors numbered from `n`.
+tagged : UInt64 -> List (String, List Written) -> Table
+tagged n Nil = Nil
+tagged n (Cons (c, fs) rest) = Cons (c, (n, length fs)) (tagged (n + 1) rest)
+
+-- | The constructors of the declarations, tagged by position.
+table : List Declaration -> Table
+table Nil = Nil
+table (Cons (MkDeclaration _ _ ctors) rest) = tagged 0 ctors ++ table rest
+
+-- | The position of a name in the environment.
+position : String -> List String -> {Except String} UInt64
+position x Nil = throw ("unbound name " <> x)
+position x (Cons y rest) = if x == y then 0 else 1 + position x rest
+
+-- | A constructor and its tag, or a refusal.
+tag : String -> Table -> {Except String} (UInt64, UInt64)
+tag c t = case lookup c t of
+  Some found -> found
+  None -> throw ("unknown constructor " <> c)
+
+-- | Accesses to the fields of a constructor, first field first: under `n`
+-- lambdas the first field is the deepest.
+fieldAccess : UInt64 -> List Instr
+fieldAccess 0 = Nil
+fieldAccess n = Cons (IAccess (n - 1)) (fieldAccess (n - 1))
+
+-- | `n` closures around a body; the outermost is pushed, not returned.
+wrapped : UInt64 -> List Instr -> List Instr
+wrapped 0 body = body
+wrapped 1 body = [IClosure body]
+wrapped n body = wrapped (n - 1) [IClosure body, IReturn]
+
+-- | A constructor as a value: `n` nested closures around the packing.
+packing : String -> UInt64 -> UInt64 -> List Instr
+packing c t n = wrapped n (fieldAccess n ++ [IPack c t n, IReturn])
+
+-- | The names a pattern binds, last field first: that is how they lie in the
+-- environment once the fields are pushed in order.
+fieldsOf : Pattern -> List String
+fieldsOf (PConstructor _ xs) = reverse xs
+
+mutual
+  -- | Instructions computing an expression in an environment of names.
+  compile : Table -> List String -> Expr -> {Except String} List Instr
+  compile t env (EInt n) = [IInt n]
+  compile t env (EBool b) = [IBool b]
+  compile t env (EVar x) = [IAccess (position x env)]
+  compile t env (ECon c) =
+    let (k, n) = tag c t
+    if n == 0 then [IPack c k 0] else packing c k n
+  compile t env (ELam x body) = [IClosure (compile t (Cons x env) body ++ [IReturn])]
+  compile t env (EApp f x) = compile t env f ++ compile t env x ++ [IApply]
+  compile t env (ELet x value body) =
+    compile t env value ++ [IBind] ++ compile t (Cons x env) body ++ [IUnbind 1]
+  compile t env (ELetRec f value body) = case value of
+    ELam x inner ->
+      let code = compile t (Cons x (Cons f env)) inner ++ [IReturn]
+      [IRecClosure code, IBind] ++ compile t (Cons f env) body ++ [IUnbind 1]
+    _ -> throw ("let rec " <> f <> " must define a function")
+  compile t env (EIf c yes no) =
+    compile t env c ++ [IBranch (compile t env yes) (compile t env no)]
+  compile t env (EBinary op left right) =
+    compile t env left ++ compile t env right ++ [IPrim op]
+  compile t env (EMatch scrutinee arms) =
+    compile t env scrutinee ++ [IMatch (compiledArms t env arms)]
+
+  -- | Each arm under its fields, dropping them at the end.
+  compiledArms : Table -> List String -> List (Pattern, Expr) -> {Except String} List (UInt64, List Instr)
+  compiledArms t env Nil = Nil
+  compiledArms t env (Cons (PConstructor c xs, body) rest) =
+    let (k, _) = tag c t
+    let code = compile t (fieldsOf (PConstructor c xs) ++ env) body ++ [IUnbind (length xs)]
+    Cons (k, code) (compiledArms t env rest)
+
+-- | The instructions of a whole program.
+compiled : Program -> {Except String} List Instr
+compiled (MkProgram decls body) = compile (table decls) Nil body

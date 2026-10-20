@@ -1,0 +1,46 @@
+-- | Tests of Mini (§7.1): a test is a definition named `test…` of type
+-- `Bool`, and `adamas test` requires it to be `True`.
+--
+-- Most go through the whole pipeline with `answer`; the ones about types
+-- stop after inference, so that a type is checked without running anything.
+
+import Main (answer, lists)
+import Mini.Lexer (tokenize)
+import Mini.Parser (program)
+import Mini.Infer (typeOf, render)
+import Std.Except (attempt)
+
+-- | The type of a program as Mini prints it, or the refusal.
+inferred : String -> String
+inferred source = case attempt (render (typeOf (program (tokenize source)))) of
+  Ok text -> text
+  Err why -> "error: " <> why
+
+testMultiplicationBindsTighter : Bool
+testMultiplicationBindsTighter = answer "1 + 2 * 3" == "7 : Int"
+testSubtractionIsLeftAssociative : Bool
+testSubtractionIsLeftAssociative = answer "10 - 3 - 2" == "5 : Int"
+testComparisonGivesBool : Bool
+testComparisonGivesBool = answer "if 1 < 2 then 10 else 20" == "10 : Int"
+testClosureKeepsItsEnvironment : Bool
+testClosureKeepsItsEnvironment =
+  answer "let k = 5 in let add = \\x -> x + k in add 3" == "8 : Int"
+
+testCommentRunsToEndOfLine : Bool
+testCommentRunsToEndOfLine = answer "1 -- and the rest\n+ 1" == "2 : Int"
+testIdentityIsPolymorphic : Bool
+testIdentityIsPolymorphic = inferred "let id = \\x -> x in id" == "a -> a"
+testCompositionType : Bool
+testCompositionType = inferred "\\f g x -> f (g x)" == "(a -> b) -> (c -> a) -> c -> b"
+testConstructorType : Bool
+testConstructorType = inferred (lists <> "Cons") == "a -> List a -> List a"
+testLambdaArgumentIsMonomorphic : Bool
+testLambdaArgumentIsMonomorphic =
+  inferred "(\\id -> if id true then id 1 else 0) (\\x -> x)" == "error: cannot unify Bool with Int"
+
+testUnboundName : Bool
+testUnboundName = answer "y + 1" == "error: unbound name y"
+testPatternArity : Bool
+testPatternArity =
+  answer (lists <> "match Nil with | Cons x -> 0 | Nil -> 1")
+    == "error: Cons takes 2 fields, the pattern binds 1"

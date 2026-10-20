@@ -1,0 +1,81 @@
+-- | Mini: a compiler for a small ML, written in Adamas.
+--
+-- The source text goes through four stages, each a module of its own:
+--
+--   * `Mini.Lexer` cuts it into tokens;
+--   * `Mini.Parser` builds the tree;
+--   * `Mini.Infer` infers types, Hindley-Milner with let-polymorphism;
+--   * `Mini.Compile` translates the tree into instructions of a stack
+--     machine, and `Mini.Machine` runs them.
+--
+-- A refusal at any stage - an unknown character, a syntax error, a type
+-- error - is raised with `throw` and caught once, by `attempt` from
+-- `Std.Except`. `main` compiles and runs every sample and answers what each
+-- one computed, with its type.
+
+import Mini.Lexer (tokenize)
+import Mini.Parser (program)
+import Mini.Infer (typeOf, render)
+import Mini.Compile (compiled)
+import Mini.Machine (run, display)
+import Std.Except (Except, attempt)
+import Std.IO (Console, putLine)
+
+-- | Compiles and runs one program: its value and its type.
+compileAndRun : String -> {Except String} String
+compileAndRun source =
+  let parsed = program (tokenize source)
+  let ty = typeOf parsed
+  let value = run (compiled parsed)
+  display value <> " : " <> render ty
+
+-- | The answer for one program, or the refusal.
+answer : String -> String
+answer source = case attempt (compileAndRun source) of
+  Ok text -> text
+  Err why -> "error: " <> why
+
+-- | A list declaration, shared by the samples that need one.
+lists : String
+lists = "data List a = Nil | Cons a (List a); "
+
+-- | Programs to compile.
+samples : List String
+samples =
+  [ "1 + 2 * 3"
+  , "let rec fact n = if n == 0 then 1 else n * fact (n - 1) in fact 10"
+  , "let id = \\x -> x in if id true then id 7 else 0"
+  , lists
+    <> "let rec map f xs = match xs with"
+    <> "  | Nil -> Nil"
+    <> "  | Cons y ys -> Cons (f y) (map f ys)"
+    <> " in map (\\x -> x * x) (Cons 1 (Cons 2 (Cons 3 Nil)))"
+  , lists
+    <> "let rec foldr f z xs = match xs with"
+    <> "  | Nil -> z"
+    <> "  | Cons y ys -> f y (foldr f z ys)"
+    <> " in let rec range n = if n == 0 then Nil else Cons n (range (n - 1))"
+    <> " in foldr (\\x acc -> x + acc) 0 (range 100)"
+  , "data Option a = None | Some a; "
+    <> lists
+    <> "let rec find p xs = match xs with"
+    <> "  | Nil -> None"
+    <> "  | Cons y ys -> if p y then Some y else find p ys"
+    <> " in find (\\x -> 10 < x) (Cons 3 (Cons 14 (Cons 15 Nil)))"
+  , "\\f x -> f (f x)"
+  , "1 + true"
+  , "let rec loop x = loop in loop"
+  , lists <> "match 3 with | Nil -> 0"
+  , "1 + # 2"
+  ]
+
+-- | Prints one line per answer.
+printed : List String -> {Console} Unit
+printed Nil = MkUnit
+printed (Cons line rest) =
+  putLine line
+  printed rest
+
+-- | Compiles and runs every sample, one answer per line.
+main : {Console} Unit
+main = printed (map answer samples)

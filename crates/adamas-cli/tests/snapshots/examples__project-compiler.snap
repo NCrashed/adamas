@@ -1,0 +1,15 @@
+---
+source: crates/adamas-cli/tests/examples.rs
+expression: text
+---
+7 : Int
+3628800 : Int
+7 : Int
+Cons 1 (Cons 4 (Cons 9 Nil)) : List Int
+5050 : Int
+Some 14 : Option Int
+<function> : (a -> a) -> a -> a
+error: cannot unify Bool with Int
+error: infinite type: a = b -> a
+error: cannot unify Int with List a
+error: unexpected character '#'

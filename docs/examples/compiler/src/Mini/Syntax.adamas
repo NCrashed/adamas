@@ -1,0 +1,90 @@
+-- | The syntax of Mini, the language this compiler translates: tokens, the
+-- tree the parser builds, and the types the checker assigns.
+--
+-- Mini is a small ML: integers, booleans, `let` and `let rec`, lambdas,
+-- `if`, arithmetic, and declared data types taken apart with `match`.
+--
+--     data List a = Nil | Cons a (List a);
+--     let rec map f xs = match xs with
+--       | Nil -> Nil
+--       | Cons y ys -> Cons (f y) (map f ys)
+--     in map (\x -> x * 2) (Cons 1 (Cons 2 Nil))
+--
+-- Mini has no layout: a `match` runs to the end of its enclosing parentheses,
+-- or of the program.
+
+-- | A token: what the lexer cuts the source into.
+data Token where
+  TNumber : Int -> Token
+  -- | A name starting with a lowercase letter: a variable.
+  TName : String -> Token
+  -- | A name starting with an uppercase letter: a type or a constructor.
+  TConstructor : String -> Token
+  -- | A keyword: `let`, `rec`, `in`, `if`, `then`, `else`, `match`, `with`,
+  -- `data`, `true`, `false`.
+  TKeyword : String -> Token
+  -- | Punctuation and operators: `(`, `)`, `\`, `->`, `=`, `|`, `;`, `_`,
+  -- `+`, `-`, `*`, `<`, `==`.
+  TSymbol : String -> Token
+  deriving (Eq, Show)
+
+-- | Binary operators. Arithmetic works on `Int`, comparison answers `Bool`.
+data Operator where
+  OpAdd : Operator
+  OpSub : Operator
+  OpMul : Operator
+  OpLess : Operator
+  OpEqual : Operator
+  deriving (Eq, Show)
+
+-- | A pattern of a `match` arm: a constructor applied to variables or `_`.
+--
+-- Patterns are flat on purpose: nested patterns would need a match compiler,
+-- and that is a project of its own.
+data Pattern where
+  PConstructor : String -> List String -> Pattern
+  deriving (Eq, Show)
+
+-- | An expression, as the parser builds it: variables by name.
+data Expr where
+  EInt : Int -> Expr
+  EBool : Bool -> Expr
+  EVar : String -> Expr
+  ECon : String -> Expr
+  ELam : String -> Expr -> Expr
+  EApp : Expr -> Expr -> Expr
+  ELet : String -> Expr -> Expr -> Expr
+  -- | `let rec f = \x -> e in body`: `f` is visible in its own definition.
+  ELetRec : String -> Expr -> Expr -> Expr
+  EIf : Expr -> Expr -> Expr -> Expr
+  EBinary : Operator -> Expr -> Expr -> Expr
+  EMatch : Expr -> List (Pattern, Expr) -> Expr
+
+-- | A type. `TyVar` is a unification variable; `TyData` is a declared data
+-- type applied to its arguments.
+data Ty where
+  TyInt : Ty
+  TyBool : Ty
+  TyVar : UInt64 -> Ty
+  TyArrow : Ty -> Ty -> Ty
+  TyData : String -> List Ty -> Ty
+  deriving (Eq, Show)
+
+-- | A type in a declaration, before its parameters become variables:
+-- `List a` in `Cons a (List a)`.
+data Written where
+  WParam : String -> Written
+  WInt : Written
+  WBool : Written
+  WData : String -> List Written -> Written
+  WArrow : Written -> Written -> Written
+  deriving (Eq, Show)
+
+-- | `data List a = Nil | Cons a (List a)`: the name, its parameters, and the
+-- constructors with the types of their fields.
+data Declaration where
+  MkDeclaration : String -> List String -> List (String, List Written) -> Declaration
+
+-- | A whole program: declarations, then the expression it computes.
+data Program where
+  MkProgram : List Declaration -> Expr -> Program

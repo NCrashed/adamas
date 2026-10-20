@@ -1,0 +1,298 @@
+-- | The parser: tokens to a program, by recursive descent.
+--
+-- Every function takes the remaining tokens and answers what it parsed
+-- together with the tokens after it. A mismatch is a refusal raised with
+-- `throw`.
+--
+--     program  = { data Name params '=' ctor { '|' ctor } ';' } expr
+--     expr     = '\' names '->' expr
+--              | 'let' ['rec'] name names '=' expr 'in' expr
+--              | 'if' expr 'then' expr 'else' expr
+--              | 'match' expr 'with' { '|' pattern '->' expr }
+--              | compare
+--     compare  = sum [ ('<' | '==') sum ]
+--     sum      = product { ('+' | '-') product }
+--     product  = app { '*' app }
+--     app      = atom { atom }
+--     atom     = number | 'true' | 'false' | name | Name | '(' expr ')'
+
+import Mini.Syntax (Token, TNumber, TName, TConstructor, TKeyword, TSymbol, Operator, OpAdd, OpSub, OpMul, OpLess, OpEqual, Expr, EInt, EBool, EVar, ECon, ELam, EApp, ELet, ELetRec, EIf, EBinary, EMatch, Written, WParam, WInt, WBool, WData, WArrow, Pattern, PConstructor, Declaration, MkDeclaration, Program, MkProgram)
+import Std.Except (Except, throw)
+
+-- | A token as the refusal names it.
+described : List Token -> String
+described Nil = "the end of the program"
+described (Cons t _) = show t
+
+-- | Consumes one expected token.
+expect : Token -> List Token -> {Except String} List Token
+expect wanted (Cons t rest) = if t == wanted then rest else throw ("expected " <> show wanted <> ", found " <> show t)
+expect wanted Nil = throw ("expected " <> show wanted <> ", found the end of the program")
+
+-- | A variable name.
+name : List Token -> {Except String} (String, List Token)
+name (Cons (TName n) rest) = (n, rest)
+name tokens = throw ("expected a name, found " <> described tokens)
+
+-- | Variable names, as many as there are.
+names : List Token -> (List String, List Token)
+names (Cons (TName n) rest) =
+  let (more, left) = names rest
+  (Cons n more, left)
+names tokens = (Nil, tokens)
+
+-- | Whether some element satisfies `p`.
+any : (a -> Bool) -> List a -> Bool
+any p Nil = False
+any p (Cons x rest) = p x || any p rest
+
+-- | The tokens after the first.
+drop1 : List Token -> List Token
+drop1 Nil = Nil
+drop1 (Cons _ rest) = rest
+
+-- | Whether the next token is this symbol.
+at : String -> List Token -> Bool
+at s (Cons (TSymbol t) _) = s == t
+at s _ = False
+
+-- | Whether a token can start an atom: then juxtaposition is application.
+starts : List Token -> Bool
+starts (Cons (TNumber _) _) = True
+starts (Cons (TName _) _) = True
+starts (Cons (TConstructor _) _) = True
+starts (Cons (TKeyword k) _) = k == "true" || k == "false"
+starts (Cons (TSymbol s) _) = s == "("
+starts Nil = False
+
+-- | `\x y -> body` from its parameters.
+lambdas : List String -> Expr -> Expr
+lambdas Nil body = body
+lambdas (Cons p rest) body = ELam p (lambdas rest body)
+
+-- | The operator a symbol stands for at a level, if any.
+operator : List String -> List Token -> Option Operator
+operator level (Cons (TSymbol s) _) =
+  if not (any (\it -> it == s) level) then None
+  else if s == "+" then Some OpAdd
+  else if s == "-" then Some OpSub
+  else if s == "*" then Some OpMul
+  else if s == "<" then Some OpLess
+  else Some OpEqual
+operator level _ = None
+
+-- | Names and `_` after a constructor in a pattern.
+binders : List Token -> (List String, List Token)
+binders (Cons (TName n) rest) =
+  let (more, left) = binders rest
+  (Cons n more, left)
+binders (Cons (TSymbol s) rest) =
+  if s == "_" then
+    let (more, left) = binders rest
+    (Cons "_" more, left)
+  else (Nil, Cons (TSymbol s) rest)
+binders tokens = (Nil, tokens)
+
+-- | A pattern: a constructor and the names it binds.
+pattern : List Token -> {Except String} (Pattern, List Token)
+pattern (Cons (TConstructor c) rest) =
+  let (bound, left) = binders rest
+  (PConstructor c bound, left)
+pattern tokens = throw ("expected a constructor pattern, found " <> described tokens)
+
+-- | Whether the next token is this keyword.
+keyword : String -> List Token -> Bool
+keyword k (Cons (TKeyword w) _) = k == w
+keyword k _ = False
+
+mutual
+  -- | An expression.
+  expr : List Token -> {Except String} (Expr, List Token)
+  expr tokens =
+    if at "\\" tokens then lambda (drop1 tokens)
+    else if keyword "let" tokens then binding (drop1 tokens)
+    else if keyword "if" tokens then conditional (drop1 tokens)
+    else if keyword "match" tokens then matching (drop1 tokens)
+    else binary ["<", "=="] tokens
+
+  -- | `\x y -> body`, after the backslash.
+  lambda : List Token -> {Except String} (Expr, List Token)
+  lambda tokens =
+    let (params, left) = names tokens
+    let (body, after) = expr (expect (TSymbol "->") left)
+    (lambdas params body, after)
+
+  -- | `if c then a else b`, after `if`.
+  conditional : List Token -> {Except String} (Expr, List Token)
+  conditional tokens =
+    let (cond, a) = expr tokens
+    let (yes, b) = expr (expect (TKeyword "then") a)
+    let (no, c) = expr (expect (TKeyword "else") b)
+    (EIf cond yes no, c)
+
+  -- | `match e with | … `, after `match`.
+  matching : List Token -> {Except String} (Expr, List Token)
+  matching tokens =
+    let (scrutinee, a) = expr tokens
+    let (arms, b) = branches (expect (TKeyword "with") a)
+    (EMatch scrutinee arms, b)
+
+  -- | `let x = e in b` and `let rec f x = e in b`, after `let`.
+  binding : List Token -> {Except String} (Expr, List Token)
+  binding tokens =
+    let recursive = keyword "rec" tokens
+    let (f, a) = name (if recursive then drop1 tokens else tokens)
+    let (params, b) = names a
+    let (value, c) = expr (expect (TSymbol "=") b)
+    let (body, d) = expr (expect (TKeyword "in") c)
+    if recursive then (ELetRec f (lambdas params value) body, d)
+    else (ELet f (lambdas params value) body, d)
+
+  -- | `| pattern -> expr`, as many as there are.
+  branches : List Token -> {Except String} (List (Pattern, Expr), List Token)
+  branches tokens =
+    if at "|" tokens then
+      let (p, a) = pattern (drop1 tokens)
+      let (body, b) = expr (expect (TSymbol "->") a)
+      let (more, c) = branches b
+      (Cons (p, body) more, c)
+    else (Nil, tokens)
+
+  -- | The binary levels, loosest first: comparison, sum, product.
+  binary : List String -> List Token -> {Except String} (Expr, List Token)
+  binary level tokens =
+    let (left, rest) = operand level tokens
+    chained level left rest
+
+  -- | The operand of a level: the next level, or application at the last.
+  operand : List String -> List Token -> {Except String} (Expr, List Token)
+  operand level tokens =
+    if any (\it -> it == "<") level then binary ["+", "-"] tokens
+    else if any (\it -> it == "+") level then binary ["*"] tokens
+    else application tokens
+
+  -- | Further operators of the same level, associating to the left.
+  chained : List String -> Expr -> List Token -> {Except String} (Expr, List Token)
+  chained level left tokens = case operator level tokens of
+    Some op ->
+      let (right, rest) = operand level (drop1 tokens)
+      chained level (EBinary op left right) rest
+    None -> (left, tokens)
+
+  -- | Juxtaposition: an atom applied to the atoms after it.
+  application : List Token -> {Except String} (Expr, List Token)
+  application tokens =
+    let (head, rest) = atom tokens
+    applied head rest
+
+  -- | Arguments, as long as atoms follow.
+  applied : Expr -> List Token -> {Except String} (Expr, List Token)
+  applied callee tokens =
+    if starts tokens then
+      let (argument, rest) = atom tokens
+      applied (EApp callee argument) rest
+    else (callee, tokens)
+
+  -- | An atom.
+  atom : List Token -> {Except String} (Expr, List Token)
+  atom (Cons (TNumber n) rest) = (EInt n, rest)
+  atom (Cons (TName n) rest) = (EVar n, rest)
+  atom (Cons (TConstructor c) rest) = (ECon c, rest)
+  atom (Cons (TKeyword k) rest) =
+    if k == "true" then (EBool True, rest)
+    else if k == "false" then (EBool False, rest)
+    else throw ("expected an expression, found " <> show (TKeyword k))
+  atom tokens =
+    if at "(" tokens then
+      let (inner, left) = expr (drop1 tokens)
+      (inner, expect (TSymbol ")") left)
+    else throw ("expected an expression, found " <> described tokens)
+
+-- | A written type named by a constructor: the two built-in ones, or data.
+named : String -> List Written -> Written
+named c args = if c == "Int" then WInt else if c == "Bool" then WBool else WData c args
+
+-- | Whether a token can start a type atom.
+startsType : List Token -> Bool
+startsType (Cons (TName _) _) = True
+startsType (Cons (TConstructor _) _) = True
+startsType tokens = at "(" tokens
+
+mutual
+  -- | A type: applications, then arrows to the right.
+  written : List Token -> {Except String} (Written, List Token)
+  written tokens =
+    let (left, rest) = applicationType tokens
+    if at "->" rest then
+      let (right, after) = written (drop1 rest)
+      (WArrow left right, after)
+    else (left, rest)
+
+  -- | A constructor applied to type atoms, or one atom.
+  applicationType : List Token -> {Except String} (Written, List Token)
+  applicationType (Cons (TConstructor c) rest) =
+    let (args, left) = typeArguments rest
+    (named c args, left)
+  applicationType tokens = typeAtom tokens
+
+  -- | Type atoms, as long as they follow.
+  typeArguments : List Token -> {Except String} (List Written, List Token)
+  typeArguments tokens =
+    if startsType tokens then
+      let (first, rest) = typeAtom tokens
+      let (more, left) = typeArguments rest
+      (Cons first more, left)
+    else (Nil, tokens)
+
+  -- | A parameter, a constructor without arguments, or a type in parentheses.
+  typeAtom : List Token -> {Except String} (Written, List Token)
+  typeAtom (Cons (TName p) rest) = (WParam p, rest)
+  typeAtom (Cons (TConstructor c) rest) = (named c Nil, rest)
+  typeAtom tokens =
+    if at "(" tokens then
+      let (inner, left) = written (drop1 tokens)
+      (inner, expect (TSymbol ")") left)
+    else throw ("expected a type, found " <> described tokens)
+
+-- | A constructor of a declaration and the types of its fields.
+constructor : List Token -> {Except String} ((String, List Written), List Token)
+constructor (Cons (TConstructor c) rest) =
+  let (fields, left) = typeArguments rest
+  ((c, fields), left)
+constructor tokens = throw ("expected a constructor, found " <> described tokens)
+
+-- | Further constructors after `|`.
+alternatives : List Token -> {Except String} (List (String, List Written), List Token)
+alternatives tokens =
+  if at "|" tokens then
+    let (first, rest) = constructor (drop1 tokens)
+    let (more, left) = alternatives rest
+    (Cons first more, left)
+  else (Nil, tokens)
+
+-- | `data Name params = C fields | … ;`
+declaration : List Token -> {Except String} (Declaration, List Token)
+declaration (Cons (TConstructor d) rest) =
+  let (params, a) = names rest
+  let (first, b) = constructor (expect (TSymbol "=") a)
+  let (more, c) = alternatives b
+  (MkDeclaration d params (Cons first more), expect (TSymbol ";") c)
+declaration tokens = throw ("expected a type name, found " <> described tokens)
+
+-- | Declarations, as long as `data` follows.
+declarations : List Token -> {Except String} (List Declaration, List Token)
+declarations tokens =
+  if keyword "data" tokens then
+    let (first, a) = declaration (drop1 tokens)
+    let (more, b) = declarations a
+    (Cons first more, b)
+  else (Nil, tokens)
+
+-- | A whole program: nothing may follow its expression.
+program : List Token -> {Except String} Program
+program tokens =
+  let (decls, a) = declarations tokens
+  let (body, b) = expr a
+  case b of
+    Nil -> MkProgram decls body
+    _ -> throw ("unexpected " <> described b <> " after the program")

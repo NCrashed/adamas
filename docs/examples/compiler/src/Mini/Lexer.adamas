@@ -1,0 +1,90 @@
+-- | The lexer: source text to tokens.
+--
+-- It works on the list of characters (`chars` from the prelude). A comment
+-- runs from `--` to the end of the line. An unknown character is a refusal,
+-- raised with `throw` from `Std.Except`.
+
+import Mini.Syntax (Token, TNumber, TName, TConstructor, TKeyword, TSymbol)
+import Std.Except (Except, throw)
+import Std.Text (digitValue)
+
+-- | Words that are not names.
+keywords : List String
+keywords = ["let", "rec", "in", "if", "then", "else", "match", "with", "data", "true", "false"]
+
+-- | Symbols of two characters; they are tried before the one-character ones.
+pairs : List String
+pairs = ["->", "=="]
+
+-- | Symbols of one character.
+singles : List Char
+singles = ['(', ')', '\\', '=', '|', ';', '_', '+', '-', '*', '<']
+
+-- | Whether a character continues a name: letters, digits, `_` and `'`.
+inName : Char -> Bool
+inName c = isAlpha c || isDigit c || c == '_' || c == '\''
+
+-- | The longest prefix whose characters satisfy `p`, and the rest.
+spanned : (Char -> Bool) -> List Char -> (List Char, List Char)
+spanned p Nil = (Nil, Nil)
+spanned p (Cons c rest) =
+  if p c then
+    let (taken, left) = spanned p rest
+    (Cons c taken, left)
+  else (Nil, Cons c rest)
+
+-- | The characters after the end of the current line.
+lineAfter : List Char -> List Char
+lineAfter Nil = Nil
+lineAfter (Cons c rest) = if c == '\n' then rest else lineAfter rest
+
+-- | The value of a run of decimal digits.
+valueOf : Int -> List Char -> Int
+valueOf acc Nil = acc
+valueOf acc (Cons c rest) = valueOf (acc * 10 + uInt64ToInt64 (unwrapOr 0 (digitValue c))) rest
+
+-- | Whether some element satisfies `p`.
+any : (a -> Bool) -> List a -> Bool
+any p Nil = False
+any p (Cons x rest) = p x || any p rest
+
+-- | A word: a keyword, a constructor or a variable.
+word : String -> Token
+word text =
+  if any (\k -> k == text) keywords then TKeyword text
+  else case chars text of
+    Cons c _ -> if isUpper c then TConstructor text else TName text
+    Nil -> TName text
+
+mutual
+  -- | Cuts characters into tokens.
+  scan : List Char -> {Except String} List Token
+  scan Nil = Nil
+  scan (Cons c rest) =
+    if isSpace c then scan rest
+    else if isDigit c then
+      let (digits, left) = spanned isDigit (Cons c rest)
+      Cons (TNumber (valueOf 0 digits)) (scan left)
+    else if isAlpha c then
+      let (letters, left) = spanned inName (Cons c rest)
+      Cons (word (fromChars letters)) (scan left)
+    else symbol c rest
+
+  -- | Punctuation, operators and comments.
+  symbol : Char -> List Char -> {Except String} List Token
+  symbol c rest = case rest of
+    Cons d more ->
+      if c == '-' && d == '-' then scan (lineAfter more)
+      else if any (\p -> p == fromChars [c, d]) pairs then Cons (TSymbol (fromChars [c, d])) (scan more)
+      else single c rest
+    Nil -> single c rest
+
+  -- | A one-character symbol, or a refusal.
+  single : Char -> List Char -> {Except String} List Token
+  single c rest =
+    if any (\s -> s == c) singles then Cons (TSymbol (charText c)) (scan rest)
+    else throw ("unexpected character " <> show c)
+
+-- | The tokens of a source text.
+tokenize : String -> {Except String} List Token
+tokenize source = scan (chars source)

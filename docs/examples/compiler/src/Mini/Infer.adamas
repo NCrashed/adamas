@@ -1,0 +1,291 @@
+-- | Type inference: Hindley-Milner with let-polymorphism.
+--
+-- Fresh type variables come from the `Fresh` effect, handled by a counter
+-- threaded through the handler's state. A type error is raised with `throw`
+-- from `Std.Except`. The substitution is triangular: a list of solved
+-- variables, applied until nothing changes.
+
+import Mini.Syntax (Operator, OpLess, OpEqual, Expr, EInt, EBool, EVar, ECon, ELam, EApp, ELet, ELetRec, EIf, EBinary, EMatch, Written, WParam, WInt, WBool, WData, WArrow, Ty, TyInt, TyBool, TyVar, TyArrow, TyData, Pattern, PConstructor, Declaration, MkDeclaration, Program, MkProgram)
+import Std.Except (Except, throw)
+
+-- | A supply of fresh type variables.
+effect Fresh where
+  fresh : UInt64
+
+-- | Runs a computation with variables numbered from `start`.
+supplied : UInt64 -> ({Fresh} a) -> a
+supplied start k = handle k with
+  state start
+  return v -> v
+  fresh -> resume state (state + 1)
+
+-- | A type with variables that every use instantiates afresh.
+data Scheme where
+  Forall : List UInt64 -> Ty -> Scheme
+
+-- | Solved variables.
+type Subst = List (UInt64, Ty)
+
+-- | A type with every solved variable replaced.
+resolved : Subst -> Ty -> Ty
+resolved s (TyVar v) = case lookup v s of
+  Some t -> resolved s t
+  None -> TyVar v
+resolved s (TyArrow a b) = TyArrow (resolved s a) (resolved s b)
+resolved s (TyData n args) = TyData n (map (resolved s) args)
+resolved s t = t
+
+-- | Whether the variable occurs in the type.
+occurs : UInt64 -> Ty -> Bool
+occurs v (TyVar w) = v == w
+occurs v (TyArrow a b) = occurs v a || occurs v b
+occurs v (TyData _ args) = foldr (\t acc -> occurs v t || acc) False args
+occurs v _ = False
+
+-- | Whether a variable is among these.
+member : UInt64 -> List UInt64 -> Bool
+member v Nil = False
+member v (Cons w rest) = v == w || member v rest
+
+-- | Replaces variables by types.
+substituted : List (UInt64, Ty) -> Ty -> Ty
+substituted m (TyVar v) = unwrapOr (TyVar v) (lookup v m)
+substituted m (TyArrow a b) = TyArrow (substituted m a) (substituted m b)
+substituted m (TyData n args) = TyData n (map (substituted m) args)
+substituted m t = t
+
+-- | Positions from `n`, one per element.
+indices : UInt64 -> List a -> List UInt64
+indices n Nil = Nil
+indices n (Cons _ rest) = Cons n (indices (n + 1) rest)
+
+-- | Variables in order of first appearance, each once.
+appearing : List UInt64 -> Ty -> List UInt64
+appearing seen (TyVar v) = if member v seen then seen else seen ++ [v]
+appearing seen (TyArrow a b) = appearing (appearing seen a) b
+appearing seen (TyData _ args) = foldl appearing seen args
+appearing seen _ = seen
+
+-- | A type with its variables renumbered from zero in order of appearance,
+-- so that it reads `a -> b` whatever the counter reached.
+normalized : Ty -> Ty
+normalized t =
+  let vars = appearing Nil t
+  substituted (zip vars (map TyVar (indices 0 vars))) t
+
+-- | Names for the first variables; past them, numbers.
+letters : List String
+letters = ["a", "b", "c", "d", "e", "f", "g", "h"]
+
+-- | The name of a type variable.
+variable : UInt64 -> String
+variable v = case lookup v (zip (indices 0 letters) letters) of
+  Some name -> name
+  None -> "t" <> show v
+
+mutual
+  -- | A type as Mini writes it: `Int -> List Bool`, variables as `a`, `b`.
+  render : Ty -> String
+  render TyInt = "Int"
+  render TyBool = "Bool"
+  render (TyVar v) = variable v
+  render (TyArrow a b) = renderArgument a <> " -> " <> render b
+  render (TyData n Nil) = n
+  render (TyData n args) = n <> foldr (\t acc -> " " <> renderAtom t <> acc) "" args
+
+  -- | The left of an arrow: arrows there need parentheses.
+  renderArgument : Ty -> String
+  renderArgument (TyArrow a b) = "(" <> render (TyArrow a b) <> ")"
+  renderArgument t = render t
+
+  -- | An argument of a data type: anything applied needs parentheses.
+  renderAtom : Ty -> String
+  renderAtom (TyArrow a b) = "(" <> render (TyArrow a b) <> ")"
+  renderAtom (TyData n (Cons x xs)) = "(" <> render (TyData n (Cons x xs)) <> ")"
+  renderAtom t = render t
+
+  -- | Solves a variable, unless it occurs in its own solution.
+  bind : Subst -> UInt64 -> Ty -> {Except String} Subst
+  bind s x t =
+    if occurs x t then
+      case normalized (TyArrow (TyVar x) t) of
+        TyArrow v u -> throw ("infinite type: " <> render v <> " = " <> render u)
+        _ -> s
+    else Cons (x, t) s
+
+  -- | The refusal for two types that cannot agree. Both sides are renumbered
+  -- together, so a variable shared by them keeps one name.
+  mismatch : Ty -> Ty -> {Except String} Subst
+  mismatch a b = case normalized (TyArrow a b) of
+    TyArrow u v -> throw ("cannot unify " <> render u <> " with " <> render v)
+    _ -> Nil
+
+mutual
+  -- | Extends the substitution so that both types become equal.
+  unify : Subst -> Ty -> Ty -> {Except String} Subst
+  unify s a b = unified s (resolved s a) (resolved s b)
+
+  -- | Unification of types already resolved.
+  unified : Subst -> Ty -> Ty -> {Except String} Subst
+  unified s (TyVar x) (TyVar y) = if x == y then s else Cons (x, TyVar y) s
+  unified s (TyVar x) t = bind s x t
+  unified s t (TyVar x) = bind s x t
+  unified s TyInt TyInt = s
+  unified s TyBool TyBool = s
+  unified s (TyArrow a b) (TyArrow c d) = unify (unify s a c) b d
+  unified s (TyData n as) (TyData m bs) =
+    if n == m then unifyAll s as bs else mismatch (TyData n as) (TyData m bs)
+  unified s a b = mismatch a b
+
+  -- | Pairwise unification of the arguments of one data type.
+  unifyAll : Subst -> List Ty -> List Ty -> {Except String} Subst
+  unifyAll s (Cons a as) (Cons b bs) = unifyAll (unify s a b) as bs
+  unifyAll s _ _ = s
+
+-- | Free variables of a type, after the substitution.
+freeIn : Subst -> Ty -> List UInt64
+freeIn s t = case resolved s t of
+  TyVar v -> [v]
+  TyArrow a b -> freeIn s a ++ freeIn s b
+  TyData _ args -> foldr (\a acc -> freeIn s a ++ acc) Nil args
+  _ -> Nil
+
+-- | The environment: variables and constructors with their schemes.
+type Env = List (String, Scheme)
+
+-- | Free variables of the environment.
+freeInEnv : Subst -> Env -> List UInt64
+freeInEnv s Nil = Nil
+freeInEnv s (Cons (_, Forall bound t) rest) =
+  filter (\v -> not (member v bound)) (freeIn s t) ++ freeInEnv s rest
+
+-- | The scheme of a type: what the environment does not fix becomes bound.
+generalized : Subst -> Env -> Ty -> Scheme
+generalized s env t =
+  let fixed = freeInEnv s env
+  Forall (filter (\v -> not (member v fixed)) (freeIn s t)) (resolved s t)
+
+-- | Fresh variables for every bound one.
+renamed : List UInt64 -> {Fresh} List (UInt64, Ty)
+renamed Nil = Nil
+renamed (Cons v rest) = Cons (v, TyVar fresh) (renamed rest)
+
+-- | A use of a scheme: its bound variables replaced by fresh ones.
+instantiated : Scheme -> {Fresh} Ty
+instantiated (Forall bound t) = substituted (renamed bound) t
+
+-- | The scheme of a name, or a refusal.
+scheme : String -> Env -> {Except String} Scheme
+scheme x env = case lookup x env of
+  Some found -> found
+  None -> throw ("unbound name " <> x)
+
+-- | The types of an operator: both operands, and the result.
+signature : Operator -> (Ty, Ty)
+signature OpLess = (TyInt, TyBool)
+signature OpEqual = (TyInt, TyBool)
+signature _ = (TyInt, TyInt)
+
+-- | The field types of a constructor and the type it builds.
+fields : Ty -> (List Ty, Ty)
+fields (TyArrow a b) =
+  let (more, result) = fields b
+  (Cons a more, result)
+fields t = (Nil, t)
+
+-- | Pattern variables, bound monomorphically; `_` binds nothing.
+bound : List String -> List Ty -> Env -> Env
+bound (Cons x xs) (Cons t ts) env =
+  if x == "_" then bound xs ts env else Cons (x, Forall Nil t) (bound xs ts env)
+bound _ _ env = env
+
+mutual
+  -- | The type of an expression, and the substitution grown by it.
+  infer : Env -> Subst -> Expr -> {Fresh, Except String} (Subst, Ty)
+  infer env s (EInt _) = (s, TyInt)
+  infer env s (EBool _) = (s, TyBool)
+  infer env s (EVar x) = (s, instantiated (scheme x env))
+  infer env s (ECon c) = (s, instantiated (scheme c env))
+  infer env s (ELam x body) =
+    let a = TyVar fresh
+    let (s1, b) = infer (Cons (x, Forall Nil a) env) s body
+    (s1, TyArrow a b)
+  infer env s (EApp f x) =
+    let (s1, tf) = infer env s f
+    let (s2, tx) = infer env s1 x
+    let r = TyVar fresh
+    (unify s2 tf (TyArrow tx r), r)
+  infer env s (ELet x value body) =
+    let (s1, t) = infer env s value
+    infer (Cons (x, generalized s1 env t) env) s1 body
+  infer env s (ELetRec f value body) =
+    let a = TyVar fresh
+    let (s1, t) = infer (Cons (f, Forall Nil a) env) s value
+    let s2 = unify s1 a t
+    infer (Cons (f, generalized s2 env a) env) s2 body
+  infer env s (EIf c yes no) =
+    let (s1, tc) = infer env s c
+    let s2 = unify s1 tc TyBool
+    let (s3, ty) = infer env s2 yes
+    let (s4, tn) = infer env s3 no
+    (unify s4 ty tn, ty)
+  infer env s (EBinary op left right) =
+    let (operand, result) = signature op
+    let (s1, tl) = infer env s left
+    let (s2, tr) = infer env (unify s1 tl operand) right
+    (unify s2 tr operand, result)
+  infer env s (EMatch scrutinee arms) =
+    let (s1, t) = infer env s scrutinee
+    let r = TyVar fresh
+    (arm env t r s1 arms, r)
+
+  -- | The arms of a `match`: each pattern against the scrutinee, each body
+  -- against the result.
+  arm : Env -> Ty -> Ty -> Subst -> List (Pattern, Expr) -> {Fresh, Except String} Subst
+  arm env t r s Nil = s
+  arm env t r s (Cons (PConstructor c xs, body) rest) =
+    let (types, built) = fields (instantiated (scheme c env))
+    if length types /= length xs then
+      throw (c <> " takes " <> show (length types) <> " fields, the pattern binds " <> show (length xs))
+    else
+      let s1 = unify s t built
+      let (s2, tb) = infer (bound xs types env) s1 body
+      arm env t r (unify s2 r tb) rest
+
+mutual
+  -- | A written field type as a type: parameters become the variables of the
+  -- constructor's scheme, numbered by position.
+  typed : List String -> Written -> {Except String} Ty
+  typed params (WParam p) = case lookup p (zip params (indices 0 params)) of
+    Some v -> TyVar v
+    None -> throw ("unknown type parameter " <> p)
+  typed params WInt = TyInt
+  typed params WBool = TyBool
+  typed params (WData n args) = TyData n (typedAll params args)
+  typed params (WArrow a b) = TyArrow (typed params a) (typed params b)
+
+  -- | Field types, in order.
+  typedAll : List String -> List Written -> {Except String} List Ty
+  typedAll params Nil = Nil
+  typedAll params (Cons w rest) = Cons (typed params w) (typedAll params rest)
+
+-- | Schemes of constructors: each builds the declared type from its fields.
+schemed : List String -> List UInt64 -> Ty -> List (String, List Written) -> {Except String} Env
+schemed params vars result Nil = Nil
+schemed params vars result (Cons (c, written) rest) =
+  Cons (c, Forall vars (foldr TyArrow result (typedAll params written))) (schemed params vars result rest)
+
+-- | The constructors of a declaration with their schemes.
+constructors : Declaration -> {Except String} Env
+constructors (MkDeclaration d params ctors) =
+  let vars = indices 0 params
+  schemed params vars (TyData d (map TyVar vars)) ctors
+
+-- | The type of a program, or a refusal. Variables of schemes are numbered
+-- from zero, so fresh ones start past every declaration's parameters; the
+-- answer is renumbered back for reading.
+typeOf : Program -> {Except String} Ty
+typeOf (MkProgram decls body) =
+  let env = foldr (\d acc -> constructors d ++ acc) Nil decls
+  let (s, t) = supplied 1000 (infer env Nil body)
+  normalized (resolved s t)

@@ -13,6 +13,13 @@ not what is easier to write:
 | `regions.adamas` | a region as a label in the type: a reference does not outlive its block (§3.6) |
 | `ffi.adamas` | a level-1 foreign symbol, the boundary marked by its own effect (§5.3) |
 
+And one project, a program written for its result rather than to show a
+feature:
+
+| Directory | About |
+|---|---|
+| [`compiler/`](compiler/README.md) | Mini, a compiler for a small ML: lexer, parser, Hindley-Milner inference, a stack machine; seven modules and a test module |
+
 Each reads top to bottom: the header says how it differs from Haskell, OCaml
 or Rust, and then comes the code with `-- |` documentation blocks.
 
@@ -24,7 +31,9 @@ summary in English.
 
 Every example is part of the gate (`crates/adamas-cli/tests/examples.rs`) and
 passes four checks: `adamas check`, `adamas eval` with a **recorded answer**,
-`adamas doc` (an example must be documented) and `adamas fmt --check`.
+`adamas doc` (an example must be documented) and `adamas fmt --check`. The
+project passes two more: `adamas test`, and binaries built through C and
+through LLVM must print what the interpreter prints.
 
 This lifts the condition under which the directory used to stay empty: an
 unchecked copy of §4 drifts from the original the faster the longer it is. The

@@ -193,6 +193,13 @@ impl Instances {
         self.classes.contains_key(name)
     }
 
+    /// Имена объявленных классов: их знает параметр функтора, чья сигнатура -
+    /// класс (§3.5), там, куда таблица инстансов не доходит.
+    #[must_use]
+    pub fn class_names(&self) -> Rc<[Symbol]> {
+        self.classes.keys().cloned().collect()
+    }
+
     /// Что известно о классе.
     #[must_use]
     pub fn class(&self, name: &str) -> Option<&Class> {
@@ -867,6 +874,7 @@ fn from_context(
 ) -> Option<Rc<Value>> {
     let mut ctx = adamas_core::ctx::Ctx::new(signature);
     let mut binders = Vec::new();
+    let mut levels: Vec<u32> = Vec::new();
     let mut current = ty;
     // `Let` в телескопе - связывание `let` (`fresh_meta`): лямбды решения его
     // не связывают - в спайн дырки оно не попадает, - а контекст определяет
@@ -877,6 +885,7 @@ fn from_context(
             Term::Pi(binder, name, domain, _, codomain) => {
                 let value = ctx.eval(domain);
                 binders.push((binder.mult, Rc::clone(name), Rc::clone(&value)));
+                levels.push(ctx.size());
                 ctx = ctx.bind(Rc::clone(name), binder.mult, value);
                 current = codomain;
             }
@@ -914,6 +923,12 @@ fn from_context(
             taken = Some((at, path));
             break;
         }
+        if let Some(path) =
+            through_dictionary(signature, metas, instances, &ctx, levels[at], domain, &goal)
+        {
+            taken = Some((at, path));
+            break;
+        }
     }
     let (found, path) = taken?;
     let index = u32::try_from(arity - 1 - found).ok()?;
@@ -927,6 +942,43 @@ fn from_context(
         &adamas_core::value::Env::default(),
         &solution,
     ))
+}
+
+/// Словарь, который несёт параметр функтора с классом сигнатурой (§3.5): у
+/// `(K : Ord)` он лежит полем `#dict`, и `eq x y` при `x : K.T` находит
+/// `K.#dict` - либо его суперкласс, тем же путём, что у констрейнта.
+fn through_dictionary(
+    signature: &Signature,
+    metas: &mut Metas,
+    instances: &Instances,
+    ctx: &adamas_core::ctx::Ctx<'_>,
+    level: u32,
+    domain: &Rc<Value>,
+    goal: &Rc<Value>,
+) -> Option<Vec<adamas_core::term::Name>> {
+    let shape = adamas_core::conv::whnf_solved(signature, metas, domain);
+    let quoted = quote(ctx.size(), &shape);
+    let Term::Record(fields) = &quoted else {
+        return None;
+    };
+    if !fields
+        .iter()
+        .any(|field| &*field.name == crate::expr::DICTIONARY)
+    {
+        return None;
+    }
+    let dictionary = Term::Project(
+        Rc::new(Term::var(ctx.size() - 1 - level)),
+        adamas_core::term::Name::from(crate::expr::DICTIONARY),
+    );
+    let (ty, _) =
+        adamas_core::check::infer(&ctx.speculating(), metas, Mult::Zero, &dictionary).ok()?;
+    let head = adamas_core::term::Name::from(crate::expr::DICTIONARY);
+    if adamas_core::conv::convertible(signature, metas, ctx.size(), &ty, goal) {
+        return Some(vec![head]);
+    }
+    let path = superclass_path(signature, metas, instances, &ty, goal, ctx.size(), 8)?;
+    Some(std::iter::once(head).chain(path).collect())
 }
 
 /// Факт, доказанный гипотезой **после уточнения ветви** (§10 вопрос 248).

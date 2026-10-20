@@ -78,6 +78,10 @@ pub const UNIT: &str = "Unit";
 /// Имя ветки, принимающей значение вычисления.
 pub(crate) const RETURN: &str = "return";
 
+/// Поле словаря у параметра функтора, чья сигнатура - класс (§3.5). Автору
+/// его не написать: `#` в имени не лексируется.
+pub(crate) const DICTIONARY: &str = "#dict";
+
 /// Ветка `return`, которую подставляет её отсутствие: значение вычисления и
 /// есть ответ хендлера, то есть `b := a`.
 fn identity_return(span: Span) -> ast::HandlerBranch {
@@ -787,6 +791,10 @@ pub(crate) struct Enclosing {
     /// разделяющий флаг здесь, а не два разных типа: имя, телескоп и подъём
     /// членов у них буквально одни.
     pub file: bool,
+    /// Классы, известные там, где модуль объявлен: параметр функтора с
+    /// классом сигнатурой разворачивается в модуль с типом и словарём (§3.5).
+    /// Таблицы инстансов у элаборатора телескопа нет, а имена классов нужны.
+    pub classes: Rc<[Symbol]>,
 }
 
 impl Enclosing {
@@ -794,7 +802,12 @@ impl Enclosing {
     ///
     /// Порядок не безразличен - тип своего параметра вправе назвать объемлющий
     /// (`module Inner (Sub : Eqv Key.T)`), а наоборот не бывает.
-    pub(crate) fn nested(outer: Option<&Self>, name: Symbol, own: &[ast::Binder]) -> Self {
+    pub(crate) fn nested(
+        outer: Option<&Self>,
+        name: Symbol,
+        own: &[ast::Binder],
+        classes: Rc<[Symbol]>,
+    ) -> Self {
         let params = match outer {
             Some(outer) if !outer.params.is_empty() => outer
                 .params
@@ -808,6 +821,7 @@ impl Enclosing {
             name,
             params,
             file: false,
+            classes,
         }
     }
 
@@ -817,6 +831,7 @@ impl Enclosing {
             name: path,
             params: Rc::from(&[][..]),
             file: true,
+            classes: Rc::from(&[][..]),
         }
     }
 
@@ -1173,6 +1188,9 @@ pub(crate) struct Elaborator<'a> {
     holes: Option<usize>,
     /// Модуль, чьё тело элаборируется (§4.8). `None` - верхний уровень.
     enclosing: Option<Enclosing>,
+    /// Классы, годные сигнатурой параметра функтора (§3.5), - там, где
+    /// таблицы инстансов нет: телескоп функтора её не получает.
+    classes: Rc<[Symbol]>,
     /// Именованные инстансы, выбранные `using`: класс и имя (§4.3).
     ///
     /// Выбор действует на **вставку**, а не на разрешение: словарь для
@@ -1404,7 +1422,17 @@ impl<'a> Elaborator<'a> {
     }
 
     pub(crate) fn within(mut self, enclosing: Option<&Enclosing>) -> Self {
+        if let Some(enclosing) = enclosing {
+            self.classes = Rc::clone(&enclosing.classes);
+        }
         self.enclosing = enclosing.cloned();
+        self
+    }
+
+    /// Классы, годные сигнатурой параметра функтора, для телескопа самого
+    /// функтора: объемлющего у него может не быть.
+    pub(crate) fn bridging(mut self, classes: &Rc<[Symbol]>) -> Self {
+        self.classes = Rc::clone(classes);
         self
     }
 
@@ -1519,6 +1547,7 @@ impl<'a> Elaborator<'a> {
             branch_result: None,
             body_awaited: None,
             instances: None,
+            classes: Rc::from(&[][..]),
             arrow_row: None,
             awaited: None,
             bare: false,
@@ -1660,6 +1689,11 @@ impl<'a> Elaborator<'a> {
                     // умолчания считать их было бы нечем.
                     (None, None) => Term::Universe(self.metas.fresh_level()),
                 };
+                let domain = if uppercase {
+                    self.bridged(domain)
+                } else {
+                    domain
+                };
                 let mult = match &binder.ty {
                     Some(ty) => self.binder_mult(binder.mult, ty, default, binder.span)?,
                     None => Self::multiplicity(binder.mult, default),
@@ -1679,6 +1713,138 @@ impl<'a> Elaborator<'a> {
         self.scope.truncate(depth);
         self.ctx = outer;
         Ok(found)
+    }
+
+    /// Класс сигнатурой параметра функтора (§3.5, §4.4): `(K : Ord)` - модуль
+    /// с типом `T` и словарём `Ord T`.
+    ///
+    /// Класс есть сигнатура модуля, а инстанс - модуль, и `Ord UInt64` есть
+    /// `Ord with type T = UInt64`. Словарь лежит одним полем, а не россыпью
+    /// методов: тогда его целиком находит поиск словаря в контексте, и
+    /// суперклассы достаются тем же путём, что у констрейнта `{Ord a}`.
+    /// Мост только для класса с одним параметром: тип `T` у сигнатуры один.
+    fn bridged(&mut self, domain: Term) -> Term {
+        let Term::Const(name, ..) = &domain else {
+            return domain;
+        };
+        let class = self.instances.is_some_and(|it| it.is_class(name))
+            || self.classes.iter().any(|it| it == name);
+        if !class {
+            return domain;
+        }
+        let Some(ty) = self.inferred(&domain) else {
+            return domain;
+        };
+        let Term::Pi(_, _, carrier, _, codomain) = &ty else {
+            return domain;
+        };
+        if !matches!(&**codomain, Term::Universe(_)) {
+            return domain;
+        }
+        let field = |name: &str, ty: Term| CoreField {
+            name: CoreName::from(name),
+            mult: Mult::One,
+            shape: adamas_core::term::Shape::default(),
+            ty: Rc::new(ty),
+        };
+        let dictionary = Term::App(Rc::new(domain.clone()), Rc::new(Term::var(0)));
+        Term::Record(Fields::closed(Rc::from(vec![
+            field("T", (**carrier).clone()),
+            field(DICTIONARY, dictionary),
+        ])))
+    }
+
+    /// Проекция поля; у параметра с классом сигнатурой - метод через словарь.
+    fn projected(&mut self, record: Term, name: &str) -> Term {
+        self.dictionary_member(&record, name)
+            .unwrap_or_else(|| Term::Project(Rc::new(record), CoreName::from(name)))
+    }
+
+    /// Метод класса у параметра функтора с классом сигнатурой: `K.lt` есть
+    /// `K.#dict.lt`, а метод суперкласса - `K.#dict.#super0.eq` (§3.5).
+    ///
+    /// Поле записи параметра сначала спрашивается само: `K.T` - его поле, и
+    /// путь через словарь ему не нужен.
+    fn dictionary_member(&mut self, record: &Term, name: &str) -> Option<Term> {
+        let fields = |it: &mut Self, term: &Term| -> Option<Vec<CoreName>> {
+            let ty = it.inferred(term)?;
+            let unfolded = whnf_solved(it.signature, it.metas, &it.ctx.eval(&ty));
+            let quoted = it.ctx.quote(&unfolded);
+            let Term::Record(fields) = &quoted else {
+                return None;
+            };
+            Some(fields.iter().map(|field| field.name.clone()).collect())
+        };
+        let own = fields(self, record)?;
+        if own.iter().any(|it| &**it == name) || !own.iter().any(|it| &**it == DICTIONARY) {
+            return None;
+        }
+        // Обход вширь по суперклассам: метод ближайшего уровня побеждает, и
+        // путь до него короче.
+        let start = Term::Project(Rc::new(record.clone()), CoreName::from(DICTIONARY));
+        let mut frontier = vec![start];
+        for _ in 0..8 {
+            let mut next = Vec::new();
+            for dictionary in frontier {
+                let names = fields(self, &dictionary)?;
+                if names.iter().any(|it| &**it == name) {
+                    return Some(Term::Project(Rc::new(dictionary), CoreName::from(name)));
+                }
+                for superclass in names.iter().filter(|it| it.starts_with("#super")) {
+                    next.push(Term::Project(
+                        Rc::new(dictionary.clone()),
+                        superclass.clone(),
+                    ));
+                }
+            }
+            if next.is_empty() {
+                return None;
+            }
+            frontier = next;
+        }
+        None
+    }
+
+    /// Инстанс аргументом функтора с классом сигнатурой: `Box downward` при
+    /// `downward : Ord UInt64` есть `Box {T = UInt64, #dict = downward}`
+    /// (§3.5: `Ord UInt64` ≡ `Ord with type T = UInt64`).
+    fn packed(&mut self, argument: Term, expected: Option<&Rc<Value>>) -> Term {
+        let Some(expected) = expected else {
+            return argument;
+        };
+        let shape = self
+            .ctx
+            .quote(&whnf_solved(self.signature, self.metas, expected));
+        let Term::Record(fields) = &shape else {
+            return argument;
+        };
+        let [carrier, dictionary] = &fields[..] else {
+            return argument;
+        };
+        if &*dictionary.name != DICTIONARY {
+            return argument;
+        }
+        let Term::App(class, _) = &*dictionary.ty else {
+            return argument;
+        };
+        let Some(ty) = self.synthesized(&argument) else {
+            return argument;
+        };
+        let unfolded = self.ctx.quote(&ty);
+        let Term::App(head, given) = &unfolded else {
+            return argument;
+        };
+        let same = |term: &Term| match term {
+            Term::Const(name, ..) => Some(Rc::clone(name)),
+            _ => None,
+        };
+        if same(head).is_none() || same(head) != same(class) {
+            return argument;
+        }
+        Term::Object(Rc::from(vec![
+            (carrier.name.clone(), Rc::clone(given)),
+            (dictionary.name.clone(), Rc::new(argument)),
+        ]))
     }
 
     /// Тип терма, каким его видит ядро. `None` - не вывелся.
@@ -2845,7 +3011,7 @@ impl<'a> Elaborator<'a> {
                     return self.form(&rewritten, default, expected, position, awaited);
                 }
                 let inner = self.placed(Position::Inner, |it| it.expr(record, Mult::Many))?;
-                Ok(Term::Project(Rc::new(inner), CoreName::from(&*name.text)))
+                Ok(self.projected(inner, &name.text))
             }
             ExprKind::Update(base, fields) => self.update(base, fields, expr.span),
             ExprKind::TypeApp(..) => self.type_app(expr),
@@ -5863,6 +6029,7 @@ impl<'a> Elaborator<'a> {
                 argument
             };
             let argument = self.argument_term(argument, expected.as_ref(), inside)?;
+            let argument = self.packed(argument, expected.as_ref());
             // Домен сводится с типом написанного аргумента **здесь**, а не в
             // настоящей проверке: иначе имплисит, решаемый первым аргументом,
             // до второго не доходит, и голый литерал там разворачивается
@@ -7285,11 +7452,48 @@ impl<'a> Elaborator<'a> {
             // здесь ещё есть, а у дырки его уже не будет.
             let argument = self
                 .chosen(&domain)
+                .or_else(|| self.bridged_argument(&domain))
                 .unwrap_or_else(|| self.fresh_meta(&domain));
             let value = self.ctx.eval(&argument);
             term = Term::App(Rc::new(term), Rc::new(argument));
             ty = codomain.apply(value);
         }
+    }
+
+    /// Неявный параметр функтора с классом сигнатурой (§3.5, §4.4) - запись из
+    /// двух дырок, `{T = ?t, #dict = ?d}`, а не одна дырка.
+    ///
+    /// Употребление решает тип: `HashMap.insert "a" 1 m` требует `?K.T ≡
+    /// String`, а проекция из дырки лежит вне паттернового фрагмента, и
+    /// унификация её не решает - §4.8 называет здесь поиск. Развёрнутая запись
+    /// сводит требование к `?t ≡ String`, а `?d : Ord ?t` - обычная дырка
+    /// словаря, и решает её разрешение классов, как только `?t` известна.
+    fn bridged_argument(&mut self, domain: &Rc<Value>) -> Option<Term> {
+        let shape = self
+            .ctx
+            .quote(&whnf_solved(self.signature, self.metas, domain));
+        let Term::Record(fields) = &shape else {
+            return None;
+        };
+        let [carrier, dictionary] = &fields[..] else {
+            return None;
+        };
+        if &*dictionary.name != DICTIONARY {
+            return None;
+        }
+        let Term::App(class, _) = &*dictionary.ty else {
+            return None;
+        };
+        let carrier_ty = self.ctx.eval(&carrier.ty);
+        let t = self.fresh_meta(&carrier_ty);
+        let goal = self
+            .ctx
+            .eval(&Term::App(Rc::clone(class), Rc::new(t.clone())));
+        let d = self.fresh_meta(&goal);
+        Some(Term::Object(Rc::from(vec![
+            (carrier.name.clone(), Rc::new(t)),
+            (dictionary.name.clone(), Rc::new(d)),
+        ])))
     }
 
     /// Хвост из одних неявных, кончающийся сортом, заполняется дырками:

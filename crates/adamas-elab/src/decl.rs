@@ -1284,7 +1284,8 @@ fn declare_module(
             &declared, span,
         );
     }
-    let inner = Enclosing::nested(within, Rc::clone(&declared), &module.params);
+    let classes = instances.class_names();
+    let inner = Enclosing::nested(within, Rc::clone(&declared), &module.params, classes);
     // `Alone`, а не переданный подключатель: `import` в теле модуля отвергает
     // разбор (§4.8), и досюда он не доезжает вовсе.
     //
@@ -1324,8 +1325,9 @@ fn declare_module(
     // Связывания двух родов, как у всякого члена: объемлющие параметры, потом
     // свои. У вложенного модуля первые есть, и без них его запись не собрать -
     // члены подняты под ними.
-    let mut telescopes =
-        Elaborator::new(signature, metas, owned, fixities, warnings).within(within);
+    let mut telescopes = Elaborator::new(signature, metas, owned, fixities, warnings)
+        .within(within)
+        .bridging(&inner.classes);
     let outer = telescopes.telescope(params_of(within), true, Mult::Many, Unwritten::Sort)?;
     let own = telescopes.beneath(&outer, |it| {
         it.telescope(&module.params, true, Mult::Many, Unwritten::Sort)
@@ -1540,6 +1542,7 @@ fn seal_members(signature: &mut Signature, within: &Enclosing, members: &[ast::D
                 name: qualify(Some(within), &inner.name.text),
                 params: Rc::clone(&within.params),
                 file: false,
+                classes: Rc::clone(&within.classes),
             };
             seal_members(signature, &deeper, &inner.members);
         }
@@ -4899,6 +4902,7 @@ fn hide_subtree(signature: &mut Signature, within: &Enclosing, member: &ast::Dec
                 name: qualify(Some(within), &inner.name.text),
                 params: Rc::clone(&within.params),
                 file: false,
+                classes: Rc::clone(&within.classes),
             };
             for member in &inner.members {
                 hide_subtree(signature, &deeper, member);
@@ -5226,7 +5230,7 @@ fn declare_module_type(
     // полем записи метка не становится - она не тип (§3.4), - а членам ниже
     // нужно её короткое имя в row. На `:>` поднятая метка переименуется в
     // метку модуля.
-    let inner = Enclosing::nested(within, Rc::clone(declared), &[]);
+    let inner = Enclosing::nested(within, Rc::clone(declared), &[], instances.class_names());
     let mut members = Vec::with_capacity(module.members.len());
     for member in &module.members {
         match &member.kind {

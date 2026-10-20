@@ -1,0 +1,61 @@
+-- Класс сигнатурой параметра функтора (§3.5, §4.4, лог 2026-10-20).
+--
+-- Класс есть сигнатура модуля, инстанс - модуль: `Ord UInt64` ≡ `Ord with
+-- type T = UInt64`. Параметр `(K : Ord)` - модуль с типом `K.T` и словарём, и
+-- в теле функтора работают три пути к методам: голый `compare` находит
+-- словарь параметра, `K.lt` - его поле, `eq` - поле суперкласса.
+--
+-- Неявный `{K : Ord}` решает употребление: `Sorted.insert 5 …` требует `K.T
+-- ≡ UInt64`, и словарь находит обычное разрешение. Деревья по `UInt64` и по
+-- `Char` живут в одной программе и по типу не смешиваются. Явное применение
+-- берёт именованный инстанс: `Box downward` упорядочивает наоборот.
+--
+-- Было: «ожидался тип, получено `Ord` типа `(0 _ : Type) -> Type`».
+
+instance downward : Ord UInt64 where
+  compare a b = if ltUInt64 a b then GT else if eqUInt64 a b then EQ else LT
+
+module Sorted {K : Ord} where
+  data Set where
+    Leaf : Set
+    Node : Set -> K.T -> Set -> Set
+
+  empty : Set
+  empty = Leaf
+
+  insert : K.T -> Set -> Set
+  insert x Leaf = Node Leaf x Leaf
+  insert x (Node l y r) = case compare x y of
+    LT -> Node (insert x l) y r
+    GT -> Node l y (insert x r)
+    EQ -> Node l y r
+
+  member : K.T -> Set -> Bool
+  member x Leaf = False
+  member x (Node l y r) = if eq x y then True else if K.lt x y then member x l else member x r
+
+  size : Set -> UInt64
+  size Leaf = 0
+  size (Node l _ r) = size l + 1 + size r
+
+module Box (K : Ord) where
+  smaller : K.T -> K.T -> K.T
+  smaller a b = if K.lt a b then a else b
+
+module Down = Box downward
+
+numbers : Sorted.Set
+numbers = Sorted.insert (5 : UInt64) (Sorted.insert 3 (Sorted.insert 5 (Sorted.insert 8 Sorted.empty)))
+
+letters : Sorted.Set
+letters = Sorted.insert 'b' (Sorted.insert 'a' Sorted.empty)
+
+main : (UInt64, Bool, Bool, UInt64, Bool, UInt64)
+main =
+  ( Sorted.size numbers
+  , Sorted.member (3 : UInt64) numbers
+  , Sorted.member (4 : UInt64) numbers
+  , Sorted.size letters
+  , Sorted.member 'a' letters
+  , Down.smaller 3 5
+  )

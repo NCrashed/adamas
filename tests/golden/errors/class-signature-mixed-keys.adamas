@@ -1,0 +1,25 @@
+-- Множества по разным ключам не смешиваются (§4.4, лог 2026-10-20).
+--
+-- `numbers` построено под `Ord UInt64`, ключ `'a'` требует `Ord Char`, и
+-- одного `K` на оба нет. Отказ называет невыведенный неявный аргумент, а не
+-- разные ключи: своего отказа у разрешения модулей нет (названная цена в
+-- `programs/functor-implicit.adamas`).
+
+module Sorted {K : Ord} where
+  data Set where
+    Leaf : Set
+    Node : Set -> K.T -> Set -> Set
+
+  insert : K.T -> Set -> Set
+  insert x Leaf = Node Leaf x Leaf
+  insert x (Node l y r) = Node l y r
+
+  member : K.T -> Set -> Bool
+  member x Leaf = False
+  member x (Node l y r) = eq x y
+
+numbers : Sorted.Set
+numbers = Sorted.insert (5 : UInt64) Sorted.Leaf
+
+main : Bool
+main = Sorted.member 'a' numbers

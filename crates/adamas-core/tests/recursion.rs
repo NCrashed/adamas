@@ -851,3 +851,74 @@ proptest! {
         prop_assert_eq!(h_total, base_total, "через два звена");
     }
 }
+
+/// Словарь в типе - данные, метод из него - нет (§4.7, решение владельца
+/// 2026-10-21).
+///
+/// Константа, чьё тело - запись из имён, допустима в стёртом фрагменте:
+/// развёртка её конечна, какими бы ни были методы. Проекция из неё в стёртом
+/// фрагменте спрашивает тотальность вынутого - иначе `dict.m` в типе
+/// запускал бы нетотальный метод при сравнении. Отказ называет метод.
+#[test]
+fn a_dictionary_is_data_in_a_type_but_its_partial_method_is_not() {
+    let mut signature = base();
+    assert!(!define_unary(
+        &mut signature,
+        "loop",
+        lam(Mult::Many, "n", c("loop").apply([Term::var(0)]))
+    ));
+    let field = |name: &str, ty: Term| adamas_core::term::Field {
+        name: name.into(),
+        mult: Mult::One,
+        shape: adamas_core::term::Shape::default(),
+        ty: Rc::new(ty),
+    };
+    let record = Term::Record(adamas_core::term::Fields::closed(Rc::from(vec![field(
+        "m",
+        arrow(c("Nat"), c("Nat")),
+    )])));
+    let mut metas = Metas::default();
+    let outcome = signature.define(
+        &mut metas,
+        "dict",
+        Mult::Many,
+        0,
+        record.clone(),
+        Some(Term::Object(Rc::from(vec![(
+            "m".into(),
+            Rc::new(c("loop")),
+        )]))),
+    );
+    assert!(outcome.is_ok(), "словарь типизируется: {outcome:?}");
+    assert!(
+        !verdict(&signature, "dict"),
+        "словарь ссылается на нетотальное"
+    );
+
+    // Проекция метода в типе - отказ с именем метода.
+    let projected = Term::Project(Rc::new(c("dict")), "m".into()).apply([c("zero")]);
+    match check_closed(
+        &signature,
+        &c("anything").apply([c("zero")]),
+        &family(projected),
+    ) {
+        Err(TypeError {
+            kind: ErrorKind::PartialConstant { name },
+            ..
+        }) => assert_eq!(&*name, "loop", "отказ обязан назвать метод"),
+        other => panic!("метод словаря в типе: {other:?}"),
+    }
+
+    // Сам словарь в стёртой позиции - данные: `ignore : (0 d : R) -> Nat`.
+    let outcome = signature.define(
+        &mut metas,
+        "ignore",
+        Mult::Many,
+        0,
+        pi(Mult::Zero, "d", record, c("Nat")),
+        Some(lam(Mult::Zero, "d", c("zero"))),
+    );
+    assert!(outcome.is_ok(), "`ignore` типизируется: {outcome:?}");
+    let outcome = check_closed(&signature, &c("ignore").apply([c("dict")]), &c("Nat"));
+    assert!(outcome.is_ok(), "словарь стёртым аргументом: {outcome:?}");
+}

@@ -784,6 +784,16 @@ fn settle_collecting(
             }
             return Err(ElabError::NoInstance { written, span });
         };
+        // Ворота §4.7 у разрешения (§10 вопрос 134): в стёртой позиции
+        // нетотальному инстансу нельзя - словарь там нужен вызову метода.
+        // Словарь-данные (поле `#dict` записи-параметра функтора) - исключение:
+        // ядро такой словарь в типе допускает, и метод из него не протаскивается
+        // (§4.7, лог 2026-10-21). Спрашивается здесь, а не ядром: ядро роли
+        // словаря не видит.
+        let partial = signature.lookup(&name).is_some_and(|it| !it.total);
+        if sigma == Mult::Zero && partial && !metas.is_data(meta) {
+            return Err(ElabError::PartialInstance { written, span });
+        }
         let (solution, fresh) = match applied_candidate(signature, metas, &ty, &dictionary, sigma) {
             Ok(found) => found,
             // Кандидат сошёлся бы, но не тотален, а позиция стёртая: отказ

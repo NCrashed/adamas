@@ -3688,6 +3688,28 @@ fn project_with(
     // Стёртое поле в рантайм-позиции: значения у него нет, и вынуть его
     // нечем - то же правило, что у стёртой переменной.
     let field = &telescope.fields()[index];
+    // Словарь в типе - данные (§4.7, `total::recorded`), но его метод - нет:
+    // проекция в стёртом фрагменте спрашивает тотальность того, что вынимает.
+    // Без этого `(Hashable#String).hash x` в типе запускал бы нетотальный хеш
+    // при сравнении типов.
+    if sigma == Mult::Zero {
+        let taken = static_field(ctx.signature(), record, name);
+        if let Some(Term::Const(method, ..)) = &taken {
+            let partial = ctx
+                .signature()
+                .lookup(method)
+                .is_some_and(|it| !crate::total::admits(it, Mult::Zero));
+            if partial {
+                return Err(refuse(
+                    ctx,
+                    metas,
+                    ErrorKind::PartialConstant {
+                        name: Rc::clone(method),
+                    },
+                ));
+            }
+        }
+    }
     if field.mult == Mult::Zero && sigma != Mult::Zero {
         return Err(refuse(
             ctx,
@@ -4338,4 +4360,35 @@ fn family_instance(
         .map(|row| row.map(|argument| crate::eval::quote(size, argument)))
         .collect();
     ctx.eval(&declaration.instantiated_type(levels, &rows, &[]))
+}
+
+/// Значение поля записи, известное по терму: литерал записи, константа с
+/// телом-записью (словарь, модуль) либо проекция из такой же (§4.7, лог
+/// 2026-10-21). Вычислением не берётся: нетотальный словарь сравнение не
+/// разворачивает, и значение его поля видно только в теле.
+fn static_field(signature: &Signature, record: &Term, name: &str) -> Option<Term> {
+    let fields = static_record(signature, record)?;
+    fields
+        .iter()
+        .find(|(field, _)| &**field == name)
+        .map(|(_, value)| (**value).clone())
+}
+
+/// Поля записи, известные по терму.
+/// Поля литерала записи.
+type ObjectFields = Rc<[(Name, Rc<Term>)]>;
+
+fn static_record(signature: &Signature, record: &Term) -> Option<ObjectFields> {
+    match record {
+        Term::Object(fields) => Some(Rc::clone(fields)),
+        Term::Const(name, _, _) => match &signature.lookup(name)?.body {
+            Some(Term::Object(fields)) => Some(Rc::clone(fields)),
+            _ => None,
+        },
+        Term::Project(inner, field) => {
+            let value = static_field(signature, inner, field)?;
+            static_record(signature, &value)
+        }
+        _ => None,
+    }
 }

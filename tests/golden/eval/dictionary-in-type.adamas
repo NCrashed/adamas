@@ -1,0 +1,42 @@
+-- Словарь в типе - данные (§4.7, решение владельца 2026-10-21).
+--
+-- Семейство в функторе индексируется модулем-параметром, и специализация
+-- кладёт в тип словарь: `Table {T = String, #dict = Hashy#String}`. Метод
+-- `Hashy String` - цикл по байтам, тотальность его структурно не доказать, и
+-- правило «в типе только тотальное» отвергало специализацию. Развёртка словаря
+-- конечна - это запись из имён, - и в типе он допустим; метод через проекцию
+-- в тип не протаскивается (`adamas-core/tests/recursion.rs`). Заодно
+-- словарь не копируется специализацией: копия расходилась с оригиналом в
+-- типах. Найдено библиотекой HAMT на ключе `String`.
+
+class Hashy a when Eq a where
+  hashy : a -> UInt64
+
+walk : (ω n : UInt64) -> Array n UInt8 -> UInt64 -> UInt64 -> UInt64
+walk n bytes i acc = case decide (ltUInt64 i n) of
+  No _ -> acc
+  Yes _ -> walk n bytes (i + 1) (acc * 31 + uInt8ToUInt64 (arrayIndex bytes i))
+
+instance Hashy String where
+  hashy (MkString n bytes) = walk n bytes 0 7
+
+module Table {K : Hashy} where
+  data Table where
+    Done : Table
+    One : UInt64 -> K.T -> Table -> Table
+
+  push : K.T -> Table -> Table
+  push x t = One (hashy x) x t
+
+  summed : Table -> UInt64
+  summed Done = 0
+  summed (One h _ rest) = h + summed rest
+
+-- Тип, написанный ключом: словарь `Hashy String` стоит полем записи-параметра
+-- - данными, - и нетотальный инстанс ему разрешён. Вызов метода в типе
+-- по-прежнему отвергается: `errors/instance-partial-in-type.adamas`.
+known : Table String
+known = Table.push "ab" (Table.push "c" Table.Done)
+
+main : UInt64
+main = Table.summed known

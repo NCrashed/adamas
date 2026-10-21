@@ -1212,7 +1212,31 @@ impl Walk<'_> {
 /// том же фрагменте, поэтому проверка одна на оба случая.
 #[must_use]
 pub fn admits(definition: &Definition, sigma: Mult) -> bool {
-    definition.total || sigma != Mult::Zero
+    definition.total || sigma != Mult::Zero || recorded(definition)
+}
+
+/// Константа, чьё тело - запись из имён: словарь инстанса либо модуль (§4.7,
+/// решение владельца 2026-10-21). В типе она - данные: развёртка её конечна,
+/// сколько бы ни были нетотальны методы, на которые она ссылается. Метод при
+/// этом не протаскивается: проекция из неё в стёртом фрагменте спрашивает
+/// тотальность самого метода ([`crate::check`], `project_with`). Нужно
+/// специализации: `HashMap {T = String, #dict = Hashable#String}` несёт
+/// словарь в типе, а хеш текста - цикл по байтам.
+#[must_use]
+pub fn recorded(definition: &Definition) -> bool {
+    let Some(Term::Object(fields)) = &definition.body else {
+        return false;
+    };
+    fields.iter().all(|(_, value)| named(value))
+}
+
+/// Значение-имя: ссылка, примитив либо запись из таких же.
+fn named(term: &Term) -> bool {
+    match term {
+        Term::Const(..) | Term::Prim(_) | Term::Universe(_) => true,
+        Term::Object(fields) => fields.iter().all(|(_, value)| named(value)),
+        _ => false,
+    }
 }
 
 /// Передан ли параметр `at` вызову неизменным - граница шага вверх (§10

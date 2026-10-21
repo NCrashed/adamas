@@ -7631,12 +7631,25 @@ impl<'a> Elaborator<'a> {
         let key = self.typing(|it| it.expr(argument, Mult::Many))?;
         let goal = self.ctx.eval(&Term::App(class, Rc::new(key.clone())));
         let d = self.fresh_meta(&goal);
+        self.mark_data(&d);
         let packed = Term::Object(Rc::from(vec![
             (carrier.name, Rc::new(key)),
             (dictionary, Rc::new(d)),
         ]));
         let rest = codomain.apply(self.ctx.eval(&packed));
         Ok(Some((packed, rest)))
+    }
+
+    /// Дырка словаря - поле `#dict` записи-параметра: словарь здесь данные, и
+    /// нетотальный инстанс ему разрешён и в типе (§4.7, лог 2026-10-21).
+    fn mark_data(&mut self, hole: &Term) {
+        let mut head = hole;
+        while let Term::App(callee, _) = head {
+            head = callee;
+        }
+        if let Term::Meta(meta) = head {
+            self.metas.mark_data(*meta);
+        }
     }
 
     /// Неявный параметр функтора с классом сигнатурой (§3.5, §4.4) - запись из
@@ -7669,6 +7682,7 @@ impl<'a> Elaborator<'a> {
             .ctx
             .eval(&Term::App(Rc::clone(class), Rc::new(t.clone())));
         let d = self.fresh_meta(&goal);
+        self.mark_data(&d);
         Some(Term::Object(Rc::from(vec![
             (carrier.name.clone(), Rc::new(t)),
             (dictionary.name.clone(), Rc::new(d)),

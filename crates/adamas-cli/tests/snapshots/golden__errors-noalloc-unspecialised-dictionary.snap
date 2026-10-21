@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: noalloc-unspecialised-dictionary.adamas:24:1: `mapped` объявлена `@noalloc`, но зовёт `Mappable#Box`, а та строит запись - это куча Perceus. Выходов три: линейный или unique вход, где reuse гарантирован; регион `{Alloc r}`; отказ от конструирования. Первых двух в компиляторе пока нет, так что остаётся третий
+  mapped : Box UInt64 -> Box UInt64
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

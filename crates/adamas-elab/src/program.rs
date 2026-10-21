@@ -426,6 +426,7 @@ pub fn analyze(entry: SourceFile, sources: &dyn Sources) -> Program {
     }));
     note_functors(&signature, &names);
     let mut diagnostics = loader.blame;
+    noalloc_diagnostics(&mut signature, &instances, &units, &mut diagnostics);
     if let Err(error) = outcome {
         refusals.refused(error, Vec::new());
     }
@@ -890,4 +891,35 @@ fn conventional(name: &str) -> bool {
 /// Имя вшитого файла в отказах: пути в проекте у него нет.
 fn embedded(path: &str) -> String {
     adamas_l10n::tr!("program-embedded", path = path)
+}
+
+/// `@noalloc`, которого вердикт до мономорфизации не дал, решает проход по
+/// специализированным телам (§10 вопрос 269). Отказ встаёт в файл модуля, где
+/// написан атрибут.
+fn noalloc_diagnostics(
+    signature: &mut Signature,
+    instances: &Instances,
+    units: &[Unit],
+    diagnostics: &mut Vec<Located>,
+) {
+    for (name, blame, spot) in crate::mono::deferred_noalloc(signature, instances) {
+        let unit = spot
+            .module
+            .as_deref()
+            .and_then(|module| {
+                units
+                    .iter()
+                    .position(|it| it.path.as_deref() == Some(module))
+            })
+            .unwrap_or(0);
+        let error = crate::error::ElabError::Allocates {
+            name,
+            blame,
+            span: spot.span,
+        };
+        diagnostics.push(Located {
+            unit,
+            diagnostic: Diagnostic::of_error(&error),
+        });
+    }
 }

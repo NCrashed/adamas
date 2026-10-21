@@ -806,6 +806,9 @@ pub struct Signature {
     routes: HashMap<Name, Rc<[crate::error::Frame]>>,
     /// Где определение аллоцирует - уже спаном, уже в своём файле.
     allocations: HashMap<Name, Spot>,
+    /// Требования `@noalloc`, отложенные до прохода по специализированным
+    /// телам (§10 вопрос 269): имя и место атрибута.
+    deferred_noalloc: Vec<(Name, Spot)>,
     /// Что тело делает с разобранной ячейкой - уже спанами, уже в своём файле.
     ///
     /// Кладёт её элаборация по [`crate::fbip::report`]; определения, у которых
@@ -1423,6 +1426,30 @@ impl Signature {
                 self.routes.remove(name);
                 self.allocations.remove(name);
             }
+        }
+    }
+
+    /// Откладывает `@noalloc`, которого вердикт до мономорфизации не дал (§10
+    /// вопрос 269): решает его проход по специализированным телам после всей
+    /// программы. `spot` - место атрибута, туда и встанет отказ.
+    pub fn defer_noalloc(&mut self, name: &str, spot: Spot) {
+        self.deferred_noalloc.push((Name::from(name), spot));
+    }
+
+    /// Отложенные требования `@noalloc`, забранные из сигнатуры.
+    pub fn take_deferred_noalloc(&mut self) -> Vec<(Name, Spot)> {
+        std::mem::take(&mut self.deferred_noalloc)
+    }
+
+    /// Снимает отрицательный вердикт, который проход по специализированным
+    /// телам опроверг (§10 вопрос 269): место «аллоцирует здесь» над
+    /// оправданным определением было бы ложью, как над постулатом,
+    /// которому поверили ([`Signature::promise_noalloc`]).
+    pub fn acquit_allocation(&mut self, name: &str) {
+        if let Some(definition) = self.definitions.get_mut(name) {
+            definition.allocates = None;
+            self.routes.remove(name);
+            self.allocations.remove(name);
         }
     }
 

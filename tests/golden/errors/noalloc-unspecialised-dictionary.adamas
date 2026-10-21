@@ -1,0 +1,25 @@
+-- `@noalloc` и словарь, который мономорфизация не убирает (§10 вопрос 269).
+--
+-- `fmap` полиморфен по кратности (`{q : Mult}`), и специализация такой метод
+-- не копирует: параметр кратности связан у поля словаря. Вызов остаётся
+-- вызовом через словарь, и запись `Mappable#Box` строится в рантайме - отказ
+-- верен. Ближайший проходящий сосед - словарь без параметра кратности:
+-- `programs/noalloc-class-dictionary.adamas`, `measured`.
+
+data Box (a : Type) where
+  Empty : Box a
+  Full : a -> Box a
+
+class Mappable (f : Type -> Type) where
+  fmap : {q : Mult} -> (ω g : (q x : a) -> b) -> f a -> f b
+
+instance Mappable Box where
+  fmap g Empty = Empty
+  fmap g (Full x) = Full (g x)
+
+keep : UInt64 -> UInt64
+keep n = n
+
+@noalloc
+mapped : Box UInt64 -> Box UInt64
+mapped b = fmap keep b

@@ -5453,10 +5453,14 @@ wrap n = Succ n
             "{BASE}\napply : (Nat -> Nat) -> Nat -> Nat\napply f n = f n\n\n@noalloc\nheld : Nat -> Nat\nheld n = apply (\\m -> m) n\n"
         ),
     );
+    // Частичное применение - значением, а не вершиной тела: `later a = pick a`
+    // при `later : Nat -> Nat -> Nat` понижается двухместной функцией с
+    // η-параметром и хвостовым вызовом `pick`, замыкания там нет (§10 вопрос
+    // 269, сверено с C).
     refuse(
         "частичное применение",
         format!(
-            "{BASE}\npick : Nat -> Nat -> Nat\npick a b = a\n\n@noalloc\nlater : Nat -> Nat -> Nat\nlater a = pick a\n"
+            "{BASE}\npick : Nat -> Nat -> Nat\npick a b = a\n\n@noalloc\nlater : Nat -> Nat\nlater a =\n  let f = pick a\n  f a\n"
         ),
     );
     refuse(

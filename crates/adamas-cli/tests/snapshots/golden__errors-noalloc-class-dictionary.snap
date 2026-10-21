@@ -1,7 +1,0 @@
----
-source: crates/adamas-cli/tests/golden.rs
-expression: text
----
-Ошибка: noalloc-class-dictionary.adamas:13:1: `next` объявлена `@noalloc`, но зовёт `Add#UInt64`, а та строит запись - это куча Perceus. Выходов три: линейный или unique вход, где reuse гарантирован; регион `{Alloc r}`; отказ от конструирования. Первых двух в компиляторе пока нет, так что остаётся третий
-  next : UInt64 -> UInt64
-  ^^^^^^^^^^^^^^^^^^^^^^^

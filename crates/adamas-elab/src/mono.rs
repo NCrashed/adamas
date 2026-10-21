@@ -1363,3 +1363,57 @@ fn constants(term: &Term, into: &mut Vec<Name>) {
         Term::Project(base, _) => recur(base),
     }
 }
+
+/// Отложенные требования `@noalloc`, решённые по специализированным телам
+/// (§10 вопрос 269): что отвергнуто - вместе с местом атрибута.
+///
+/// Вердикт до мономорфизации консервативен - словарь известного инстанса он
+/// считает записью, - а специализация её убирает не всегда: у `fmap` с
+/// параметром кратности запись словаря строится. Поэтому решает то, что
+/// исполнится: корнем берётся само определение, и вердикт спрашивается у его
+/// специализации (`next@`). Её нет - корень не заземлён (параметры уровня,
+/// row, кратности) либо словарей внутри нет, - и остаётся прежний вердикт.
+/// Проход идёт по копии сигнатуры: производные определения в программу не
+/// уезжают, а оправданное определение теряет свой отрицательный вердикт и в
+/// ней - подсказка редактора не расходится с атрибутом.
+pub fn deferred_noalloc(
+    signature: &mut Signature,
+    instances: &Instances,
+) -> Vec<(Name, adamas_core::alloc::Blame, adamas_core::sig::Spot)> {
+    let deferred = signature.take_deferred_noalloc();
+    if deferred.is_empty() {
+        return Vec::new();
+    }
+    let mut probe = signature.clone();
+    let mut metas = Metas::default();
+    let mut refused = Vec::new();
+    for (name, spot) in deferred {
+        // Row-параметр стрелки - чистый вызов: `@noalloc` спрашивает именно
+        // его, эффекты окружения тут ни при чём. Уровни и кратности так не
+        // заземлить - корень остаётся несклоняемым.
+        let rows = probe
+            .lookup(&name)
+            .filter(|it| it.level_arity == 0 && it.mult_allowed.is_empty())
+            .map(|it| it.row_arity);
+        let special = rows
+            .and_then(|rows| {
+                let empty = (0..rows).map(|_| Row::empty());
+                let root = Term::Const(Rc::clone(&name), Rc::from([]), Args::rows(empty));
+                specialise(&mut probe, &mut metas, instances, &root).ok()
+            })
+            .and_then(|made| {
+                made.created
+                    .into_iter()
+                    .find(|it| it.split('@').next() == Some(&*name))
+            });
+        let blame = match &special {
+            Some(special) => adamas_core::alloc::blame(&probe, special),
+            None => adamas_core::alloc::blame(signature, &name),
+        };
+        match blame {
+            Some(blame) => refused.push((name, blame, spot)),
+            None => signature.acquit_allocation(&name),
+        }
+    }
+    refused
+}

@@ -194,7 +194,22 @@ pub fn elaborated(module: &Module) -> (Signature, Warnings, Refusals) {
         observed: &mut observed,
     };
     elaborate_file(&module.decls, None, pass, &mut Alone, &mut refusals);
+    settle_noalloc(&mut signature, &instances, &mut refusals);
     (signature, warnings, refusals)
+}
+
+/// Отложенные требования `@noalloc` - по специализированным телам (§10
+/// вопрос 269); отвергнутые встают в отказы. Входу без подключённых файлов
+/// модуль атрибута не нужен: файл один.
+fn settle_noalloc(signature: &mut Signature, instances: &Instances, refusals: &mut Refusals) {
+    for (name, blame, spot) in crate::mono::deferred_noalloc(signature, instances) {
+        let error = ElabError::Allocates {
+            name,
+            blame,
+            span: spot.span,
+        };
+        refusals.refused(error, Vec::new());
+    }
 }
 
 /// То же, но поверх уже собранной сигнатуры.
@@ -231,6 +246,7 @@ pub fn elaborate_into(
     };
     let mut refusals = Refusals::new();
     elaborate_file(&module.decls, None, pass, &mut Alone, &mut refusals);
+    settle_noalloc(signature, instances, &mut refusals);
     refusals.first().map_or(Ok(()), Err)
 }
 
@@ -4072,7 +4088,7 @@ fn locate_allocation(
 /// разное в зависимости от того, где написан. Ровно так он и терялся внутри
 /// `mutual`, пока проверка стояла в одном пути из трёх.
 fn verdicts(
-    signature: &Signature,
+    signature: &mut Signature,
     name: &Symbol,
     demanded: Required,
     span: Span,
@@ -4085,11 +4101,21 @@ fn verdicts(
     }
     if demanded.noalloc {
         if let Some(blame) = alloc::blame(signature, name) {
-            return Err(ElabError::Allocates {
-                name: Rc::clone(name),
-                blame,
-                span,
-            });
+            // Вердикт до мономорфизации консервативен: словарь известного
+            // инстанса он считает записью, а специализация её чаще всего
+            // убирает (§10 вопрос 269). У определения с телом решает проход
+            // по специализированным телам после всей программы; у постулата
+            // специализировать нечего.
+            if signature.lookup(name).is_some_and(|it| it.body.is_some()) {
+                let module = signature.scope().own().map(Rc::clone);
+                signature.defer_noalloc(name, Spot { module, span });
+            } else {
+                return Err(ElabError::Allocates {
+                    name: Rc::clone(name),
+                    blame,
+                    span,
+                });
+            }
         }
     }
     // Совместимость с FBIP - свойство тела, и у постулата спрашивать её не у
@@ -4105,7 +4131,7 @@ fn verdicts(
 ///
 /// Спрашивается **после** объявления группы: до этой проверки атрибут внутри
 /// `mutual` выбрасывался вместе с заголовком, то есть не значил ничего.
-fn required_verdicts(signature: &Signature, planned: &[&Mutual<'_>]) -> Result<(), ElabError> {
+fn required_verdicts(signature: &mut Signature, planned: &[&Mutual<'_>]) -> Result<(), ElabError> {
     for member in planned {
         verdicts(signature, &member.full, member.required, member.span)?;
     }

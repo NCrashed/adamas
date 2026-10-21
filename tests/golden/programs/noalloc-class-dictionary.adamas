@@ -1,0 +1,32 @@
+-- `@noalloc` решается по специализированному телу (§10 вопрос 269).
+--
+-- `c + 1` при `c : UInt64` зовёт `+` со словарём `Add#UInt64`. Вердикт до
+-- мономорфизации видит в словаре построение записи, но мономорфизация
+-- специализирует вызов (`+@_,Add#UInt64` → `adamas_add_UInt64`), и записи в
+-- рантайме нет. Требование поэтому решается после всей программы - по
+-- специализации определения (`next@`). То же у метода класса над семейством:
+-- словарь `Sized#Box` уходит специализацией. Отвергается по-прежнему то, что
+-- исполнится аллоцирующим: `errors/noalloc-unspecialised-dictionary.adamas`.
+
+data Box (a : Type) where
+  Empty : Box a
+  Full : a -> Box a
+
+class Sized (f : Type -> Type) where
+  count : f a -> UInt64
+
+instance Sized Box where
+  count Empty = 0
+  count (Full _) = 1
+
+@noalloc
+next : UInt64 -> UInt64
+next c = c + 1
+
+@noalloc
+zero : UInt64 -> Bool
+zero c = c == 0
+
+@noalloc
+measured : Box UInt64 -> UInt64
+measured b = count b + 1

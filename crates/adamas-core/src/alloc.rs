@@ -324,8 +324,9 @@ pub fn source(
         signature,
         found: None,
         route: Vec::new(),
+        eta: 0,
     };
-    walk.parameters(&body);
+    walk.parameters(&body, telescope(&definition.ty));
     walk.found
 }
 
@@ -336,6 +337,11 @@ struct Walk<'a> {
     found: Option<Found>,
     /// Где обход стоит сейчас - снаружи внутрь.
     route: Vec<Frame>,
+    /// Связывания типа определения, не покрытые его лямбдами: вершина тела
+    /// их получает (η). Тело `Add#UInt64.add` при двух оставшихся - насыщенный
+    /// вызов, и понижение зовёт его с обоими аргументами (§10 вопрос 269).
+    /// Забирается первым же узлом: глубже η не дотягивается.
+    eta: usize,
 }
 
 impl Walk<'_> {
@@ -344,15 +350,18 @@ impl Walk<'_> {
     /// Снимаются **все** ведущие. `mk n = \m -> plus n m` и `mk n m = plus n m`
     /// дают один и тот же терм ядра, и отличить возвращённое замыкание от лишнего
     /// параметра здесь нечем; понижение с известной арностью поступает так же.
-    fn parameters(&mut self, term: &Term) {
+    fn parameters(&mut self, term: &Term, arity: usize) {
         let mut current = term;
+        let mut peeled = 0;
         while let Term::Lam(_, _, body) = current {
+            peeled += 1;
             // Кадр дописывает тот, кто узел строит (`pattern::Tree`): обернул
             // лямбдой - дописал `Body`. Не дописать его здесь значило бы
             // разойтись с маршрутами клауз, по которым место и ищется.
             self.route.push(Frame::Body);
             current = body;
         }
+        self.eta = arity.saturating_sub(peeled);
         self.term(current);
     }
 
@@ -374,6 +383,7 @@ impl Walk<'_> {
     }
 
     fn term(&mut self, term: &Term) {
+        let eta = std::mem::take(&mut self.eta);
         if self.found.is_some() {
             return;
         }
@@ -415,7 +425,7 @@ impl Walk<'_> {
 
             Term::Lam(..) => self.record(Source::Closure),
 
-            Term::Const(name, _, _) => self.constant(name, 0),
+            Term::Const(name, _, _) => self.constant(name, eta),
 
             Term::App(..) => {
                 let (head, arguments) = spine(term);
@@ -431,7 +441,7 @@ impl Walk<'_> {
                         // голова: читателю подчёркивают `MkPair x y`, а не
                         // одно имя конструктора. Кадров поэтому не
                         // дописывается.
-                        self.constant(name, arguments.len());
+                        self.constant(name, arguments.len() + eta);
                         self.applied(name, &arguments);
                     }
                     // Convoy: разбор применён к соседним аргументам, и ветви

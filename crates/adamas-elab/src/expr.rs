@@ -1743,7 +1743,10 @@ impl<'a> Elaborator<'a> {
         let Term::Pi(_, _, carrier, _, codomain) = &ty else {
             return domain;
         };
-        if !matches!(&**codomain, Term::Universe(_)) {
+        if !matches!(
+            (&**carrier, &**codomain),
+            (Term::Universe(_), Term::Universe(_))
+        ) {
             return domain;
         }
         let field = |name: &str, ty: Term| CoreField {
@@ -1754,7 +1757,11 @@ impl<'a> Elaborator<'a> {
         };
         let dictionary = Term::App(Rc::new(domain.clone()), Rc::new(Term::var(0)));
         Term::Record(Fields::closed(Rc::from(vec![
-            field("T", (**carrier).clone()),
+            // Ключ - тип значений исполнения, то есть `Type 0`: старшие
+            // универсумы стираются и ключом не бывают. Полиморфный уровень
+            // здесь не давал положить ключ в массив узла - элемент массива
+            // живёт в `Type 0` (лог 2026-10-21).
+            field("T", Term::universe(0)),
             field(DICTIONARY, dictionary),
         ])))
     }

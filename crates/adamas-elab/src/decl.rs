@@ -7126,7 +7126,13 @@ fn family_header<'a>(
     // Связывания двух родов в одном телескопе, как у алиаса: сперва параметры
     // функтора, потом свои. Написанный параметр живёт под функторными - его тип
     // вправе их упоминать.
-    let outer = elaborator.telescope(params_of(within), true, Mult::Many, Unwritten::Sort)?;
+    //
+    // Функторные - стёртые, как и свои (§10 вопрос 78): параметр семейства в
+    // значении не хранится, и конструктору модуль-параметр не нужен - функции
+    // получают его сами. С ω всякий узел HAMT нёс запись `{T, #dict}` и
+    // словарь `Hashable` полем: четыре аллокации на конструктор (лог
+    // 2026-10-21).
+    let outer = elaborator.telescope(params_of(within), true, Mult::Zero, Unwritten::Sort)?;
     let own = elaborator.beneath(&outer, |it| {
         it.telescope(&typed, false, Mult::Zero, Unwritten::Sort)
     })?;

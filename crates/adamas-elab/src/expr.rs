@@ -513,9 +513,17 @@ pub(crate) fn qualified_in(
 
 /// Ступени лестницы [`qualified_in`] без последней: член объемлющего модуля.
 fn member_in(signature: &Signature, enclosing: Option<&str>, name: &str) -> Option<Symbol> {
+    // Путь самого файла - уже не модуль: имя под ним объявлено уровнем файла и
+    // параметров функтора не несёт. Во входном файле пути нет, и лестница
+    // кончалась сама; в подключённом она доходила до `Coll.Thing.helper`, и
+    // член функтора применял функцию файла к своему параметру (лог 2026-10-21).
+    let own = signature.scope().own().map(|it| &**it);
     if let Some(prefix) = enclosing {
         let mut prefix = prefix;
         loop {
+            if Some(prefix) == own {
+                break;
+            }
             let full: Symbol = Rc::from(format!("{prefix}.{name}").as_str());
             if signature.lookup(&full).is_some() {
                 return Some(full);
@@ -2734,6 +2742,18 @@ impl<'a> Elaborator<'a> {
         // поиск идёт по полному имени.
         if let Some(declared) = self.signature.written(&full) {
             return Some(Rc::clone(declared));
+        }
+        // Модуль, открытый импортом по имени (`import Coll.HashMap (HashMap)`):
+        // член под точкой - член этого модуля, `HashMap.insert` есть
+        // `Coll.HashMap.HashMap.insert`. Таблица импорта знает имя модуля, а не
+        // каждого его члена (лог 2026-10-21).
+        if let Some((prefix, last)) = full.rsplit_once('.') {
+            if let Some(module) = self.signature.written(prefix) {
+                let candidate: Symbol = Rc::from(format!("{module}.{last}").as_str());
+                if self.signature.lookup(&candidate).is_some() {
+                    return Some(candidate);
+                }
+            }
         }
         // Написанный путь целиком (`Data.Map.insert`) - только к модулю,
         // который этот файл импортировал: иначе зависимость между файлами
@@ -5521,6 +5541,15 @@ impl<'a> Elaborator<'a> {
         if let Some(index) = self.local(&name.text) {
             return Ok(Term::var(index));
         }
+        // Модуль, чей главный тип назван его именем, пишется типом (§4.8, лог
+        // 2026-10-20) - раньше соседей и импорта: открытое импортом имя модуля
+        // разрешалось там и до правила не доходило.
+        if let Some(main) = self.main_type(&name.text) {
+            return self.declared(&ast::Name {
+                text: main,
+                span: name.span,
+            });
+        }
         // `Type` заслоняется локальным связыванием, но не определением: имя
         // занято языком, и переопределить его нечем.
         if &*name.text == prim::TYPE {
@@ -5657,7 +5686,12 @@ impl<'a> Elaborator<'a> {
     /// String Int`, и пример §4.8 `Map Int String` пишется буквально. Только
     /// семейство: модуль с одноимённой функцией остаётся модулем.
     fn main_type(&self, written: &str) -> Option<Symbol> {
-        let module = self.qualified(written).unwrap_or_else(|| Rc::from(written));
+        // Имя модуля, открытое импортом (`import Coll.HashMap (HashMap)`),
+        // разрешается таблицей импорта, а не лестницей модулей.
+        let module = self
+            .qualified(written)
+            .or_else(|| self.signature.written(written).map(Rc::clone))
+            .unwrap_or_else(|| Rc::from(written));
         let last = module.rsplit('.').next()?;
         let member: Symbol = Rc::from(format!("{module}.{last}").as_str());
         matches!(
@@ -5678,12 +5712,6 @@ impl<'a> Elaborator<'a> {
         if self.signature.leaked(&name.text) {
             return Err(ElabError::UnknownName {
                 name: Rc::clone(&name.text),
-                span: name.span,
-            });
-        }
-        if let Some(main) = self.main_type(&name.text) {
-            return self.declared(&ast::Name {
-                text: main,
                 span: name.span,
             });
         }

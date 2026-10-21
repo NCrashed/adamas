@@ -1,0 +1,23 @@
+-- Функтор в подключённом файле (лог 2026-10-21): свидетель для
+-- `imported-functor.adamas`.
+
+import Prelude
+
+-- Функция уровня файла: член функтора зовёт её, не применяя к параметру.
+bumped : UInt64 -> UInt64
+bumped x = addUInt64 x 1
+
+module Bag {K : Prelude.Ord} where
+  data Bag where
+    Done : Bag
+    One : K.T -> Bag -> Bag
+
+  empty : Bag
+  empty = Done
+
+  push : K.T -> Bag -> Bag
+  push x b = One x b
+
+  size : Bag -> UInt64
+  size Done = 0
+  size (One _ rest) = bumped (size rest)

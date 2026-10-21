@@ -2236,6 +2236,15 @@ impl<'a> Elaborator<'a> {
                     self.free_in(value, bound, found);
                 }
             }
+            // Кортеж в позиции типа - тип-запись `(A, B)`: свободное имя внутри
+            // поднимается, как в стрелке. Прежде `drop1 : List (UInt64, v) ->
+            // List (UInt64, v)` отвергалось «связать имя нечем» - `v` стояло
+            // только в кортежах (лог 2026-10-21).
+            ExprKind::Tuple(items) => {
+                for item in items {
+                    self.free_in(item, bound, found);
+                }
+            }
             ExprKind::Project(record, _) => self.free_in(record, bound, found),
             ExprKind::Update(base, fields) => {
                 self.free_in(base, bound, found);
@@ -2265,7 +2274,6 @@ impl<'a> Elaborator<'a> {
             | ExprKind::Case { .. }
             | ExprKind::LamCase(_)
             | ExprKind::Handle { .. }
-            | ExprKind::Tuple(_)
             | ExprKind::List(_)
             | ExprKind::Lit(_)
             | ExprKind::Hole => {}

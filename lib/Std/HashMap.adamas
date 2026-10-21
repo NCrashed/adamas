@@ -40,12 +40,6 @@ narrowed n xs at filler =
   let front = copied n m xs 0 (arrayNew m filler) 0 at
   copied n m xs (at + 1) front at (m - at)
 
--- Свёртка ячеек с номера `i`.
-foldedOver : (ω n : UInt64) -> Array n a -> UInt64 -> (a -> b -> b) -> b -> b
-foldedOver n xs i f acc = case decide (ltUInt64 i n) of
-  No _ -> acc
-  Yes _ -> foldedOver n xs (i + 1) f (f (arrayIndex xs i) acc)
-
 module HashMap {K : Hashable} where
   -- | Карта ключей `K.T` в значения `v`.
   data HashMap (v : Type) where
@@ -176,12 +170,19 @@ module HashMap {K : Hashable} where
   delete : K.T -> HashMap v -> HashMap v
   delete k m = deleteAt (hash k) 0 k m
 
-  -- | Свёртка по парам; порядок - порядок хешей, не вставки.
-  fold : (K.T -> v -> b -> b) -> b -> HashMap v -> b
-  fold f acc Empty = acc
-  fold f acc (Leaf _ k x) = f k x acc
-  fold f acc (Many _ pairs) = foldl (\inner pair -> f pair._1 pair._2 inner) acc pairs
-  fold f acc (Branch n _ children) = foldedOver n children 0 (\child inner -> fold f inner child) acc
+  mutual
+    -- | Свёртка по парам; порядок - порядок хешей, не вставки.
+    fold : (K.T -> v -> b -> b) -> b -> HashMap v -> b
+    fold f acc Empty = acc
+    fold f acc (Leaf _ k x) = f k x acc
+    fold f acc (Many _ pairs) = foldl (\inner pair -> f pair._1 pair._2 inner) acc pairs
+    fold f acc (Branch n _ children) = foldFrom f acc n children 0
+
+    -- Свёртка детей узла с ячейки `i`.
+    foldFrom : (K.T -> v -> b -> b) -> b -> (ω n : UInt64) -> Array n (HashMap v) -> UInt64 -> b
+    foldFrom f acc n children i = case decide (ltUInt64 i n) of
+      No _ -> acc
+      Yes _ -> foldFrom f (fold f acc (arrayIndex children i)) n children (i + 1)
 
   -- | Число пар.
   size : HashMap v -> UInt64

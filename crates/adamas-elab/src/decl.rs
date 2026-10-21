@@ -1002,21 +1002,9 @@ fn member<'a>(
                     pending.take(),
                     postulated,
                 )?;
-                // В файле и в теле модуля группа объявляется с квалификацией
-                // (`full` у члена). В теле **функтора** нет: члену нужен
-                // телескоп его параметров, а объявление группы его не несёт.
-                if let Some(enclosing) = within.filter(|it| !it.params.is_empty()) {
-                    return Err(ElabError::ModuleMember {
-                        name: Rc::from("mutual"),
-                        what: if enclosing.file {
-                            adamas_l10n::text!("decl-6")
-                        } else {
-                            adamas_l10n::text!("decl-7")
-                        },
-                        why: adamas_l10n::text!("decl-8"),
-                        span: decl.span,
-                    });
-                }
+                // Группа объявляется с квалификацией (`full` у члена) - в файле,
+                // в теле модуля и в теле функтора: члену функтора телескоп его
+                // параметров даёт `declare_mutual` (§10 вопрос 271).
                 declare_mutual(
                     signature, metas, owned, fixities, instances, warnings, within, members,
                     decl.span,
@@ -1488,7 +1476,17 @@ fn module_object(
     allowed: Option<&[Symbol]>,
 ) -> Term {
     let mut written = Vec::new();
-    for member in members {
+    // Члены `mutual` - такие же поля, как одиночные (§10 вопрос 271): без
+    // развёртки блок имени не давал, и `G.a` у `module G = F One` отвечал
+    // «у `{}` нет поля `a`».
+    let flat: Vec<&ast::Decl> = members
+        .iter()
+        .flat_map(|member| match &member.kind {
+            DeclKind::Mutual(inner) => inner.iter().collect::<Vec<_>>(),
+            _ => vec![member],
+        })
+        .collect();
+    for member in flat {
         // Метка эффекта полем не становится: поле записи типизируется типом, а
         // метка - не тип (§3.4), и `module type` объявить её нечем. Снаружи она
         // видна поднятым именем наравне с прочими членами - `Store.Ask`, - а в
@@ -3637,10 +3635,17 @@ fn declare_mutual(
                 span: member.ty.span,
             });
         }
-        let lift = metas.fresh_row();
         let mut elaborator =
             Elaborator::new(signature, metas, owned, fixities, warnings).within(within);
-        types.push(elaborator.declaration_lifted(member.ty, Mult::Many, lift.clone())?);
+        // В теле функтора член стоит под его параметрами implicit-связываниями,
+        // как одиночный (`declared_signature`): ссылка изнутри применяется к
+        // ним сама (`Elaborator::specialized`), а клаузы их связывают (§10
+        // вопрос 271). Вне функтора телескоп пуст и обёртка ничего не делает.
+        let params = elaborator.telescope(params_of(within), true, Mult::Many, Unwritten::Sort)?;
+        let lift = elaborator.shared_lift(&params);
+        types.push(elaborator.wrapped(&params, true, |it| {
+            it.declaration_lifted(member.ty, Mult::Many, lift.clone())
+        })?);
         lifts.push(lift);
     }
     // Арность считается здесь и никуда не объявляется: столько аргументов

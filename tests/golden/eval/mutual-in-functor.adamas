@@ -1,0 +1,49 @@
+-- `mutual` в теле функтора (§4.8, §10 вопрос 271).
+--
+-- Член группы стоит под параметрами функтора implicit-связываниями, как
+-- одиночный член, и ссылка на соседа изнутри применяется к ним сама. Было:
+-- блок в теле функтора отвергался «члену нужен телескоп его параметров, а
+-- объявление группы его не несёт» - граница, оставленная правкой `mutual` в
+-- модулях (лог 2026-10-20). Найдено библиотекой HAMT: обход детей узла в
+-- массиве - взаимная рекурсия `size` и `sizeFrom`, и без группы он писался
+-- функцией высшего порядка, ценой замыкания на каждый узел.
+
+module type Unit where
+  value : UInt64
+
+module One : Unit where
+  value : UInt64
+  value = 7
+
+-- Явный параметр: группа зовёт член параметра.
+module F (X : Unit) where
+  mutual
+    a : UInt64 -> UInt64
+    a n = if n == 0 then X.value else b (n - 1)
+
+    b : UInt64 -> UInt64
+    b n = a n
+
+module G = F One
+
+-- Неявный параметр-класс: дерево с детьми в массиве.
+module Tree {K : Ord} where
+  data Tree where
+    Leaf : K.T -> Tree
+    Node : (ω n : UInt64) -> Array n Tree -> Tree
+
+  mutual
+    size : Tree -> UInt64
+    size (Leaf _) = 1
+    size (Node n children) = sizeFrom n children 0
+
+    sizeFrom : (ω n : UInt64) -> Array n Tree -> UInt64 -> UInt64
+    sizeFrom n children i = case decide (ltUInt64 i n) of
+      No _ -> 0
+      Yes _ -> size (arrayIndex children i) + sizeFrom n children (i + 1)
+
+small : Tree UInt64
+small = Tree.Node 3 (arraySet (arraySet (arrayNew 3 (Tree.Leaf 1)) 1 (Tree.Leaf 2)) 2 (Tree.Node 2 (arrayNew 2 (Tree.Leaf 3))))
+
+main : (UInt64, UInt64)
+main = (G.a 3, Tree.size small)

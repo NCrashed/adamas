@@ -1,0 +1,196 @@
+-- | Хеш-таблица: устойчивый HAMT (§4.11, лог 2026-10-20).
+--
+-- Префиксное дерево по пятибитным кускам хеша. Узел - маска занятых слотов
+-- и плоский массив детей; место ребёнка - число единиц маски ниже его бита.
+-- Ключи с одинаковым полным хешем лежат списком коллизий.
+--
+-- Функции принимают карту и отдают новую. При единственном владельце путь
+-- правится на месте: `arraySet` и переиспользование ячеек решает счётчик
+-- ссылок (§5.1). При общем владении копируется путь, а не таблица.
+
+-- Число единиц в 32 младших битах (SWAR).
+ones : UInt64 -> UInt64
+ones x =
+  let a = subUInt64 x (andUInt64 (shrUInt64 x 1) 0x55555555)
+  let b = addUInt64 (andUInt64 a 0x33333333) (andUInt64 (shrUInt64 a 2) 0x33333333)
+  let c = andUInt64 (addUInt64 b (shrUInt64 b 4)) 0x0f0f0f0f
+  shrUInt64 (andUInt64 (mulUInt64 c 0x01010101) 0xffffffff) 24
+
+-- Ячейки `src` с `from` - в `dst` с `to`, `count` штук.
+copied : (ω n : UInt64) -> (ω m : UInt64) -> Array n a -> UInt64 -> Array m a -> UInt64 -> UInt64 -> Array m a
+copied n m src from dst to count =
+  if count == 0 then dst
+  else case decide (ltUInt64 from n) of
+    No _ -> dst
+    Yes _ -> case decide (ltUInt64 to m) of
+      No _ -> dst
+      Yes _ -> copied n m src (from + 1) (arraySet dst to (arrayIndex src from)) (to + 1) (count - 1)
+
+-- Массив на ячейку длиннее: `x` встаёт на место `at`.
+widened : (ω n : UInt64) -> Array n a -> UInt64 -> a -> Array (addUInt64 n 1) a
+widened n xs at x =
+  let m = addUInt64 n 1
+  let front = copied n m xs 0 (arrayNew m x) 0 at
+  copied n m xs at front (at + 1) (n - at)
+
+-- Массив на ячейку короче: место `at` убрано. Ячейка-заполнитель - первая.
+narrowed : (ω n : UInt64) -> Array n a -> UInt64 -> a -> Array (subUInt64 n 1) a
+narrowed n xs at filler =
+  let m = subUInt64 n 1
+  let front = copied n m xs 0 (arrayNew m filler) 0 at
+  copied n m xs (at + 1) front at (m - at)
+
+-- Свёртка ячеек с номера `i`.
+foldedOver : (ω n : UInt64) -> Array n a -> UInt64 -> (a -> b -> b) -> b -> b
+foldedOver n xs i f acc = case decide (ltUInt64 i n) of
+  No _ -> acc
+  Yes _ -> foldedOver n xs (i + 1) f (f (arrayIndex xs i) acc)
+
+module HashMap {K : Hashable} where
+  -- | Карта ключей `K.T` в значения `v`.
+  data HashMap (v : Type) where
+    Empty : HashMap v
+    Leaf : UInt64 -> K.T -> v -> HashMap v
+    Many : UInt64 -> List (K.T, v) -> HashMap v
+    Branch : (ω n : UInt64) -> UInt64 -> Array n (HashMap v) -> HashMap v
+
+  -- | Пустая карта.
+  empty : HashMap v
+  empty = Empty
+
+  -- | Карта из одной пары.
+  singleton : K.T -> v -> HashMap v
+  singleton k x = Leaf (hash k) k x
+
+  -- Пять бит хеша на уровне `shift`.
+  fragment : UInt64 -> UInt64 -> UInt64
+  fragment h shift = andUInt64 (shrUInt64 h shift) 31
+
+  -- Место ребёнка с битом `bit` среди занятых.
+  slot : UInt64 -> UInt64 -> UInt64
+  slot bitmap bit = ones (andUInt64 bitmap (bit - 1))
+
+  -- Пара в списке коллизий: заменить либо добавить.
+  upsert : K.T -> v -> List (K.T, v) -> List (K.T, v)
+  upsert k x Nil = [(k, x)]
+  upsert k x (Cons (k2, x2) rest) = if eq k k2 then Cons (k, x) rest else Cons (k2, x2) (upsert k x rest)
+
+  -- Пара убрана из списка коллизий.
+  without : K.T -> List (K.T, v) -> List (K.T, v)
+  without k Nil = Nil
+  without k (Cons (k2, x2) rest) = if eq k k2 then rest else Cons (k2, x2) (without k rest)
+
+  -- Два узла с разными хешами - под общей ветвью.
+  merged : UInt64 -> UInt64 -> HashMap v -> UInt64 -> HashMap v -> HashMap v
+  merged shift h1 a h2 b =
+    let i1 = fragment h1 shift
+    let i2 = fragment h2 shift
+    if i1 == i2 then Branch 1 (shlUInt64 1 i1) (arrayNew 1 (merged (shift + 5) h1 a h2 b))
+    else
+      let both = orUInt64 (shlUInt64 1 i1) (shlUInt64 1 i2)
+      if ltUInt64 i1 i2 then Branch 2 both (arraySet (arrayNew 2 a) 1 b)
+      else Branch 2 both (arraySet (arrayNew 2 b) 1 a)
+
+  insertAt : UInt64 -> UInt64 -> K.T -> v -> HashMap v -> HashMap v
+  insertAt h shift k x Empty = Leaf h k x
+  insertAt h shift k x (Leaf h2 k2 x2) =
+    if h == h2 then (if eq k k2 then Leaf h k x else Many h [(k, x), (k2, x2)])
+    else merged shift h (Leaf h k x) h2 (Leaf h2 k2 x2)
+  insertAt h shift k x (Many h2 pairs) =
+    if h == h2 then Many h (upsert k x pairs) else merged shift h (Leaf h k x) h2 (Many h2 pairs)
+  insertAt h shift k x (Branch n bitmap children) =
+    let bit = shlUInt64 1 (fragment h shift)
+    let at = slot bitmap bit
+    if andUInt64 bitmap bit == 0 then Branch (n + 1) (orUInt64 bitmap bit) (widened n children at (Leaf h k x))
+    else case decide (ltUInt64 at n) of
+      No _ -> Branch n bitmap children
+      Yes _ ->
+        -- Ребёнок вынимается из ячейки до правки: ссылка на него остаётся
+        -- одна, и путь ниже правится на месте.
+        let child : HashMap v = arrayIndex children at
+        let emptied : Array n (HashMap v) = arraySet children at Empty
+        Branch n bitmap (arraySet emptied at (insertAt h (shift + 5) k x child))
+
+  -- | Карта с парой `k`, `x`; прежнее значение `k` заменено.
+  insert : K.T -> v -> HashMap v -> HashMap v
+  insert k x m = insertAt (hash k) 0 k x m
+
+  pairLookup : K.T -> List (K.T, v) -> Option v
+  pairLookup k Nil = None
+  pairLookup k (Cons (k2, x) rest) = if eq k k2 then Some x else pairLookup k rest
+
+  lookupAt : UInt64 -> UInt64 -> K.T -> HashMap v -> Option v
+  lookupAt h shift k Empty = None
+  lookupAt h shift k (Leaf h2 k2 x) = if h == h2 && eq k k2 then Some x else None
+  lookupAt h shift k (Many h2 pairs) = if h == h2 then pairLookup k pairs else None
+  lookupAt h shift k (Branch n bitmap children) =
+    let bit = shlUInt64 1 (fragment h shift)
+    if andUInt64 bitmap bit == 0 then None
+    else
+      let at = slot bitmap bit
+      case decide (ltUInt64 at n) of
+        No _ -> None
+        Yes _ -> lookupAt h (shift + 5) k (arrayIndex children at)
+
+  -- | Значение ключа, если он есть.
+  lookup : K.T -> HashMap v -> Option v
+  lookup k m = lookupAt (hash k) 0 k m
+
+  -- | Есть ли ключ.
+  member : K.T -> HashMap v -> Bool
+  member k m = case lookup k m of
+    Some _ -> True
+    None -> False
+
+  -- Узел после удаления ребёнка из слота `at`.
+  shrunk : (ω n : UInt64) -> UInt64 -> UInt64 -> Array n (HashMap v) -> UInt64 -> HashMap v -> HashMap v
+  shrunk n bitmap bit children at child = case decide (ltUInt64 at n) of
+    No _ -> Branch n bitmap children
+    Yes _ -> case child of
+      Empty -> if n == 1 then Empty else Branch (n - 1) (xorUInt64 bitmap bit) (narrowed n children at Empty)
+      Leaf h k x -> if n == 1 then Leaf h k x else Branch n bitmap (arraySet children at (Leaf h k x))
+      Many h pairs -> if n == 1 then Many h pairs else Branch n bitmap (arraySet children at (Many h pairs))
+      Branch m inner grand -> Branch n bitmap (arraySet children at (Branch m inner grand))
+
+  deleteAt : UInt64 -> UInt64 -> K.T -> HashMap v -> HashMap v
+  deleteAt h shift k Empty = Empty
+  deleteAt h shift k (Leaf h2 k2 x) = if h == h2 && eq k k2 then Empty else Leaf h2 k2 x
+  deleteAt h shift k (Many h2 pairs) =
+    if h /= h2 then Many h2 pairs
+    else case without k pairs of
+      Cons (k3, x3) Nil -> Leaf h2 k3 x3
+      rest -> Many h2 rest
+  deleteAt h shift k (Branch n bitmap children) =
+    let bit = shlUInt64 1 (fragment h shift)
+    if andUInt64 bitmap bit == 0 then Branch n bitmap children
+    else
+      let at = slot bitmap bit
+      case decide (ltUInt64 at n) of
+        No _ -> Branch n bitmap children
+        Yes _ ->
+          let child : HashMap v = arrayIndex children at
+          let emptied : Array n (HashMap v) = arraySet children at Empty
+          shrunk n bitmap bit emptied at (deleteAt h (shift + 5) k child)
+
+  -- | Карта без ключа `k`.
+  delete : K.T -> HashMap v -> HashMap v
+  delete k m = deleteAt (hash k) 0 k m
+
+  -- | Свёртка по парам; порядок - порядок хешей, не вставки.
+  fold : (K.T -> v -> b -> b) -> b -> HashMap v -> b
+  fold f acc Empty = acc
+  fold f acc (Leaf _ k x) = f k x acc
+  fold f acc (Many _ pairs) = foldl (\inner pair -> f pair._1 pair._2 inner) acc pairs
+  fold f acc (Branch n _ children) = foldedOver n children 0 (\child inner -> fold f inner child) acc
+
+  -- | Число пар.
+  size : HashMap v -> UInt64
+  size m = fold (\_k _x n -> n + 1) 0 m
+
+  -- | Пары списком.
+  toList : HashMap v -> List (K.T, v)
+  toList m = fold (\k x rest -> Cons (k, x) rest) Nil m
+
+  -- | Карта из пар; поздняя пара с тем же ключом побеждает.
+  fromList : List (K.T, v) -> HashMap v
+  fromList pairs = foldl (\m pair -> insert pair._1 pair._2 m) empty pairs

@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+(100, 50, 166650, Some 22, None, 8, True, False)

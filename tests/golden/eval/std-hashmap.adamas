@@ -1,0 +1,38 @@
+-- `Std.HashMap` и `Std.HashSet` (§4.11, лог 2026-10-21).
+--
+-- Устойчивый HAMT над классом `Hashable` прелюдии; ключ - параметр функтора,
+-- его выводит значение, а тип пишется ключом первым: `HashMap String UInt64`.
+-- Карта по числам растёт вставкой и худеет удалением, по тексту - заменой
+-- значения при повторном ключе; множество символов считает различные буквы.
+
+import Std.HashMap (HashMap)
+import Std.HashSet (HashSet)
+
+squares : UInt64 -> UInt64 -> HashMap UInt64 UInt64 -> HashMap UInt64 UInt64
+squares i n m = if i == n then m else squares (i + 1) n (HashMap.insert i (i * i) m)
+
+odds : UInt64 -> UInt64 -> HashMap UInt64 UInt64 -> HashMap UInt64 UInt64
+odds i n m = if i == n then m else odds (i + 2) n (HashMap.delete i m)
+
+summed : UInt64 -> UInt64 -> HashMap UInt64 UInt64 -> UInt64 -> UInt64
+summed i n m acc = if i == n then acc else summed (i + 1) n m (acc + unwrapOr 0 (HashMap.lookup i m))
+
+words : HashMap String UInt64
+words = HashMap.fromList [("one", 1), ("two", 2), ("three", 3), ("two", 22)]
+
+letters : HashSet Char
+letters = HashSet.fromList (chars "hello world")
+
+main : (UInt64, UInt64, UInt64, Option UInt64, Option UInt64, UInt64, Bool, Bool)
+main =
+  let m = squares 0 100 HashMap.empty
+  let o = odds 0 100 m
+  ( HashMap.size m
+  , HashMap.size o
+  , summed 0 100 o 0
+  , HashMap.lookup "two" words
+  , HashMap.lookup "four" words
+  , HashSet.size letters
+  , HashSet.member 'w' letters
+  , HashSet.member 'z' letters
+  )

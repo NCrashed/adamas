@@ -687,6 +687,65 @@ sameText (MkString n xs) (MkString k ys) = if eqUInt64 n k then sameFrom n k xs 
 instance Eq String where
   eq x y = sameText x y
 
+-- # Хеш (§4.6, §4.11, лог 2026-10-20)
+--
+-- Нужен хеш-контейнерам (`Std.HashMap`, `Std.HashSet`). Зерно фиксировано
+-- (решение владельца 2026-10-20): порядок обхода карты один у всех трёх
+-- вычислителей и у каждого прогона. Цена названа - защиты от подбора
+-- коллизий нет; HAMT при них вырождается до списка коллизий.
+
+-- | Хеш значения: равные по `eq` обязаны давать равный хеш.
+class Hashable a when Eq a where
+  hash : a -> UInt64
+
+-- | Перемешивание 64 бит - финализатор murmur3: сдвиги, xor и умножение по
+-- модулю 2^64, без умножения 64x64->128, которого в языке нет.
+hashMixed : UInt64 -> UInt64
+hashMixed x =
+  let a = xorUInt64 x (shrUInt64 x 33)
+  let b = mulUInt64 a 0xff51afd7ed558ccd
+  let c = xorUInt64 b (shrUInt64 b 33)
+  let d = mulUInt64 c 0xc4ceb9fe1a85ec53
+  xorUInt64 d (shrUInt64 d 33)
+
+-- | Хеш пары частей - для своих инстансов: порядок частей значим.
+hashCombined : UInt64 -> UInt64 -> UInt64
+hashCombined seed h = hashMixed (xorUInt64 (mulUInt64 seed 0x100000001b3) h)
+
+instance Hashable UInt64 where
+  hash x = hashMixed x
+
+instance Hashable UInt32 where
+  hash x = hashMixed (uInt32ToUInt64 x)
+
+instance Hashable UInt16 where
+  hash x = hashMixed (uInt16ToUInt64 x)
+
+instance Hashable UInt8 where
+  hash x = hashMixed (uInt8ToUInt64 x)
+
+instance Hashable Int64 where
+  hash x = hashMixed (int64ToUInt64 x)
+
+instance Hashable Int32 where
+  hash x = hashMixed (int64ToUInt64 (int32ToInt64 x))
+
+instance Hashable Char where
+  hash c = hashMixed (uInt32ToUInt64 (charToUInt32 c))
+
+instance Hashable Bool where
+  hash False = hashMixed 0
+  hash True = hashMixed 1
+
+-- Байты текста с номера `i`, свёрнутые FNV-1a.
+hashedBytes : (ω n : UInt64) -> Array n UInt8 -> UInt64 -> UInt64 -> UInt64
+hashedBytes n bytes i acc = case decide (ltUInt64 i n) of
+  No _end -> acc
+  Yes _p -> hashedBytes n bytes (addUInt64 i 1) (mulUInt64 (xorUInt64 acc (uInt8ToUInt64 (arrayIndex bytes i))) 0x100000001b3)
+
+instance Hashable String where
+  hash (MkString n bytes) = hashMixed (hashedBytes n bytes 0 0xcbf29ce484222325)
+
 -- # Текстовое представление (§4.6)
 --
 -- `Show` derivable по §4.6, но макросов пока нет, и инстансы написаны руками:

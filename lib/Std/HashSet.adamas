@@ -1,0 +1,32 @@
+-- | Множество: HAMT с пустыми значениями (§4.11, лог 2026-10-20).
+
+import Std.HashMap (HashMap)
+
+module HashSet {K : Hashable} where
+  -- | Множество ключей `K.T`.
+  data HashSet where
+    Keys : HashMap.HashMap @K Unit -> HashSet
+
+  -- | Пустое множество.
+  empty : HashSet
+  empty = Keys HashMap.empty
+
+  -- | Множество с ключом `k`.
+  insert : K.T -> HashSet -> HashSet
+  insert k (Keys m) = Keys (HashMap.insert k MkUnit m)
+
+  -- | Множество без ключа `k`.
+  delete : K.T -> HashSet -> HashSet
+  delete k (Keys m) = Keys (HashMap.delete k m)
+
+  -- | Есть ли ключ.
+  member : K.T -> HashSet -> Bool
+  member k (Keys m) = HashMap.member k m
+
+  -- | Число ключей.
+  size : HashSet -> UInt64
+  size (Keys m) = HashMap.size m
+
+  -- | Множество из списка.
+  fromList : List K.T -> HashSet
+  fromList xs = foldl (\s k -> insert k s) empty xs

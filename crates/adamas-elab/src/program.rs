@@ -145,6 +145,14 @@ const PRELUDE_TEXT: &str = include_str!("../../../lib/Prelude.adamas");
 /// программы, и свой файл проекта сильнее вшитого.
 const STANDARD: &[(&str, &str)] = &[
     ("Std.Except", include_str!("../../../lib/Std/Except.adamas")),
+    (
+        "Std.HashMap",
+        include_str!("../../../lib/Std/HashMap.adamas"),
+    ),
+    (
+        "Std.HashSet",
+        include_str!("../../../lib/Std/HashSet.adamas"),
+    ),
     ("Std.IO", include_str!("../../../lib/Std/IO.adamas")),
     ("Std.Stream", include_str!("../../../lib/Std/Stream.adamas")),
     ("Std.Text", include_str!("../../../lib/Std/Text.adamas")),

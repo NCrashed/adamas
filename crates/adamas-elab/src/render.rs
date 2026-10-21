@@ -331,7 +331,7 @@ fn clip(source: &str, column: usize, width: usize) -> (String, usize, usize) {
         return (
             source.to_owned(),
             column,
-            width.min(chars.len() + 1 - column),
+            width.min((chars.len() + 1).saturating_sub(column)),
         );
     }
     let start = column.saturating_sub(WINDOW / 2).min(chars.len() - WINDOW);
@@ -344,8 +344,14 @@ fn clip(source: &str, column: usize, width: usize) -> (String, usize, usize) {
     if end < chars.len() {
         clipped.push_str("...");
     }
-    let shift = if start > 0 { start - 3 } else { 0 };
-    (clipped, column - shift, width.min(end + 1 - column))
+    // Колонка в обрезанной строке: впереди `...`, если окно сдвинуто. Сдвиг
+    // меньше трёх давал вычитание ниже нуля и падение печати отказа.
+    let shown = if start > 0 {
+        (column + 3).saturating_sub(start)
+    } else {
+        column
+    };
+    (clipped, shown, width.min((end + 1).saturating_sub(column)))
 }
 
 /// Имена телескопа и локальные номера дырок для одного сообщения.

@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: long-line-near-start.adamas:9:53: несовпадение типов: ожидался `UInt64`, получен `Char`
+  ...in =                                             'x' -- хвост строки длиннее окна печати: оно обреза...
+                                                      ^^^
